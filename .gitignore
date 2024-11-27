@@ -29,3 +29,4 @@ sdl2/*
 *.exe
 *.out
 *.app
+.vscode

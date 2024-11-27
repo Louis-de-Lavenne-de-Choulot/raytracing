@@ -37,10 +37,10 @@ std::tuple<double, BaseObject *> Renderer::ClosestIntersection(Vector3 *rayOrigi
         }
         if (returnFirstFound && closestObject != nullptr)
         {
-            return std::tuple(closestDistance, closestObject);
+            return std::tuple<double, BaseObject*>(closestDistance, closestObject);
         }
     }
-    return std::tuple(closestDistance, closestObject);
+    return std::tuple<double, BaseObject*>(closestDistance, closestObject);
 }
 
 Vector3 *Renderer::ReflectRay(Vector3 *point, Vector3 *normal)

@@ -22,9 +22,9 @@ std::tuple<double, double> Sphere::IntersectRaySphere(Vector3 *rayOrigin, Vector
     double discriminant = b * b - 4 * a * c;
     if (discriminant < 0)
     {
-        return std::tuple(DBL_MAX, DBL_MAX);
+        return std::tuple<double, double>(DBL_MAX, DBL_MAX);
     }
     double t0 = (-b + sqrt(discriminant)) / (2 * a);
     double t1 = (-b - sqrt(discriminant)) / (2 * a);
-    return std::tuple(t0, t1);
+    return std::tuple<double, double>(t0, t1);
 }
