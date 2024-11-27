@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>3D Maze Engine with Human Model</title>
+    <style>
+        canvas {
+            border: 1px solid black;
+            background: #000;
+        }
+
+        body {
+            margin: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            background: #333;
+            overflow: hidden;
+        }
+
+        * {
+            cursor: none;
+        }
+    </style>
+</head>
+
+<body>
+    <canvas id="canvas"></canvas>
+    <script>
+        // Utility Classes
+
+        /**
+ * Vector 3
+ * @class
+ */
+        class Vector3 {
+            /**
+ * Creates an instance of Vector3.
+ * @param {int} x - x axis,
+ * @param {int} y - y axis,
+ * @param {int} z - z axis,
+ */
+            constructor(x, y, z) {
+                this.x = x;
+                this.y = y;
+                this.z = z;
+            }
+
+            add(v) {
+                return new Vector3(
+                    this.x + v.x,
+                    this.y + v.y,
+                    this.z + v.z
+                );
+            }
+
+            addScalar(num) {
+                return new Vector3(
+                    this.x + num,
+                    this.y + num,
+                    this.z + num
+                );
+            }
+
+            subtract(v) {
+                return new Vector3(
+                    this.x - v.x,
+                    this.y - v.y,
+                    this.z - v.z
+                );
+            }
+
+            multiply(v) {
+                return new Vector3(
+                    this.x * v.x,
+                    this.y * v.y,
+                    this.z * v.z
+                );
+            }
+
+            multiplyScalar(num) {
+                return new Vector3(
+                    this.x * num,
+                    this.y * num,
+                    this.z * num
+                );
+            }
+
+            cross(v) {
+                return new Vector3(
+                    this.y * v.z - this.z * v.y,
+                    this.z * v.x - this.x * v.z,
+                    this.x * v.y - this.y * v.x
+                );
+            }
+
+            dot(v) {
+                return this.x * v.x +
+                    this.y * v.y +
+                    this.z * v.z;
+            }
+
+            len() {
+                return Math.sqrt(
+                    this.x * this.x +
+                    this.y * this.y +
+                    this.z * this.z
+                );
+            }
+
+            normalize() {
+                let len = this.len();
+                return new Vector3(
+                    this.x / len,
+                    this.y / len,
+                    this.z / len
+                );
+            }
+
+            rotate(quaternion) {
+                // Step 1: Create a quaternion from the vector
+                let v_q = new Quaternion(this.x, this.y, this.z, 0)
+
+                // Step 2: Calculate the conjugate of the quaternion
+                let q_conjugate = quaternion.conjugate()
+
+                // Step 3: Apply the rotation
+                let rotated_q = quaternion.multiplyQuaternion(v_q).multiplyQuaternion(q_conjugate);
+
+                // Step 4: Extract the rotated vector from the resulting quaternion
+                return new Vector3(rotated_q.x, rotated_q.y, rotated_q.z)
+            }
+        }
+
+        /**
+        * Quaternion
+        * @class
+        */
+        class Quaternion {
+            /**
+            * Creates an instance of Quaternion.
+            * @param {int} x - x rotation axis,
+            * @param {int} y - y rotation axis,
+            * @param {int} z - z rotation axis,
+            * @param {int} w - angle in radian,
+            */
+            constructor(x, y, z, w) {
+                //Unity Way, three imaginary rotation angle based on axes and w radian
+                this.x = x;
+                this.y = y;
+                this.z = z;
+                this.w = w;
+            }
+
+            eulerAngle() {
+                //rad to deg
+                return w * 180 / Math.PI;
+            }
+
+            conjugate() {
+                return new Quaternion(-this.x, -this.y, -this.z, this.w);
+            }
+
+            multiply(v) {
+                return new Vector3(this.x * v.x, this.y * v.y, this.z * v.z);
+            }
+
+            multiplyQuaternion(v) {
+                return new Quaternion(this.x * v.x, this.y * v.y, this.z * v.z, this.w * v.w);
+            }
+        }
+
+        /**
+        * Color
+        * @class
+        */
+        class Color {
+            /**
+            * Creates an instance of Color.
+            * @param {int} r - red 0-255,
+            * @param {int} g - green 0-255,
+            * @param {int} b - blue 0-255,
+            * @param {float} a - alpha 0-1,
+            */
+            constructor(r, g, b, a) {
+                this.r = r;
+                this.g = g;
+                this.b = b;
+                this.a = a ?? 1;
+            }
+
+            add(c) {
+                const r = Math.min(this.r + c.r, 255);
+                const g = Math.min(this.g + c.g, 255);
+                const b = Math.min(this.b + c.b, 255);
+                const a = Math.min(this.a + c.a, 1);
+                return new Color(r, g, b, a);
+            }
+
+            blend(c) {
+                const r = Math.round((this.r + c.r) / 2);
+                const g = Math.round((this.g + c.g) / 2);
+                const b = Math.round((this.b + c.b) / 2);
+                const a = Math.round((this.a + c.a) / 2, 1);
+                return new Color(r, g, b, a);
+            }
+
+            multiply(num) {
+                return new Color(
+                    this.r * num,
+                    this.g * num,
+                    this.b * num
+                );
+            }
+
+            toString() {
+                return "rgba(" +
+                    this.r +
+                    "," +
+                    this.g +
+                    "," +
+                    this.b +
+                    "," +
+                    this.a +
+                    ")";
+            }
+        }
+
+        /**
+        * Scene
+        * @class
+        */
+        class Scene {
+            /**
+            * Creates an instance of Quaternion.
+            * @param {Camera} cameras - array of cameras, first one will be set as current by default
+            */
+            constructor(cameras) {
+                this.objects = [];
+                this.lights = [];
+                this.currentCamera = cameras[0];
+                this.cameras = cameras;
+            }
+        }
+
+        /**
+        * GameObject
+        * @class
+        */
+        class GameObject {
+            /**
+            * Creates an instance of Quaternion.
+            * @param {Vector3} position - position in space
+            * @param {Quaternion} rotation - rotation in space,
+            * @param {Material} material - material of object
+            */
+            constructor(position, rotation, type, material) {
+                this.position = position ?? new Vector3(0, 0, 0);
+                this.rotation = rotation ?? new Quaternion(0, 0, 0, 0);
+                this.type = type ?? ObjectType.NONE;
+                this.material = material ?? new Material();
+            }
+        }
+
+        /**
+        * Material
+        * @class
+        */
+        class Material {
+            /**
+            * @param {Color} color - Color,
+            * @param {int} specular - specular reflection, smaller = shinier?
+            * @param {int} reflectiveness - reflectiveness 0-1
+            */
+            constructor(color, specular, reflectiveness) {
+                this.color = color ?? new Color(125, 125, 125)
+                this.specular = specular ?? -1;
+                this.reflectiveness = reflectiveness ?? 0;
+            }
+        }
+
+        /**
+        * Ambient Light -> a light rendered on everything
+        * @class
+        */
+        class AmbientLight {
+            /**
+                    * Creates an instance of AmbientLight.
+                    * @param {float} i - light intensity 0-1,
+                    * @param {Color} - Emitted Color,
+                    */
+            constructor(i, color) {
+                this.i = i;
+                this.color = color;
+                this.type = ObjectType.AMBIENT_LIGHT;
+            }
+        }
+
+        /**
+        * Point Light -> a light that emits all around it's position
+        * @class
+        */
+        class PointLight {
+            /**
+            * Creates an instance of PointLight.
+            * @param {Vector3} position - position in space
+            * @param {Quaternion} rotation - rotation in space,
+            * @param {float} i - light intensity 0-1,
+            * @param {Color} - Emitted Color,
+            */
+            constructor(position, rotation, i, color) {
+                this.position = position;
+                this.rotation = rotation ?? new Quaternion(0, 0, 0, 0);
+                this.i = i;
+                this.color = color;
+                this.type = ObjectType.POINT_LIGHT;
+            }
+        }
+
+
+        /**
+        * Directional Light -> a light that affects a particular direction
+        * @class
+        */
+        class DirectionalLight {
+            /**
+            * Creates an instance of PointLight.
+            * @param {Vector3} direction - direction in space
+            * @param {float} i - light intensity 0-1,
+            * @param {Color} - Emitted Color,
+            */
+            constructor(direction, i, color) {
+                this.direction = direction
+                this.i = i;
+                this.color = color;
+                this.type = ObjectType.DIRECTIONAL_LIGHT;
+            }
+        }
+
+        /**
+        * Camera
+        * @class
+        */
+        class Camera extends GameObject {
+            /**
+            * Creates an instance of Quaternion.
+            * @param {Vector3} position - position in space
+            * @param {Quaternion} rotation - rotation in space,
+            */
+            constructor(position, rotation) {
+                super(position, rotation, ObjectType.CAMERA);
+            }
+        }
+
+        
+        /**
+        * Rectangle
+        * @class
+        */
+        class Rectangle extends GameObject {
+            /**
+            * @param {Vector3} position - position in space
+            * @param {Quaternion} rotation - rotation in space,
+            */
+            constructor(position, rotation, size, color) {
+                super(position, rotation, ObjectType.RECTANGLE, color);
+                this.length = size ?? 1;
+                this.height = size ?? 1;
+            }
+        }
+
+        /**
+        * Sphere
+        * @class
+        */
+        class Sphere extends GameObject {
+            /**
+            * @param {Vector3} position - position in space
+            * @param {Quaternion} rotation - rotation in space,
+            */
+            constructor(position, rotation, size, color) {
+                super(position, rotation, ObjectType.SPHERE, color);
+                this.size = size ?? 1;
+            }
+
+            radius() {
+                return this.size / 2;
+            }
+
+            IntersectRaySphere(Vo, Vd, Dvd = Vd.dot(Vd), sphere) {
+                let r = sphere.radius();
+                // Vector Center Origin
+                let Vco = Vo.subtract(sphere.position);
+                // Quadratic Equation
+                let a = Dvd;
+                let b = 2 * Vco.dot(Vd);
+                let c = Vco.dot(Vco) - r * r;
+                //b² - 4ac
+                let discriminant = b * b - 4 * a * c;
+                // If discriminant is below 0, no collision ray - sphere
+                if (discriminant < 0) {
+                    return { t1: Infinity, t2: Infinity }
+                }
+
+                let t1 = (-b + Math.sqrt(discriminant)) / (2 * a);
+                let t2 = (-b - Math.sqrt(discriminant)) / (2 * a);
+
+                return { t1, t2 };
+            }
+        }
+
+        // Utility constants
+        const ObjectType = {
+            NONE: 0,
+            AMBIENT_LIGHT: 1,
+            POINT_LIGHT: 2,
+            DIRECTIONAL_LIGHT: 3,
+            CAMERA: 4,
+            SPHERE: 5,
+            RECTANGLE: 6
+        }
+
+        /*? INFO :
+            1. We will always declare vectors V + letter -> Vx
+            2. In comments :
+               C is canvas (alone, Cw, Ch)
+               O is camera (alone)
+               V (alone / Vw / Vh) is viewport
+        */
+
+        // CANVAS Setup (C -> Canvas)
+        const Canvas = document.getElementById('canvas');
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+        const Ctx = canvas.getContext('2d');
+        const Cw = 650;// canvas.width;
+        const Ch = 650;//canvas.height;
+        // VIEWPORT Setup (V -> Viewport)
+        const Viewport = { w: 1, h: 1 }
+        const DistToViewport = 1;
+        // CAMERA Setup (O -> Origin)
+        const CameraView = new Camera(undefined, new Quaternion(1, 1, 1, 1))
+        // RAYCAST Setup
+        const MaxRayDist = Infinity // will not render if farther
+        const MinRayDist = 0 // will not render if closer
+        const MaxReflectionDepth = 3;
+        // SCENE Setup
+        const MainScene = new Scene([CameraView])
+
+        function init() {
+
+            MainScene.objects.push(
+                new Sphere(
+                    new Vector3(0, -1, 3),
+                    undefined,
+                    2,
+                    new Material(new Color(255, 0, 0), 500, 0.2)
+                ),
+                new Sphere(
+                    new Vector3(2, 0, 4),
+                    undefined,
+                    2,
+                    new Material(new Color(0, 0, 255), 500, 0.3)
+                ),
+                new Sphere(
+                    new Vector3(-2, 0, 4),
+                    undefined,
+                    2,
+                    new Material(new Color(0, 255, 0), 10, 0.4)
+                ),
+                new Sphere(
+                    new Vector3(0, -5001, 0),
+                    undefined,
+                    10000,
+                    new Material(new Color(255, 255, 0), 1000, 0.5)
+                )
+                )
+
+
+            MainScene.lights.push(
+                new AmbientLight(0.2, new Color(255, 255, 255)),
+
+                new PointLight(new Vector3(5, 0, 0), undefined, 0.6, new Color(255, 255, 255)),
+
+                new DirectionalLight(new Vector3(1, 4, 4), 0.2, new Color(255, 255, 255)));
+
+
+            // gameLoop();
+            setInterval(gameLoop, 1500);
+        }
+
+
+
+
+
+        //--------------------------------- ENGINE ---------------------------------
+        function gameLoop() {
+
+            // Record the start time
+            const startTime = performance.now();
+            render();
+            // Record the end time
+            const endTime = performance.now();
+
+            // Calculate the time passed
+            const timePassed = endTime - startTime;
+
+            console.log(`Time passed: ${timePassed} milliseconds`);
+        }
+
+        function render() {
+            // Cw/2 because we want our origin to be the middle of Canvas
+            const cw2 = Cw / 2;
+            const ch2 = Ch / 2;
+            for (let x = -cw2; x < cw2; x++) {
+                for (let y = -ch2; y < ch2; y++) {
+                    // Scale Vector of point in viewport (2D to 3D)
+                    let Vd = CanvasToViewPort(x, y);
+                    color = TraceRay(MainScene.currentCamera.position, Vd, Vd.dot(Vd), 0, 1);
+                    Ctx.fillStyle = color.toString();
+                    Ctx.fillRect(x + cw2, y + ch2, 1, 1);
+                }
+            }
+
+        }
+
+        function CanvasToViewPort(x, y) {
+            return new Vector3(
+                x * Viewport.w / (Cw), // x
+                -y * Viewport.h / (Ch), // y
+                DistToViewport         // z
+            )
+        }
+
+        //Vd -> Vector direction (viewport scaling)
+        function TraceRay(Vo, Vd, Dvd = Vd.dot(Vd), recursion_depth, minDist) {
+            let { closestFound, closestObject } = ClosestIntersection(Vo, Vd, Dvd, minDist);
+
+            // Compute Lightning on point
+            if (!closestObject) {
+                return new Color(0, 0, 0, 1);
+            }
+
+            let material = closestObject.material;
+            //vector point
+            let Vp = Vo.add(Vd.multiplyScalar(closestFound));
+
+            //vector normalized
+            let Vn = Vp.subtract(closestObject.position).normalize();
+
+            let localColor = ComputeLightning(Vp, Vn, Vd.multiplyScalar(-1), material);
+
+            //if max reflec depth reached or object is not reflective then return
+            let reflecVal = closestObject.material.reflectiveness;
+            if (recursion_depth == MaxReflectionDepth || reflecVal <= 0) {
+                return localColor;
+            }
+
+            let Vr = ReflectRay(Vd.multiplyScalar(-1), Vn);
+            let reflectedColor = TraceRay(Vp, Vr, Vr.dot(Vr), recursion_depth + 1, minDist);
+            // highest reflection val is 1, local color should be ignored if another object deeper takes control
+            return localColor.multiply(1 - reflecVal).add(reflectedColor.multiply(reflecVal));
+        }
+
+        function ComputeLightning(Vp, Vn, Vv, material) {
+            let i = 0;
+            MainScene.lights.forEach(light => {
+                //vector light
+                let Vl;
+                let max = Infinity;
+                switch (light.type) {
+                    case ObjectType.AMBIENT_LIGHT:
+                        i += light.i;
+                        break;
+                    case ObjectType.POINT_LIGHT:
+                        Vl = light.position.subtract(Vp).normalize();
+                        max = Vl.len();
+                        break;
+                    case ObjectType.DIRECTIONAL_LIGHT:
+                        Vl = light.direction;
+                        break;
+                    default:
+                        break;
+                }
+
+
+                if (Vl) {
+
+                    // Shadow checking
+                    let { closestFound, obj } = ClosestIntersection(Vp, Vl, Vl.dot(Vl), 0.001, max, true);
+                    if (closestFound < max) {
+                        return; // Point is in shadow; skip lighting calculations
+                    }
+
+                    //diffuse light
+                    let Dnl = Vn.dot(Vl);
+                    if (Dnl > 0) {
+                        i += light.i * Dnl / (Vn.len() * Vl.len());
+                    }
+
+                    //specular
+                    if (material.specular != -1) {
+                        let Vr = ReflectRay(Vl, Vn);
+                        let Drv = Vr.dot(Vv);
+                        if (Drv > 0) {
+                            i += light.i * Math.pow(Drv / (Vr.len() * Vv.len()), material.specular);
+                        }
+                    }
+                }
+
+            });
+            return material.color.multiply(i);
+        }
+
+        function ReflectRay(Vr, Vn) {
+            return Vn.multiplyScalar(2).multiplyScalar(Vn.dot(Vr)).subtract(Vr);
+        }
+
+        function ClosestIntersection(Vo, Vd, Dvd = Vd.dot(Vd), minDist = MinRayDist, maxDist = MaxRayDist, returnFirstFound = false) {
+            //closest object distance
+            let closestFound = Infinity
+            //only spheres... for now
+            let closestObject;
+            for (let i = 0; i < MainScene.objects.length; i++) {
+                obj = MainScene.objects[i];
+                switch (obj.type) {
+                    case ObjectType.SPHERE:
+                        let { t1, t2 } = obj.IntersectRaySphere(Vo, Vd, Dvd, obj);
+                        if (t1 > minDist && t1 < maxDist && t1 < closestFound) {
+                            closestFound = t1;
+                            closestObject = obj;
+                        }
+                        if (t2 > minDist && t2 < maxDist && t2 < closestFound) {
+                            closestFound = t2;
+                            closestObject = obj;
+                        }
+                        break;
+                        case ObjectType.RECTANGLE:
+                        let res;//TODO
+                        if (res != undefined){
+                            closestFound = res;
+                            closestObject = obj;
+                        }
+                    default:
+                        break;
+                }
+                if (returnFirstFound && closestObject) {
+                    return { closestFound, closestObject };
+                }
+            };
+            return { closestFound, closestObject };
+        }
+
+        init();
+    </script>
+</body>
+
+</html>
