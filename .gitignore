@@ -6,11 +6,10 @@
 *.lo
 *.o
 *.obj
-
 # Precompiled Headers
 *.gch
 *.pch
-
+sdl2/*
 # Compiled Dynamic libraries
 *.so
 *.dylib
