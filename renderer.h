@@ -18,7 +18,7 @@ double d = 0;
     
 
     Vector3* CanvasToViewport(int x, int y);
-    std::tuple<double, BaseObject*> ClosestIntersection(Vector3 *rayOrigin, Vector3 *rayDirection, double dotDD, double minDistance = 0, double maxDistance = DBL_MAX, bool returnFirstFound = false);
+    std::pair<double, BaseObject*> ClosestIntersection(Vector3 *rayOrigin, Vector3 *rayDirection, double dotDD, double minDistance = 0, double maxDistance = DBL_MAX, bool returnFirstFound = false);
     Vector3* ReflectRay(Vector3* point, Vector3* normal);
     Color* ComputeLightning(Vector3* point, Vector3* normal, Vector3* viewDirection, Material* material);
     Color* TraceRay(Vector3 *rayOrigin, Vector3 *rayDirection, double dotDD, int depth, int minDistance);

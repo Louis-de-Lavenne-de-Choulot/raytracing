@@ -30,3 +30,5 @@ sdl2/*
 *.out
 *.app
 .vscode
+
+/sdl2

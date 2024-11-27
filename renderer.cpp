@@ -15,7 +15,7 @@ Vector3 *Renderer::CanvasToViewport(int x, int y)
                        sceneManager->viewportDistance);
 }
 
-std::tuple<double, BaseObject *> Renderer::ClosestIntersection(Vector3 *rayOrigin, Vector3 *rayDirection, double dotDD, double minDistance, double maxDistance, bool returnFirstFound)
+std::pair<double, BaseObject *> Renderer::ClosestIntersection(Vector3 *rayOrigin, Vector3 *rayDirection, double dotDD, double minDistance, double maxDistance, bool returnFirstFound)
 {
     double closestDistance = DBL_MAX;
     BaseObject *closestObject = nullptr;
@@ -23,24 +23,24 @@ std::tuple<double, BaseObject *> Renderer::ClosestIntersection(Vector3 *rayOrigi
     {
         if (object->type == SPHERE)
         {
-            std::tuple<double, double> intersection = ((Sphere *)object)->IntersectRaySphere(rayOrigin, rayDirection, dotDD);
-            if (std::get<0>(intersection) < closestDistance && std::get<0>(intersection) > minDistance && std::get<0>(intersection) < maxDistance)
+            std::pair<double, double> intersection = ((Sphere *)object)->IntersectRaySphere(rayOrigin, rayDirection, dotDD);
+            if (intersection.first < closestDistance && intersection.first > minDistance && intersection.first < maxDistance)
             {
-                closestDistance = std::get<0>(intersection);
+                closestDistance = intersection.first;
                 closestObject = object;
             }
-            if (std::get<1>(intersection) < closestDistance && std::get<1>(intersection) > minDistance && std::get<1>(intersection) < maxDistance)
+            if (intersection.second < closestDistance && intersection.second > minDistance && intersection.second < maxDistance)
             {
-                closestDistance = std::get<1>(intersection);
+                closestDistance = intersection.second;
                 closestObject = object;
             }
         }
         if (returnFirstFound && closestObject != nullptr)
         {
-            return std::tuple<double, BaseObject*>(closestDistance, closestObject);
+            return std::pair<double, BaseObject*>(closestDistance, closestObject);
         }
     }
-    return std::tuple<double, BaseObject*>(closestDistance, closestObject);
+    return std::pair<double, BaseObject*>(closestDistance, closestObject);
 }
 
 Vector3 *Renderer::ReflectRay(Vector3 *point, Vector3 *normal)
@@ -75,8 +75,8 @@ Color *Renderer::ComputeLightning(Vector3 *point, Vector3 *normal, Vector3 *view
         {
             continue;
         }
-        std::tuple<double, BaseObject *> intersection = ClosestIntersection(point, lightDirection, lightDirection->dot(lightDirection), 0.001, maxDistance, true);
-        if (std::get<0>(intersection) < maxDistance)
+        std::pair<double, BaseObject *> intersection = ClosestIntersection(point, lightDirection, lightDirection->dot(lightDirection), 0.001, maxDistance, true);
+        if (intersection.first < maxDistance)
         {
             continue;
         }
@@ -105,14 +105,14 @@ Color *Renderer::ComputeLightning(Vector3 *point, Vector3 *normal, Vector3 *view
 Color *Renderer::TraceRay(Vector3 *rayOrigin, Vector3 *rayDirection, double dotDD, int depth, int minDistance)
 {
 
-    std::tuple<double, BaseObject *> intersection = ClosestIntersection(rayOrigin, rayDirection, dotDD, minDistance);
+    std::pair<double, BaseObject *> intersection = ClosestIntersection(rayOrigin, rayDirection, dotDD, minDistance);
     if (std::get<1>(intersection) == nullptr)
     {
         return new Color(0, 0, 0, 255);
     }
     Material *material = std::get<1>(intersection)->material;
 
-    Vector3 *point = new Vector3(*rayOrigin + *rayDirection * std::get<0>(intersection));
+    Vector3 *point = new Vector3(*rayOrigin + *rayDirection * intersection.first);
     Vector3 *normal = new Vector3((*point - *std::get<1>(intersection)->position).normalize());
     Color *color = ComputeLightning(point, normal, new Vector3(*rayDirection * -1), std::get<1>(intersection)->material);
     if (depth == sceneManager->maxRecursionDepth || material->reflectivity <= 0)

@@ -1,5 +1,6 @@
 #include "color.h"
-
+#include<algorithm>
+using namespace std;
 Color::Color(double valr, double valg, double valb, double vala)
 {
     r = valr;
@@ -10,12 +11,12 @@ Color::Color(double valr, double valg, double valb, double vala)
 
 Color Color::operator+(const Color &c)
 {
-    return Color(r + c.r, g + c.g, b + c.b, a + c.a);
+    return Color(std::min(r + c.r, 255.), std::min(g + c.g, 255.), std::min(b + c.b, 255.), std::min(a + c.a, 255.));
 }
 
 Color Color::operator+(const double val)
 {
-    return Color(r + val, g + val, b + val, a + val);
+    return Color(std::min(r + val, 255.), std::min(g + val, 255.), std::min(b + val, 255.), std::min(a + val, 255.));
 }
 
 Color &Color::operator+=(const Color &c)
