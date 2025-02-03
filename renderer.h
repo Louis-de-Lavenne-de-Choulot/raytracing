@@ -22,10 +22,13 @@ double d = 0;
     Vector3* ReflectRay(Vector3* point, Vector3* normal);
     Color* ComputeLightning(Vector3* point, Vector3* normal, Vector3* viewDirection, Material* material);
     Color* TraceRay(Vector3 *rayOrigin, Vector3 *rayDirection, double dotDD, int depth, int minDistance);
+    std::vector<double> Interpolate(double i0, double d0, double i1, double d1);
 public:
     Renderer(SceneManager *sceneManager);
 
     void render();
+    void DrawWireFrameTriangle(Vector3 *P0, Vector3 *P1, Vector3 *P2, Color *color);
+    void DrawLine(Vector3 *P0, Vector3 *P1, Color *color);
 
     void cleanup();
 };

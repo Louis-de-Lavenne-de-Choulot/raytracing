@@ -37,10 +37,10 @@ std::pair<double, BaseObject *> Renderer::ClosestIntersection(Vector3 *rayOrigin
         }
         if (returnFirstFound && closestObject != nullptr)
         {
-            return std::pair<double, BaseObject*>(closestDistance, closestObject);
+            return std::pair<double, BaseObject *>(closestDistance, closestObject);
         }
     }
-    return std::pair<double, BaseObject*>(closestDistance, closestObject);
+    return std::pair<double, BaseObject *>(closestDistance, closestObject);
 }
 
 Vector3 *Renderer::ReflectRay(Vector3 *point, Vector3 *normal)
@@ -121,9 +121,26 @@ Color *Renderer::TraceRay(Vector3 *rayOrigin, Vector3 *rayDirection, double dotD
     }
     Vector3 *reflectedRay = ReflectRay(new Vector3(*rayDirection * -1), normal);
     Color *reflectedColor = TraceRay(point, reflectedRay, reflectedRay->dot(reflectedRay), depth + 1, minDistance);
-    
-    Color* returnColor = new Color(*color * (1 - material->reflectivity) + *reflectedColor * material->reflectivity);
+
+    Color *returnColor = new Color(*color * (1 - material->reflectivity) + *reflectedColor * material->reflectivity);
     return returnColor;
+}
+
+std::vector<double> Renderer::Interpolate(double i0, double d0, double i1, double d1)
+{
+    if (i0 == i1)
+    {
+        return {d0};
+    }
+    std::vector<double> values = {};
+    double a = (d1 - d0) / (i1 - i0);
+    double d = d0;
+    for (int x = i0; x < i1; x++)
+    {
+        values.push_back(d);
+        d += a;
+    }
+    return values;
 }
 
 Renderer::Renderer(SceneManager *sceneManager)
@@ -183,6 +200,51 @@ void Renderer::render()
         }
     }
     SDL_RenderPresent(renderer);
+}
+
+
+void Renderer::DrawWireFrameTriangle(Vector3 *P0, Vector3 *P1, Vector3 *P2, Color *color)
+{
+    DrawLine(P0, P1, color);
+    DrawLine(P0, P2, color);
+    DrawLine(P1, P2, color);
+    SDL_RenderPresent(renderer);
+}
+
+void Renderer::DrawLine(Vector3 *P0, Vector3 *P1, Color *color)
+{
+    const double cw2 = sceneManager->centeredCW;
+    const double ch2 = sceneManager->centeredCH;
+
+    if (abs(P1->x - P0->x) > abs(P1->y - P0->y))
+    {
+        // horizontal because x > y
+
+        if (P0->x > P1->x)
+        {
+            std::swap(P0, P1);
+        }
+        std::vector<double> ys = Interpolate(P0->x, P0->y, P1->x, P1->y);
+        for (int x = P0->x; x < P1->x; x++)
+        {
+            SDL_SetRenderDrawColor(renderer, color->r, color->g, color->b, color->a);
+            SDL_RenderDrawPoint(renderer, x + cw2, ch2 - ys[x - P0->x]);
+        }
+    }
+    else
+    {
+        // vertical because x < y
+        if (P0->y > P1->y)
+        {
+            std::swap(P0, P1);
+        }
+        std::vector<double> xs = Interpolate(P0->y, P0->x, P1->y, P1->x);
+        for (int y = P0->y; y < P1->y; y++)
+        {
+            SDL_SetRenderDrawColor(renderer, color->r, color->g, color->b, color->a);
+            SDL_RenderDrawPoint(renderer, xs[y - P0->y] + cw2, ch2 - y);
+        }
+    }
 }
 
 void Renderer::cleanup()

@@ -9,10 +9,15 @@ all: $(EXECUTABLE)
 
 # Link the executable
 $(EXECUTABLE): $(SOURCES)
+	make clean
 	$(CXX) $(SOURCES) -o $@ $(CXXFLAGS)
-	mkdir bin
+	mkdir -p bin
 	mv $(EXECUTABLE) bin/$(EXECUTABLE)
 	cp sdl2/bin/SDL2.dll bin/SDL2.dll
+
+test:
+	make all
+	make clean
 
 # Clean up build artifacts
 clean:

@@ -9,6 +9,9 @@ struct SceneManager
 {
     int canvasWidth = 650;
     int canvasHeight = 650;
+    //centered Canvas Width & Height
+    double centeredCW = canvasWidth/2;
+    double centeredCH = canvasWidth/2;
     double viewportWidth = 1.0;
     double viewportHeight = 1.0;
     double viewportDistance = 1.0;
