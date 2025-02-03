@@ -3,7 +3,7 @@
 #include "renderer.h"
 #include "scenemanager.h"
 
-#include <SDL.h>
+#include <SDL2/SDL.h>
 #include <cfloat>
 #include <iostream>
 

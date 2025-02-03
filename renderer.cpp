@@ -5,7 +5,7 @@
 #include "directionallight.h"
 #include "scenemanager.h"
 #include <cfloat>
-#include <SDL.h>
+#include <SDL2/SDL.h>
 #include <cmath>
 
 Vector3 *Renderer::CanvasToViewport(int x, int y)
