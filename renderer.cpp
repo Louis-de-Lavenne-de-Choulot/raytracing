@@ -8,11 +8,17 @@
 #include <SDL2/SDL.h>
 #include <cmath>
 
-Vector3 *Renderer::CanvasToViewport(int x, int y)
+Vector3 *Renderer::CanvasToViewport(double x, double y)
 {
-    return new Vector3(x * sceneManager->viewportWidth / sceneManager->canvasWidth,
-                       -y * sceneManager->viewportHeight / sceneManager->canvasHeight,
-                       sceneManager->viewportDistance);
+    return new Vector3(x * sceneManager->canvasWidth / sceneManager->viewportWidth,
+                         y * sceneManager->canvasHeight / sceneManager->viewportHeight, 0);
+}
+
+Vector3 *Renderer::ProjectVertex(Vector3 *v){
+    return CanvasToViewport(
+        v->x * sceneManager->viewportDistance / v->z,
+        v->y * sceneManager->viewportDistance / v->z
+    );
 }
 
 std::pair<double, BaseObject *> Renderer::ClosestIntersection(Vector3 *rayOrigin, Vector3 *rayDirection, double dotDD, double minDistance, double maxDistance, bool returnFirstFound)
@@ -173,6 +179,8 @@ Renderer::Renderer(SceneManager *sceneManager)
         SDL_Quit();
         return;
     }
+    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+    SDL_RenderClear(renderer);
 }
 
 void Renderer::render()
@@ -180,42 +188,86 @@ void Renderer::render()
     // Clear the screen
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
     SDL_RenderClear(renderer);
+    //TODO implement foreach object
+    SDL_RenderPresent(renderer);
+}
 
-    const double cw2 = sceneManager->canvasWidth / 2;
-    const double ch2 = sceneManager->canvasHeight / 2;
 
-    for (int x = -cw2; x < cw2; x++)
+void Renderer::DrawWireFrameTriangle(Triangle *triangle)
+{
+    Vector3 *P0 = ProjectVertex(triangle->p0->position);
+    Vector3 *P1 = ProjectVertex(triangle->p1->position);
+    Vector3 *P2 = ProjectVertex(triangle->p2->position);
+    double h0 = triangle->p0->shade;
+    double h1 = triangle->p1->shade;
+    double h2 = triangle->p2->shade;
+
+    // sort the points so that Y0 <= Y1 <= Y2
+    if (P1->y < P0->y){std::swap(P1, P0);}
+    if (P2->y < P0->y){std::swap(P2, P0);}
+    if (P2->y < P1->y){std::swap(P2, P1);}
+
+    // Compute X coordinates of edges
+    std::vector<double> x01 = Interpolate(P0->y, P0->x, P1->y, P1->x);
+    std::vector<double> h01 = Interpolate(P0->y, h0, P1->y, h1);
+    std::vector<double> x12 = Interpolate(P1->y, P1->x, P2->y, P2->x);
+    std::vector<double> h12 = Interpolate(P1->y, h1, P2->y, h2);
+    std::vector<double> x02 = Interpolate(P0->y, P0->x, P2->y, P2->x);
+    std::vector<double> h02 = Interpolate(P0->y, h0, P2->y, h2);
+
+    // Concatenate the short sides
+    x01.pop_back();
+    h01.pop_back();
+    std::vector<double> x012 = {};
+    std::vector<double> h012 = {};
+    
+    x012.insert(x012.end(), x01.begin(), x01.end());
+    x012.insert(x012.end(), x12.begin(), x12.end());
+    
+    h012.insert(h012.end(), h01.begin(), h01.end());
+    h012.insert(h012.end(), h12.begin(), h12.end());
+    
+    // Determine left from right
+    double m = floor(x012.size() / 2);
+    std::vector<double> xleft = x012;
+    std::vector<double> xright = x02;
+    std::vector<double> hleft = h012;
+    std::vector<double> hright = h02;
+    if (x02[m] < x012[m]){
+        xleft = x02;
+        xright = x012;
+        hleft = h02;
+        hright = h012;
+    }
+
+    Color *color = triangle->material->color;
+    //print color
+    for (int y = P0->y; y < P2->y; y++)
     {
-        for (int y = -ch2; y < ch2; y++)
+        double xl = xleft[y - P0->y];
+        double xr = xright[y - P0->y];
+        std::vector<double> hsegment = Interpolate(xl, hleft[y - P0->y], xr, hright[y - P0->y]);
+
+        for (int x = xl; x < xr; x++)
         {
-            Vector3 *vectorDirection = CanvasToViewport(x, y);
-            Color *color = TraceRay(
-                sceneManager->currentCamera->position,
-                vectorDirection,
-                vectorDirection->dot(vectorDirection),
-                0,
-                1);
-            SDL_SetRenderDrawColor(renderer, color->r, color->g, color->b, color->a);
-            SDL_RenderDrawPoint(renderer, x + cw2, y + ch2);
+            Color *c = new Color(*color*hsegment[x - xl]);
+            SDL_SetRenderDrawColor(renderer, c->r, c->g, c->b, c->a);
+            SDL_RenderDrawPoint(renderer, x + sceneManager->centeredCW, sceneManager->centeredCH - y);   
         }
+    }
+    color = triangle->material->outlineColor;
+    if (color){
+        DrawLine(triangle->p0, triangle->p1, color);
+        DrawLine(triangle->p0, triangle->p2, color);
+        DrawLine(triangle->p1, triangle->p2, color);
     }
     SDL_RenderPresent(renderer);
 }
 
-
-void Renderer::DrawWireFrameTriangle(Vector3 *P0, Vector3 *P1, Vector3 *P2, Color *color)
+void Renderer::DrawLine(Vertice *V0, Vertice *V1, Color *color)
 {
-    DrawLine(P0, P1, color);
-    DrawLine(P0, P2, color);
-    DrawLine(P1, P2, color);
-    SDL_RenderPresent(renderer);
-}
-
-void Renderer::DrawLine(Vector3 *P0, Vector3 *P1, Color *color)
-{
-    const double cw2 = sceneManager->centeredCW;
-    const double ch2 = sceneManager->centeredCH;
-
+    Vector3 *P0 = ProjectVertex(V0->position);
+    Vector3 *P1 = ProjectVertex(V1->position);
     if (abs(P1->x - P0->x) > abs(P1->y - P0->y))
     {
         // horizontal because x > y
@@ -228,7 +280,7 @@ void Renderer::DrawLine(Vector3 *P0, Vector3 *P1, Color *color)
         for (int x = P0->x; x < P1->x; x++)
         {
             SDL_SetRenderDrawColor(renderer, color->r, color->g, color->b, color->a);
-            SDL_RenderDrawPoint(renderer, x + cw2, ch2 - ys[x - P0->x]);
+            SDL_RenderDrawPoint(renderer, x + sceneManager->centeredCW, sceneManager->centeredCH - ys[x - P0->x]);   
         }
     }
     else
@@ -242,9 +294,18 @@ void Renderer::DrawLine(Vector3 *P0, Vector3 *P1, Color *color)
         for (int y = P0->y; y < P1->y; y++)
         {
             SDL_SetRenderDrawColor(renderer, color->r, color->g, color->b, color->a);
-            SDL_RenderDrawPoint(renderer, xs[y - P0->y] + cw2, ch2 - y);
+            SDL_RenderDrawPoint(renderer, xs[y - P0->y] + sceneManager->centeredCW, sceneManager->centeredCH - y);
         }
     }
+}
+
+void Renderer::ForceClean(){
+    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+    SDL_RenderClear(renderer);
+}
+
+void Renderer::ForceRender(){
+    SDL_RenderPresent(renderer);
 }
 
 void Renderer::cleanup()

@@ -8,6 +8,7 @@ enum ObjectType {
     POINT_LIGHT,
     CAMERA,
     SPHERE,
+    RECTANGLE,
     PLANE,
     TRIANGLE,
     CUBE,

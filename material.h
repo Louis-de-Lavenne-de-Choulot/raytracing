@@ -8,12 +8,14 @@ struct Material
     int specularity;
     double reflectivity;
     Color* color;
+    Color* outlineColor;
 
-    Material(int spec, double ref, Color* col)
+    Material(int spec, double ref, Color* col, Color* outlinning = nullptr)
     {
         specularity = spec;
         reflectivity = ref;
         color = col;
+        outlineColor = outlinning;
     }
 };
 #endif
