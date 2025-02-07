@@ -7,16 +7,22 @@
 struct Triangle
 {
     /* data */
-    Vertice* p0;
-    Vertice* p1;
-    Vertice* p2;
+    int p0;
+    int p1;
+    int p2;
     Material *material;
-    Triangle(Vertice* point0, Vertice* point1, Vertice* point2, Material* mat)
+    Triangle(int point0, int point1, int point2, Material* mat)
     {
         p0 = point0;
         p1 = point1;
         p2 = point2;
         material = mat;
+    }
+    Triangle(int point0, int point1, int point2)
+    {
+        p0 = point0;
+        p1 = point1;
+        p2 = point2;
     }
 };
 #endif

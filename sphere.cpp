@@ -4,9 +4,9 @@
 #include "basetype.h"
 #include <cfloat>
 #include <cmath>
-#include <iostream>
+#include "quaternion.h"
 
-Sphere::Sphere(Vector3 *position, Vector3 *rotation, Material *material, double rad) : BaseObject(position, rotation, material)
+Sphere::Sphere(Vector3 *scale, Vector3 *position, Quaternion *rotation, Material *material, double rad) : BaseObject(scale, position, rotation, material)
 {
     radius = rad;
     type = SPHERE;
@@ -14,7 +14,7 @@ Sphere::Sphere(Vector3 *position, Vector3 *rotation, Material *material, double 
 
 std::pair<double, double> Sphere::IntersectRaySphere(Vector3 *rayOrigin, Vector3 *rayDirection, double dotDD)
 {
-    Vector3* rayCentertoOrigin = new Vector3(*rayOrigin - *position);
+    Vector3* rayCentertoOrigin = new Vector3(*rayOrigin - *transform->position);
     double a = dotDD;
     double b = 2 * (*rayCentertoOrigin).dot(rayDirection);
     double c = (*rayCentertoOrigin).dot(rayCentertoOrigin) - radius * radius;

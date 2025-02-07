@@ -3,20 +3,35 @@
 #define BASEOBJECT
 #include "vector3.h"
 #include "material.h"
+#include "vertice.h"
+#include "triangle.h"
 #include "basetype.h"
+#include "transform.h"
+#include "quaternion.h"
+#include <vector>
 struct BaseObject
 {
     /* data */
-    Vector3* position;
-    Vector3* rotation;
+    Transform* transform;
     Material* material;
+    std::vector<Vertice *> bVertices;
+    std::vector<Triangle *> bTriangles;
     ObjectType type;
-    BaseObject(Vector3* pos, Vector3* rot, Material* mat)
+    BaseObject(Vector3* scale, Vector3* pos, Quaternion* rot, Material* mat)
     {
-        position = pos;
-        rotation = rot;
+        transform = new Transform(scale, pos, rot);
         material = mat;
         type = NONE;
+    }
+
+    void setVertices(std::vector<Vertice *> vertices)
+    {
+        this->bVertices = vertices;
+    }
+
+    void setTriangles(std::vector<Triangle *> triangles)
+    {
+        this->bTriangles = triangles;
     }
 };
 #endif

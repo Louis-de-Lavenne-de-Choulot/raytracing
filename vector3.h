@@ -14,7 +14,9 @@ struct Vector3 {
 
         double dot(const Vector3* vec);
 
-        Vector3 operator+(const Vector3& vec);
+        Vector3 operator+(const Vector3 *vec);
+
+        Vector3 operator+(const Vector3 &vec);
 
         Vector3 operator+(const double val);
 

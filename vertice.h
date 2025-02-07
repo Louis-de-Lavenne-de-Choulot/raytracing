@@ -9,6 +9,6 @@ struct Vertice
     Vertice(Vector3 *pos, double shadeValue){
         position = pos;
         shade = shadeValue;
-    }
+    }    
 };
 #endif

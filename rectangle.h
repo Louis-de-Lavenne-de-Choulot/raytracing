@@ -5,14 +5,9 @@
 #include "basetype.h"
 #include "vertice.h"
 #include "triangle.h"
+#include "vrectangle.h"
 #include <array>
-struct Rectangle : BaseObject{
-    double radius;
-    double prevRad;
-    std::array<Vertice*, 8> currentVertices;
-    std::array<Triangle*, 12> currentTriangles;
-    Rectangle(double radius, Vector3* position, Vector3* rotation, Material* material);
-    void UpdateVertices();
-    std::array<Triangle*, 12> GetTriangles();
+struct Rectangle : BaseObject, VRectangle{
+    Rectangle(Vector3 *scale, Vector3* position, Quaternion* rotation, Material* material);
 };
 #endif

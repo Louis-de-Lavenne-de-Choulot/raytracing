@@ -1,4 +1,5 @@
 #include "vector3.h"
+#include "quaternion.h"
 #include <cmath>
 Vector3::Vector3(double valx, double valy, double valz)
 {
@@ -23,6 +24,10 @@ double Vector3::dot(const Vector3* vec)
     return this->x * vec->x + this->y * vec->y + this->z * vec->z;
 }
 
+Vector3 Vector3::operator+(const Vector3* vec)
+{
+    return Vector3(x + vec->x, y + vec->y, z + vec->z);
+}
 Vector3 Vector3::operator+(const Vector3 &vec)
 {
     return Vector3(x + vec.x, y + vec.y, z + vec.z);
