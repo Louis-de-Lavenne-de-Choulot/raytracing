@@ -13,13 +13,99 @@
 #include <array>
 #include <vector>
 
-// void Renderer::ApplyRotation(std::array<Vertice *, 8> &vertices, Quaternion *rotation)
-// {
-//     for (Vertice *v : vertices)
-//     {
-//         v->position = (*rotation) * Vector3(*v->position);
-//     }
-// }
+//---------------------------------------------------------------------------------------------------
+//               FINDING INTERSECTION BETWEEN 2xVECTOR3 (a, b) AND PLANE p (0, 0, pd)               |
+//                                                                                                  |
+//               the goal is to find the parametric equations of x and z                            |
+//                   then derive x using result of the derivation on z                              |
+//                                                                                                  |
+//               in short, calculate dx = (bx-ax)t+ax with t = any                                  |
+//                                   dy = (by-ay)t+ay with t = any                                  |
+//                                   dz = (bz-az)t+az with t = any                                  |
+//                                                                                                  |
+//              We know dz = pd because plane is on z only so the plan has equation 0x + 0y + z = pd|
+//              With dx, dy, dz we can get  0dx + 0dy + dz = pd   ===>  dz = pd                     |
+//              dz = (bz-az)t+az = pd  ==so==  t = (pd+az)/(bz-az)                                  |
+//              We know that (bz-az) != 0 because only intersecting lines are flagged               |
+//                                                                                                  |
+//                                                                                                  |
+//              We shorten the equations by plugging our newfound t in dx dy dz                     |
+//              dx = (bx - ax) * (pz + az)/(bz-az) + ax                                             |
+//              dy = (by - ay) * (pz + az)/(bz-az) + ay                                             |
+//              dz = pd                                                                             |
+//---------------------------------------------------------------------------------------------------
+std::vector<Vertice *> *Renderer::checkTriangle(std::array<Vertice *, 3> verts)
+{
+    short invalidV = 0;
+    std::vector<Vertice *> *result = new std::vector<Vertice *>();
+    std::vector<Vertice *> valids = {};
+    std::vector<Vertice *> invalids = {};
+
+    for (int i = 0; i < 3; i++)
+    {
+        if (verts[i]->position->z <= sceneManager->viewportDistance)
+        {
+            invalidV++;
+            invalids.push_back(verts[i]);
+        }
+        else
+        {
+            valids.push_back(verts[i]);
+        }
+    }
+
+    double interZ    = 0;
+    double intersecX = 0;
+    double intersecY = 0;
+    double interZ2   = 0;
+    double intersecX2= 0;
+    double intersecY2= 0;
+    Vertice *v1;
+    Vertice *v2;
+    switch (invalidV)
+    {
+    case 3:
+        break;
+    case 2:
+        // easier than case 1, with 2 invalids, we just find the two collisions
+        // valid0 invalid0 and valid0 invalid1 then create a triangle
+        // find intersection valid0, invalid0 and viewportDist Z
+        interZ    = (sceneManager->viewportDistance + invalids[0]->position->z) / (valids[0]->position->z - invalids[0]->position->z);
+        intersecX = (valids[0]->position->x - invalids[0]->position->x) * interZ + invalids[0]->position->x;
+        intersecY = (valids[0]->position->y - invalids[0]->position->y) * interZ + invalids[0]->position->y;
+        v1 = new Vertice(new Vector3(intersecX, intersecY, sceneManager->viewportDistance), invalids[0]->shade);
+
+        // find intersection valid0, invalid1 and viewportDist Z
+        interZ2    = (sceneManager->viewportDistance + invalids[1]->position->z) / (valids[0]->position->z - invalids[1]->position->z);
+        intersecX2 = (valids[0]->position->x - invalids[1]->position->x) * interZ2 + invalids[1]->position->x;
+        intersecY2 = (valids[0]->position->y - invalids[1]->position->y) * interZ2 + invalids[1]->position->y;
+        v2 = new Vertice(new Vector3(intersecX2, intersecY2, sceneManager->viewportDistance), invalids[1]->shade);
+
+        result = new std::vector<Vertice *>{valids[0], v2, v1};
+        break;
+    case 1:
+        // find intersection valid0, invalid0 and viewportDist Z
+        interZ = (sceneManager->viewportDistance + invalids[0]->position->z) / (valids[0]->position->z - invalids[0]->position->z);
+        intersecX = (valids[0]->position->x - invalids[0]->position->x) * interZ + invalids[0]->position->x;
+        intersecY = (valids[0]->position->y - invalids[0]->position->y) * interZ + invalids[0]->position->y;
+        v1 = new Vertice(new Vector3(intersecX, intersecY, sceneManager->viewportDistance), invalids[0]->shade);
+
+        // find intersection valid1, invalid0 and viewportDist Z
+        interZ2 = (sceneManager->viewportDistance + invalids[0]->position->z) / (valids[1]->position->z - invalids[0]->position->z);
+        intersecX2 = (valids[1]->position->x - invalids[0]->position->x) * interZ + invalids[0]->position->x;
+        intersecY2 = (valids[1]->position->y - invalids[0]->position->y) * interZ + invalids[0]->position->y;
+        v2 = new Vertice(new Vector3(intersecX2, intersecY2, sceneManager->viewportDistance), invalids[0]->shade);
+
+        // with triangles 0, 1, 2 and 3, 1, 2
+        result = new std::vector<Vertice *>{valids[0], valids[1], v1, v2};
+        break;
+    default:
+        result = new std::vector<Vertice *>{valids[0], valids[1], valids[2]};
+        break;
+    }
+    
+    return result;
+}
 
 Vector3 *Renderer::CanvasToViewport(double x, double y)
 {
@@ -91,7 +177,7 @@ void Renderer::Render()
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
     SDL_RenderClear(renderer);
 
-    for  (BaseObject *obj : *sceneManager->objects)
+    for (BaseObject *obj : *sceneManager->objects)
     {
         RenderInstance(obj);
     }
@@ -102,7 +188,7 @@ void Renderer::Render()
 void Renderer::RenderInstance(BaseObject *obj)
 {
     std::vector<Vertice *> *projected = new std::vector<Vertice *>();
-    
+
     for (Vertice *v : obj->bVertices)
     {
         Vector3 *vProj;
@@ -110,20 +196,39 @@ void Renderer::RenderInstance(BaseObject *obj)
         // scale
         vProj = new Vector3(*obj->transform->scale * vPos);
         // rotate
-        vProj =  obj->transform->rotation->RotateVector3(vProj);
+        vProj = obj->transform->rotation->RotateVector3(vProj);
         // translate
         vProj = new Vector3(*vProj + *obj->transform->position);
         // now that we got world space, project it camera space
         vProj = new Vector3(*vProj - *sceneManager->currentCamera->transform->position);
+
+        // camera rotation applied
         Quaternion *q = sceneManager->currentCamera->transform->rotation;
         vProj = q->Conjugate(*q).RotateVector3(vProj);
 
         // project
         projected->push_back(new Vertice(vProj, v->shade));
     }
-    for (Triangle *triangle : obj->bTriangles)
+    std::vector<Triangle *> triangles = obj->bTriangles;
+    for (Triangle *triangle : triangles)
     {
-        DrawTriangle(triangle, projected);
+        std::array<Vertice *, 3> vP = {projected->at(triangle->p0), projected->at(triangle->p1), projected->at(triangle->p2)};
+
+        std::vector<Vertice *> *trs = checkTriangle(vP);
+        switch (trs->size())
+        {
+        case 6:
+            // with triangles 0, 1, 2 and 3, 1, 2
+            DrawTriangle(new Triangle(0, 1, 2, triangle->material), trs);
+            DrawTriangle(new Triangle(3, 1, 2, triangle->material), trs);
+            break;
+        case 3:
+            // with triangle 0, 1, 2
+            DrawTriangle(new Triangle(0, 1, 2, triangle->material), trs);
+            break;
+        default:
+            break;
+        }
     }
 }
 

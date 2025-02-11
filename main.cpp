@@ -44,14 +44,17 @@ int main(int argc, char *argv[])
     auto start = std::chrono::high_resolution_clock::now();
     Renderer renderer = Renderer(sceneManager);
 
+    //! CRASH UPON +-86°, +-94°, +-176° ???????????? div by 0 smwhere?
     // render scene
-    for (int x = 10; x < 1000; x++){
+    for (int x = 1; x < 100; x+=2){
+        // camera->transform->Rotate(new Vector3(1, 0, 0), -x);
+        camera->transform->position->z+=x*0.1;
         // draw cube
-        renderer.Render();
         cube->transform->Rotate(new Vector3(1, 0, 0), x);
-
-
-        // sleep for 100ms
+        // print (rotation)
+        EulerAngles eu = cube->transform->rotation->ToEulerAngle();
+        std::cout << "rx: " << eu.yaw << "  ry: " << eu.roll << "  rz: " << eu.pitch << std::endl;
+        renderer.Render();
         Sleep(500);
     }
 

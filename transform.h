@@ -29,9 +29,9 @@ struct Transform
         // Create the rotation quaternion
         Quaternion q(
             cos(halfAngle),         // w
-            axis->x * sinHalfAngle, // x
-            axis->y * sinHalfAngle, // y
-            axis->z * sinHalfAngle  // z
+            axis->z * sinHalfAngle, // x
+            axis->x * sinHalfAngle, // y
+            axis->y * sinHalfAngle  // z
         );
 
         // Convert vector to quaternion (v as quaternion)

@@ -6,7 +6,7 @@
 
 #include <SDL2/SDL.h>
 #include <cfloat>
-#include <iostream>
+#include <array>
 
 class Renderer
 {
@@ -15,7 +15,9 @@ private:
     SDL_Window *window;
     SDL_Renderer *renderer;
     SceneManager *sceneManager;
-    
+
+    std::vector<Vertice *> *checkTriangle(std::array<Vertice*, 3> verts);
+
     // void ApplyRotation(std::array<Vertice *, 8> &vertices, Quaternion *rotation);
     Vector3 *CanvasToViewport(double x, double y);
     Vector3 *ProjectVertex(Vector3 *v);
