@@ -4,6 +4,7 @@
 #include "vector3.h"
 #include "material.h"
 #include "basetype.h"
+namespace PEngine {
 struct BaseLight
 {
     /* data */
@@ -17,5 +18,6 @@ struct BaseLight
         color = col;
         type = AMBIENT_LIGHT;
     }
+};
 };
 #endif

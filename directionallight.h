@@ -5,15 +5,18 @@
 #include "material.h"
 #include "basetype.h"
 #include "baselight.h"
-struct DirectionalLight : BaseLight
+namespace PEngine
 {
-    /* data */
-    Vector3* direction;
-
-    DirectionalLight(double intens, Color* col, Vector3* dir) : BaseLight(intens, col)
+    struct DirectionalLight : BaseLight
     {
-        direction = dir;
-        type = DIRECTIONAL_LIGHT;
-    }
+        /* data */
+        Vector3 *direction;
+
+        DirectionalLight(double intens, Color *col, Vector3 *dir) : BaseLight(intens, col)
+        {
+            direction = dir;
+            type = DIRECTIONAL_LIGHT;
+        }
+    };
 };
 #endif

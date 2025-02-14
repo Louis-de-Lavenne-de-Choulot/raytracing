@@ -2,7 +2,11 @@
 #ifndef EULERANGLE
 #define EULERANGLE
 
-struct EulerAngles {
-    double roll, pitch, yaw;
+namespace PEngine
+{
+    struct EulerAngles
+    {
+        double roll, pitch, yaw;
+    };
 };
 #endif

@@ -9,29 +9,32 @@
 #include "transform.h"
 #include "quaternion.h"
 #include <vector>
-struct BaseObject
+namespace PEngine
 {
-    /* data */
-    Transform* transform;
-    Material* material;
-    std::vector<Vertice *> bVertices;
-    std::vector<Triangle *> bTriangles;
-    ObjectType type;
-    BaseObject(Vector3* scale, Vector3* pos, Quaternion* rot, Material* mat)
+    struct BaseObject
     {
-        transform = new Transform(scale, pos, rot);
-        material = mat;
-        type = NONE;
-    }
+        /* data */
+        PEngine::Transform *transform;
+        Material *material;
+        std::vector<Vertice *> bVertices;
+        std::vector<Triangle *> bTriangles;
+        ObjectType type;
+        BaseObject(Vector3 *scale, Vector3 *pos, Quaternion *rot, Material *mat)
+        {
+            transform = new PEngine::Transform(scale, pos, rot);
+            material = mat;
+            type = NONE;
+        }
 
-    void setVertices(std::vector<Vertice *> vertices)
-    {
-        this->bVertices = vertices;
-    }
+        void setVertices(std::vector<Vertice *> vertices)
+        {
+            this->bVertices = vertices;
+        }
 
-    void setTriangles(std::vector<Triangle *> triangles)
-    {
-        this->bTriangles = triangles;
-    }
+        void setTriangles(std::vector<Triangle *> triangles)
+        {
+            this->bTriangles = triangles;
+        }
+    };
 };
 #endif

@@ -5,9 +5,13 @@
 #include "basetype.h"
 #include "quaternion.h"
 #include <utility>
-struct Sphere : BaseObject{
-    double radius;
-    Sphere(Vector3 *scale, Vector3* position, Quaternion* rotation, Material* material, double radius);
-    std::pair<double, double> IntersectRaySphere(Vector3* rayOrigin, Vector3* rayDirection, double dotDD);
+namespace PEngine
+{
+    struct Sphere : BaseObject
+    {
+        double radius;
+        Sphere(Vector3 *scale, Vector3 *position, Quaternion *rotation, Material *material, double radius);
+        std::pair<double, double> IntersectRaySphere(Vector3 *rayOrigin, Vector3 *rayDirection, double dotDD);
+    };
 };
 #endif

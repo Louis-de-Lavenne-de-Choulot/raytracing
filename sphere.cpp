@@ -6,24 +6,27 @@
 #include <cmath>
 #include "quaternion.h"
 
-Sphere::Sphere(Vector3 *scale, Vector3 *position, Quaternion *rotation, Material *material, double rad) : BaseObject(scale, position, rotation, material)
+namespace PEngine
 {
-    radius = rad;
-    type = SPHERE;
-}
-
-std::pair<double, double> Sphere::IntersectRaySphere(Vector3 *rayOrigin, Vector3 *rayDirection, double dotDD)
-{
-    Vector3* rayCentertoOrigin = new Vector3(*rayOrigin - *transform->position);
-    double a = dotDD;
-    double b = 2 * (*rayCentertoOrigin).dot(rayDirection);
-    double c = (*rayCentertoOrigin).dot(rayCentertoOrigin) - radius * radius;
-    double discriminant = b * b - 4 * a * c;
-    if (discriminant < 0)
+    Sphere::Sphere(Vector3 *scale, Vector3 *position, Quaternion *rotation, Material *material, double rad) : BaseObject(scale, position, rotation, material)
     {
-        return std::pair<double, double>(DBL_MAX, DBL_MAX);
+        radius = rad;
+        type = SPHERE;
     }
-    double t0 = (-b + sqrt(discriminant)) / (2 * a);
-    double t1 = (-b - sqrt(discriminant)) / (2 * a);
-    return std::pair<double, double>(t0, t1);
-}
+
+    std::pair<double, double> Sphere::IntersectRaySphere(Vector3 *rayOrigin, Vector3 *rayDirection, double dotDD)
+    {
+        Vector3 *rayCentertoOrigin = new Vector3(*rayOrigin - *transform->position);
+        double a = dotDD;
+        double b = 2 * (*rayCentertoOrigin).dot(rayDirection);
+        double c = (*rayCentertoOrigin).dot(rayCentertoOrigin) - radius * radius;
+        double discriminant = b * b - 4 * a * c;
+        if (discriminant < 0)
+        {
+            return std::pair<double, double>(DBL_MAX, DBL_MAX);
+        }
+        double t0 = (-b + sqrt(discriminant)) / (2 * a);
+        double t1 = (-b - sqrt(discriminant)) / (2 * a);
+        return std::pair<double, double>(t0, t1);
+    }
+};

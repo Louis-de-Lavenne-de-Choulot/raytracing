@@ -5,15 +5,18 @@
 #include "material.h"
 #include "basetype.h"
 #include "baselight.h"
-struct PointLight : BaseLight
+namespace PEngine
 {
-    /* data */
-    Vector3* position;
-
-    PointLight(double intens, Color* col, Vector3* pos) : BaseLight(intens, col)
+    struct PointLight : BaseLight
     {
-        position = pos;
-        type = POINT_LIGHT;
-    }
+        /* data */
+        Vector3 *position;
+
+        PointLight(double intens, Color *col, Vector3 *pos) : BaseLight(intens, col)
+        {
+            position = pos;
+            type = POINT_LIGHT;
+        }
+    };
 };
 #endif

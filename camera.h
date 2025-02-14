@@ -4,12 +4,16 @@
 #include "vector3.h"
 #include "basetype.h"
 #include "transform.h"
-struct Camera
+namespace PEngine
 {
-    /* data */
-    Transform *transform;
-    ObjectType type;
+    struct Camera
+    {
+        /* data */
+        Transform *transform;
+        double fov;
+        ObjectType type;
 
-    Camera(Vector3* position = new Vector3(0, 0, 0), Quaternion* rotation = new Quaternion(1, 0, 0, 0));
+        Camera(Vector3 *position = new Vector3(0, 0, 0), Quaternion *rotation = new Quaternion(1, 0, 0, 0), double fov = 90);
+    };
 };
 #endif

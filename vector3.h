@@ -1,36 +1,46 @@
 #pragma once
 #ifndef VECTOR3
 #define VECTOR3
-struct Vector3 {
-        double x;
-        double y;
-        double z;
+namespace PEngine
+{
+        struct Vector3
+        {
+                double x;
+                double y;
+                double z;
 
-        Vector3(double valx, double valy, double valz);
+                Vector3(double valx, double valy, double valz);
 
-        double len();
+                double len();
 
-        Vector3 normalize();
+                Vector3 normalize();
 
-        double dot(const Vector3* vec);
+                double angleBetween(Vector3 *vec);
 
-        Vector3 operator+(const Vector3 *vec);
+                double magnitude();
 
-        Vector3 operator+(const Vector3 &vec);
+                double dot(const Vector3 *vec);
 
-        Vector3 operator+(const double val);
+                Vector3 operator+(const Vector3 *vec);
 
-        Vector3& operator+=(const Vector3& vec);
+                Vector3 operator+(const Vector3 &vec);
 
-        Vector3 operator-(const Vector3& vec);
+                Vector3 operator+(const double val);
 
-        Vector3& operator-=(const Vector3& vec);
+                Vector3 &operator+=(const Vector3 &vec);
 
-        Vector3 operator*(const Vector3& vec);
+                Vector3 operator-(const Vector3 &vec);
 
-        Vector3 operator*(const double val);
+                Vector3 operator-(const double val);
 
-        Vector3& operator*=(const Vector3& vec);
+                Vector3 &operator-=(const Vector3 &vec);
+
+                Vector3 operator*(const Vector3 &vec);
+
+                Vector3 operator*(const double val);
+
+                Vector3 &operator*=(const Vector3 &vec);
+        };
 };
 
 #endif

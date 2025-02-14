@@ -2,20 +2,23 @@
 #ifndef MATERIAL
 #define MATERIAL
 #include "color.h"
-struct Material
+namespace PEngine
 {
-    /* data */
-    int specularity;
-    double reflectivity;
-    Color* color;
-    Color* outlineColor;
-
-    Material(int spec, double ref, Color* col, Color* outlinning = nullptr)
+    struct Material
     {
-        specularity = spec;
-        reflectivity = ref;
-        color = col;
-        outlineColor = outlinning;
-    }
+        /* data */
+        int specularity;
+        double reflectivity;
+        Color *color;
+        Color *outlineColor;
+
+        Material(int spec, double ref, Color *col, Color *outlinning = nullptr)
+        {
+            specularity = spec;
+            reflectivity = ref;
+            color = col;
+            outlineColor = outlinning;
+        }
+    };
 };
 #endif
