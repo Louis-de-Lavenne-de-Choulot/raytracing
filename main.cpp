@@ -104,19 +104,19 @@ int main(int argc, char *argv[])
     // add camera to scene manager
     sceneManager->currentCamera = camera;
     sceneManager->cameras = new std::vector<Camera *>();
-    sceneManager->cameras->push_back(camera);
+    sceneManager->cameras->emplace_back(camera);
 
     Color *g = new Color(200, 0, 0, 255);
     Color *b = new Color(0, 0, 200, 255);
     PEngine::Rectangle *rec = new PEngine::Rectangle(new Vector3(1, 2, 1), new Vector3(-1.5, 0, 7), new Quaternion(1, 0, 0, 0), new Material(0, 0, g, b));
-    sceneManager->objects->push_back(rec);
+    sceneManager->objects->emplace_back(rec);
 
     // PEngine::Sphere *sph = new PEngine::Sphere(new Vector3(1, 1, 1), new Vector3(0, 0, 3), new Quaternion(1, 0, 0, 0), new Material(0, 0, b, g));
-    // sceneManager->objects->push_back(sph);
+    // sceneManager->objects->emplace_back(sph);
 
-    sceneManager->lights->push_back(new BaseLight(0.2, new Color(255, 255, 255, 255)));
-    sceneManager->lights->push_back(new PointLight(0.6, new Color(255, 255, 255, 255), new Vector3(5, 0, 0)));
-    sceneManager->lights->push_back(new DirectionalLight(0.2, new Color(255, 255, 255, 255), new Vector3(1, 4, 4)));
+    sceneManager->lights->emplace_back(new BaseLight(0.2, new Color(255, 255, 255, 255)));
+    sceneManager->lights->emplace_back(new PointLight(0.6, new Color(255, 255, 255, 255), new Vector3(5, 0, 0)));
+    sceneManager->lights->emplace_back(new DirectionalLight(0.2, new Color(255, 255, 255, 255), new Vector3(1, 4, 4)));
 
     Renderer renderer = Renderer(sceneManager);
 
@@ -127,7 +127,7 @@ int main(int argc, char *argv[])
 
     int i = 0;
     // render scene
-    while (running && i < 100)
+    while (running)
     {
         // Event handling
         SDL_Event event;

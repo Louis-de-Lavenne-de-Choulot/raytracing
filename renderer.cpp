@@ -37,23 +37,23 @@ namespace PEngine
     //              dy = (by - ay) * (pz + az)/(bz-az) + ay                                             |
     //              dz = pd                                                                             |
     //---------------------------------------------------------------------------------------------------
-    std::vector<Vertice *> *Renderer::checkTriangle(std::array<Vertice *, 3> verts)
+    std::vector<Vertice> *Renderer::checkTriangle(std::array<Vertice, 3> verts)
     {
         short invalidV = 0;
-        std::vector<Vertice *> *result = new std::vector<Vertice *>();
-        std::vector<Vertice *> valids = {};
-        std::vector<Vertice *> invalids = {};
+        std::vector<Vertice> *result = new std::vector<Vertice>();
+        std::vector<Vertice> valids = {};
+        std::vector<Vertice> invalids = {};
 
         for (int i = 0; i < 3; i++)
         {
-            if (verts[i]->position->z <= sceneManager->viewportDistance)
+            if (verts[i].position->z <= sceneManager->viewportDistance)
             {
                 invalidV++;
-                invalids.push_back(verts[i]);
+                invalids.emplace_back(verts[i]);
             }
             else
             {
-                valids.push_back(verts[i]);
+                valids.emplace_back(verts[i]);
             }
         }
 
@@ -63,8 +63,6 @@ namespace PEngine
         double interZ2 = 0;
         double intersecX2 = 0;
         double intersecY2 = 0;
-        Vertice *v1;
-        Vertice *v2;
         switch (invalidV)
         {
         case 3:
@@ -73,37 +71,35 @@ namespace PEngine
             // easier than case 1, with 2 invalids, we just find the two collisions
             // valid0 invalid0 and valid0 invalid1 then create a triangle
             // find intersection valid0, invalid0 and viewportDist Z
-            interZ = (sceneManager->viewportDistance + invalids[0]->position->z) / (valids[0]->position->z - invalids[0]->position->z);
-            intersecX = (valids[0]->position->x - invalids[0]->position->x) * interZ + invalids[0]->position->x;
-            intersecY = (valids[0]->position->y - invalids[0]->position->y) * interZ + invalids[0]->position->y;
-            v1 = new Vertice(new Vector3(intersecX, intersecY, sceneManager->viewportDistance), invalids[0]->shade);
+            interZ = (sceneManager->viewportDistance + invalids[0].position->z) / (valids[0].position->z - invalids[0].position->z);
+            intersecX = (valids[0].position->x - invalids[0].position->x) * interZ + invalids[0].position->x;
+            intersecY = (valids[0].position->y - invalids[0].position->y) * interZ + invalids[0].position->y;
+
 
             // find intersection valid0, invalid1 and viewportDist Z
-            interZ2 = (sceneManager->viewportDistance + invalids[1]->position->z) / (valids[0]->position->z - invalids[1]->position->z);
-            intersecX2 = (valids[0]->position->x - invalids[1]->position->x) * interZ2 + invalids[1]->position->x;
-            intersecY2 = (valids[0]->position->y - invalids[1]->position->y) * interZ2 + invalids[1]->position->y;
-            v2 = new Vertice(new Vector3(intersecX2, intersecY2, sceneManager->viewportDistance), invalids[1]->shade);
+            interZ2 = (sceneManager->viewportDistance + invalids[1].position->z) / (valids[0].position->z - invalids[1].position->z);
+            intersecX2 = (valids[0].position->x - invalids[1].position->x) * interZ2 + invalids[1].position->x;
+            intersecY2 = (valids[0].position->y - invalids[1].position->y) * interZ2 + invalids[1].position->y;
+            
 
-            result = new std::vector<Vertice *>{valids[0], v2, v1};
+            result = new std::vector<Vertice>{valids[0], Vertice(new Vector3(intersecX2, intersecY2, sceneManager->viewportDistance), invalids[1].shade), Vertice(new Vector3(intersecX, intersecY, sceneManager->viewportDistance), invalids[0].shade)};
             break;
         case 1:
             // find intersection valid0, invalid0 and viewportDist Z
-            interZ = (sceneManager->viewportDistance + invalids[0]->position->z) / (valids[0]->position->z - invalids[0]->position->z);
-            intersecX = (valids[0]->position->x - invalids[0]->position->x) * interZ + invalids[0]->position->x;
-            intersecY = (valids[0]->position->y - invalids[0]->position->y) * interZ + invalids[0]->position->y;
-            v1 = new Vertice(new Vector3(intersecX, intersecY, sceneManager->viewportDistance), invalids[0]->shade);
+            interZ = (sceneManager->viewportDistance + invalids[0].position->z) / (valids[0].position->z - invalids[0].position->z);
+            intersecX = (valids[0].position->x - invalids[0].position->x) * interZ + invalids[0].position->x;
+            intersecY = (valids[0].position->y - invalids[0].position->y) * interZ + invalids[0].position->y;
 
             // find intersection valid1, invalid0 and viewportDist Z
-            interZ2 = (sceneManager->viewportDistance + invalids[0]->position->z) / (valids[1]->position->z - invalids[0]->position->z);
-            intersecX2 = (valids[1]->position->x - invalids[0]->position->x) * interZ + invalids[0]->position->x;
-            intersecY2 = (valids[1]->position->y - invalids[0]->position->y) * interZ + invalids[0]->position->y;
-            v2 = new Vertice(new Vector3(intersecX2, intersecY2, sceneManager->viewportDistance), invalids[0]->shade);
+            interZ2 = (sceneManager->viewportDistance + invalids[0].position->z) / (valids[1].position->z - invalids[0].position->z);
+            intersecX2 = (valids[1].position->x - invalids[0].position->x) * interZ + invalids[0].position->x;
+            intersecY2 = (valids[1].position->y - invalids[0].position->y) * interZ + invalids[0].position->y;
 
             // with triangles 0, 1, 2 and 3, 1, 2
-            result = new std::vector<Vertice *>{valids[0], valids[1], v1, v2};
+            result = new std::vector<Vertice>{valids[0], valids[1], Vertice(new Vector3(intersecX, intersecY, sceneManager->viewportDistance), invalids[0].shade), Vertice(new Vector3(intersecX2, intersecY2, sceneManager->viewportDistance), invalids[0].shade)};
             break;
         default:
-            result = new std::vector<Vertice *>{valids[0], valids[1], valids[2]};
+            result = new std::vector<Vertice>{valids[0], valids[1], valids[2]};
             break;
         }
 
@@ -139,7 +135,7 @@ namespace PEngine
         double d = d0;
         for (int x = i0; x < i1; x++)
         {
-            values->push_back(d);
+            values->emplace_back(d);
             d += a;
         }
         return values;
@@ -217,8 +213,8 @@ namespace PEngine
 
     void Renderer::RenderInstance(BaseObject *obj)
     {
-        std::vector<Vertice *> *projected = new std::vector<Vertice *>();
-
+        std::vector<Vertice> projected = std::vector<Vertice>();
+        projected.reserve(obj->bVertices.size());
         for (Vertice *v : obj->bVertices)
         {
             Vector3 *vProj;
@@ -238,7 +234,7 @@ namespace PEngine
             vProj = q->Conjugate(*q).RotateVector3(vProj);
             
             // project
-            projected->push_back(new Vertice(vProj, v->shade));
+            projected.emplace_back(Vertice(vProj, v->shade));
         }
         std::vector<Triangle *> triangles = obj->bTriangles;
         for (Triangle *triangle : triangles)
@@ -252,9 +248,9 @@ namespace PEngine
                 continue;
             }
 
-            std::array<Vertice *, 3> vP = {projected->at(triangle->p0), projected->at(triangle->p1), projected->at(triangle->p2)};
+            std::array<Vertice, 3> vP = {projected[triangle->p0], projected.at(triangle->p1), projected.at(triangle->p2)};
 
-            std::vector<Vertice *> *trs = checkTriangle(vP);
+            std::vector<Vertice> *trs = checkTriangle(vP);
             switch (trs->size())
             {
             case 6:
@@ -272,21 +268,21 @@ namespace PEngine
         }
     }
 
-    void Renderer::DrawTriangle(Triangle *triangle, std::vector<Vertice *> *projected)
+    void Renderer::DrawTriangle(Triangle *triangle, std::vector<Vertice> *projected)
     {
 
-        Vector3 *NP0 = projected->at(triangle->p0)->position;
-        Vector3 *NP1 = projected->at(triangle->p1)->position;
-        Vector3 *NP2 = projected->at(triangle->p2)->position;
+        Vector3 *NP0 = projected->at(triangle->p0).position;
+        Vector3 *NP1 = projected->at(triangle->p1).position;
+        Vector3 *NP2 = projected->at(triangle->p2).position;
         Vector3 *P0 = ProjectVertex(NP0);
         P0->z = NP0->z;
         Vector3 *P1 = ProjectVertex(NP1);
         P1->z = NP1->z;
         Vector3 *P2 = ProjectVertex(NP2);
         P2->z = NP2->z;
-        double h0 = projected->at(triangle->p0)->shade;
-        double h1 = projected->at(triangle->p1)->shade;
-        double h2 = projected->at(triangle->p2)->shade;
+        double h0 = projected->at(triangle->p0).shade;
+        double h1 = projected->at(triangle->p1).shade;
+        double h2 = projected->at(triangle->p2).shade;
 
         double tempSB = screenBuffer[P0->x + P0->y * windowWidth];
         double tempZ = P0->z;

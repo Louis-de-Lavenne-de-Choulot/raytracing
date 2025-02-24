@@ -25,7 +25,7 @@ namespace PEngine
         int windowWidth = 0;
         int windowHeight = 0;
 
-        std::vector<Vertice *> *checkTriangle(std::array<Vertice *, 3> verts);
+        std::vector<Vertice> *checkTriangle(std::array<Vertice, 3> verts);
         // void ApplyRotation(array<Vertice *, 8> &vertices, Quaternion *rotation);
         Vector3 *CanvasToViewport(double x, double y);
         Vector3 *ProjectVertex(Vector3 *v);
@@ -42,7 +42,7 @@ namespace PEngine
         void Render();
         void SetPixel(int x, int y, Color *color);
         void RenderInstance(BaseObject *obj);
-        void DrawTriangle(Triangle *triangle, std::vector<Vertice *> *projected);
+        void DrawTriangle(Triangle *triangle, std::vector<Vertice> *projected);
         void DrawLine(Vertice *V0, Vertice *V1, Color *color);
 
         void ForceClean();
