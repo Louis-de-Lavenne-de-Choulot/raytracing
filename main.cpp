@@ -1,5 +1,12 @@
 #include <vector>
 #include <chrono>
+// sleep function
+#include <iostream>
+#include <synchapi.h>
+#include <thread>
+#include <conio.h>
+#include <windows.h>
+
 #include "vector3.h"
 #include "plane.h"
 #include "triangle.h"
@@ -10,13 +17,6 @@
 #include "directionallight.h"
 #include "sphere.h"
 #include "sceneManager.h"
-// sleep function
-#include <iostream>
-#include <synchapi.h>
-#include <thread>
-
-#include <conio.h>
-#include <windows.h>
 #include "rectangle.h"
 using namespace PEngine;
 
@@ -118,6 +118,9 @@ int main(int argc, char *argv[])
     Color *b = new Color(50, 50, 190, 255);
     PEngine::Rectangle *rec = new PEngine::Rectangle(new Vector3(1, 2, 1), new Vector3(-1.5, 0, 7), new Quaternion(1, 0, 0, 0), new Material(0, 0, g, b));
     sceneManager->objects->push_back(rec);
+    
+    // PEngine::Sphere *sph = new PEngine::Sphere(new Vector3(1, 1, 1), new Vector3(0, 0, 3), new Quaternion(1, 0, 0, 0), new Material(0, 0, b, g));
+    // sceneManager->objects->push_back(sph);
 
     sceneManager->lights->push_back(new BaseLight(0.2, new Color(255, 255, 255, 255)));
     sceneManager->lights->push_back(new PointLight(0.6, new Color(255, 255, 255, 255), new Vector3(5, 0, 0)));
@@ -130,8 +133,7 @@ int main(int argc, char *argv[])
     // Start input monitoring in separate thread
     HANDLE thread = CreateThread(NULL, 0, ThreadFunc, NULL, 0, NULL);
 
-    //! CRASH UPON +-86°, +-94°, +-176° ???????????? div by 0 smwhere?
-
+    int i = 0;
     // render scene
     while (running)
     {
@@ -142,12 +144,17 @@ int main(int argc, char *argv[])
             if (event.type == SDL_QUIT)
                 running = false;
         }
+        i++;
+        if (i%360==0){
+            i=0;
+        }
+        rec->transform->Rotate(new Vector3(1, 0, 0), i);
 
         // Start measuring time
         auto start = std::chrono::high_resolution_clock::now();
 
         renderer.Render();
-        rec->transform->Rotate(new Vector3(1, 0, 0), 10);
+        // rec->transform->Rotate(new Vector3(1, 0, 0), 10);
         // Stop measuring time
         auto end = std::chrono::high_resolution_clock::now();
 

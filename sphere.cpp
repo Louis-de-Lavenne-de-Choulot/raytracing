@@ -1,32 +1,37 @@
-
 #include "sphere.h"
 #include "baseobject.h"
 #include "basetype.h"
-#include <cfloat>
-#include <cmath>
 #include "quaternion.h"
+#include <vector>
 
 namespace PEngine
 {
-    Sphere::Sphere(Vector3 *scale, Vector3 *position, Quaternion *rotation, Material *material, double rad) : BaseObject(scale, position, rotation, material)
+    Sphere::Sphere(Vector3* scale, Vector3* position, Quaternion* rotation, Material* material, int segments, int rings) 
+        : BaseObject(scale, position, rotation, material), VSphere(segments, rings)
     {
-        radius = rad;
+        Color* colors[] = {
+            new Color(190, 50, 50, 255),   // Red
+            new Color(50, 190, 50, 255),   // Green
+            new Color(50, 50, 190, 255),   // Blue
+            new Color(150, 150, 10, 255),  // Yellow
+            new Color(150, 50, 190, 255),  // Purple
+            new Color(50, 150, 190, 255)   // Cyan
+        };
+
+        // Apply materials to triangles
+        int colorIndex = 0;
+        for (size_t i = 0; i < triangles.size(); i++)
+        {
+            if (i % 2 == 0)
+            {
+                colorIndex = (colorIndex + 1) % 6;
+            }
+            Material* mat = new Material(0, 0, colors[colorIndex]);
+            triangles[i]->material = mat;
+        }
+
+        this->setVertices(vertices);
+        this->setTriangles(triangles);
         type = SPHERE;
     }
-
-    std::pair<double, double> Sphere::IntersectRaySphere(Vector3 *rayOrigin, Vector3 *rayDirection, double dotDD)
-    {
-        Vector3 *rayCentertoOrigin = new Vector3(*rayOrigin - *transform->position);
-        double a = dotDD;
-        double b = 2 * (*rayCentertoOrigin).dot(rayDirection);
-        double c = (*rayCentertoOrigin).dot(rayCentertoOrigin) - radius * radius;
-        double discriminant = b * b - 4 * a * c;
-        if (discriminant < 0)
-        {
-            return std::pair<double, double>(DBL_MAX, DBL_MAX);
-        }
-        double t0 = (-b + sqrt(discriminant)) / (2 * a);
-        double t1 = (-b - sqrt(discriminant)) / (2 * a);
-        return std::pair<double, double>(t0, t1);
-    }
-};
+}

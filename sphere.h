@@ -3,15 +3,16 @@
 #define SPHEREOBJECT
 #include "baseobject.h"
 #include "basetype.h"
-#include "quaternion.h"
-#include <utility>
+#include "vertice.h"
+#include "triangle.h"
+#include "vsphere.h"
+#include <vector>
+
 namespace PEngine
 {
-    struct Sphere : BaseObject
+    struct Sphere : BaseObject, VSphere
     {
-        double radius;
-        Sphere(Vector3 *scale, Vector3 *position, Quaternion *rotation, Material *material, double radius);
-        std::pair<double, double> IntersectRaySphere(Vector3 *rayOrigin, Vector3 *rayDirection, double dotDD);
+        Sphere(Vector3* scale, Vector3* position, Quaternion* rotation, Material* material, int segments = 20, int rings = 20);
     };
 };
 #endif
