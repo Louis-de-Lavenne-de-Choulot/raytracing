@@ -110,6 +110,11 @@ namespace PEngine
         return result;
     }
 
+    void Renderer::Get_MouseState(int *x, int *y)
+    {
+        SDL_GetMouseState(x, y);
+    }
+
     Vector3 *Renderer::CanvasToViewport(double x, double y)
     {
         return new Vector3(x * sceneManager->canvasWidth / sceneManager->viewportWidth,
@@ -173,22 +178,41 @@ namespace PEngine
 
         SDL_GetWindowSize(window, &windowWidth, &windowHeight);
 
-        SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
-        SDL_RenderClear(renderer);
+        // Create texture to draw to
+        texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888,
+                                    SDL_TEXTUREACCESS_STREAMING,
+                                    windowWidth, windowHeight);
+        pixels = new Uint32[windowWidth * windowHeight];
+        memset(pixels, 0, windowWidth * windowHeight * sizeof(Uint32));
+        SDL_SetRelativeMouseMode(SDL_TRUE);
     }
 
     void Renderer::Render()
     {
-        // Clear the screen
-        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-        SDL_RenderClear(renderer);
+        memset(pixels, 0, windowWidth * windowHeight * sizeof(Uint32));
         screenBuffer.clear();
+
         for (BaseObject *obj : *sceneManager->objects)
         {
             RenderInstance(obj);
         }
 
+        SDL_UpdateTexture(texture, NULL, pixels, windowWidth * sizeof(Uint32));
+        SDL_RenderCopy(renderer, texture, NULL, NULL);
         SDL_RenderPresent(renderer);
+    }
+
+    void Renderer::SetPixel(int x, int y, Color *color)
+    {
+        if (x < 0 || x >= windowWidth || y < 0 || y >= windowHeight)
+            return;
+
+        Uint32 pixel = ((Uint32)color->r << 24) |
+                       ((Uint32)color->g << 16) |
+                       ((Uint32)color->b << 8) |
+                       ((Uint32)color->a);
+
+        pixels[y * windowWidth + x] = pixel;
     }
 
     void Renderer::RenderInstance(BaseObject *obj)
@@ -205,24 +229,28 @@ namespace PEngine
             vProj = obj->transform->rotation->RotateVector3(vProj);
             // translate
             vProj = new Vector3(*vProj + *obj->transform->position);
+
             // now that we got world space, project it camera space
             vProj = new Vector3(*vProj - *sceneManager->currentCamera->transform->position);
 
             // camera rotation applied
             Quaternion *q = sceneManager->currentCamera->transform->rotation;
             vProj = q->Conjugate(*q).RotateVector3(vProj);
-
+            
             // project
             projected->push_back(new Vertice(vProj, v->shade));
         }
         std::vector<Triangle *> triangles = obj->bTriangles;
         for (Triangle *triangle : triangles)
         {
-            //rotate direction by object rotation
+            // rotate direction by object rotation
             Vector3 *rd = obj->transform->rotation->RotateVector3(triangle->direction);
-            //check if triangle is visible
+            // check if triangle is visible
             double angle = obj->transform->position->angleBetween(rd);
-            if(angle > -90 && angle < 90) {continue;}
+            if (angle > -90 && angle < 90)
+            {
+                continue;
+            }
 
             std::array<Vertice *, 3> vP = {projected->at(triangle->p0), projected->at(triangle->p1), projected->at(triangle->p2)};
 
@@ -339,7 +367,7 @@ namespace PEngine
         }
 
         Color *color = triangle->material->color;
-        bool fullDraw = true;
+        // bool fullDraw = true;
         for (int y = P0->y; y < P2->y; y++)
         {
             double ypy = y - P0->y;
@@ -362,26 +390,23 @@ namespace PEngine
 
                 if (!std::isnan(screenElm) && screenElm > zsegm)
                 {
-                    fullDraw = false;
+                    // fullDraw = false;
                     continue;
                 }
 
                 screenBuffer[x + y * windowWidth] = zsegm;
                 Color *c = new Color(*color * hsegment->at(xxl));
-                SDL_SetRenderDrawColor(renderer, c->r, c->g, c->b, c->a);
-                SDL_RenderDrawPoint(renderer, centeredX, centeredY);
+                SetPixel(centeredX, centeredY, c);
             }
         }
 
-        color = triangle->material->outlineColor;
-        if (color && fullDraw)
-        {
-            DrawLine(projected->at(triangle->p0), projected->at(triangle->p1), color);
-            DrawLine(projected->at(triangle->p0), projected->at(triangle->p2), color);
-            DrawLine(projected->at(triangle->p1), projected->at(triangle->p2), color);
-        }
-
-        SDL_RenderPresent(renderer);
+        // color = triangle->material->outlineColor;
+        // if (color && fullDraw)
+        // {
+        //     DrawLine(projected->at(triangle->p0), projected->at(triangle->p1), color);
+        //     DrawLine(projected->at(triangle->p0), projected->at(triangle->p2), color);
+        //     DrawLine(projected->at(triangle->p1), projected->at(triangle->p2), color);
+        // }
     }
 
     void Renderer::DrawLine(Vertice *V0, Vertice *V1, Color *color)
@@ -399,8 +424,7 @@ namespace PEngine
             std::vector<double> *ys = Interpolate(P0->x, P0->y, P1->x, P1->y);
             for (int x = P0->x; x < P1->x; x++)
             {
-                SDL_SetRenderDrawColor(renderer, color->r, color->g, color->b, color->a);
-                SDL_RenderDrawPoint(renderer, x + sceneManager->centeredCW, sceneManager->centeredCH - ys->at(x - P0->x));
+                SetPixel(x + sceneManager->centeredCW, sceneManager->centeredCH - ys->at(x - P0->x), color);
             }
         }
         else

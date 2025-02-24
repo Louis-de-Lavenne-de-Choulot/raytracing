@@ -25,6 +25,17 @@ namespace PEngine
                 w * q.z + x * q.y - y * q.x + z * q.w);
         }
 
+        // Multiply two quaternions
+        Quaternion &operator*=(const Quaternion &q)
+        {
+            
+            this->w = w * q.w - x * q.x - y * q.y - z * q.z;
+            this->x = w * q.x + x * q.w + y * q.z - z * q.y;
+            this->y = w * q.y - x * q.z + y * q.w + z * q.x;
+            this->z = w * q.z + x * q.y - y * q.x + z * q.w;
+            return *this;
+        }
+
         Quaternion Conjugate(Quaternion q)
         {
             return Quaternion(q.w, -q.x, -q.y, -q.z);
@@ -47,8 +58,8 @@ namespace PEngine
             // Create the rotation quaternion
             Quaternion q(
                 cos(halfAngle),         // w
-                axis->x * sinHalfAngle, // x
-                axis->z * sinHalfAngle, // y
+                axis->z * sinHalfAngle, // x
+                axis->x * sinHalfAngle, // y
                 axis->y * sinHalfAngle  // z
             );
 
