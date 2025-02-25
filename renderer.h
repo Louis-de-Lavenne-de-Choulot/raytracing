@@ -3,11 +3,11 @@
 #include "renderer.h"
 #include "scenemanager.h"
 #include "Triangle.h"
-
 #include <SDL2/SDL.h>
 #include <cfloat>
 #include <array>
 #include <map>
+#include <unordered_map>
 
 namespace PEngine
 {
@@ -20,7 +20,7 @@ namespace PEngine
         SDL_Texture *texture;
         SceneManager *sceneManager;
 
-        std::map<int, double> screenBuffer = std::map<int, double>();
+        std::unordered_map<int, double> screenBuffer = std::unordered_map<int, double>();
         Uint32 *pixels;
         int windowWidth = 0;
         int windowHeight = 0;
@@ -40,10 +40,10 @@ namespace PEngine
 
         void Get_MouseState(int *x, int *y);
         void Render();
-        void SetPixel(int x, int y, Color *color);
+        void SetPixel(int x, int y, Color color);
         void RenderInstance(BaseObject *obj);
         void DrawTriangle(Triangle *triangle, std::vector<Vertice> *projected);
-        void DrawLine(Vertice *V0, Vertice *V1, Color *color);
+        void DrawLine(Vertice *V0, Vertice *V1, Color color);
 
         void ForceClean();
 

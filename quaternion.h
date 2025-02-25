@@ -3,8 +3,8 @@
 #define QUATERNION
 #include "eulerangle.h"
 #include "vector3.h"
-#include <iostream>
 #include <cmath>
+#include <numbers>
 namespace PEngine
 {
     struct Quaternion

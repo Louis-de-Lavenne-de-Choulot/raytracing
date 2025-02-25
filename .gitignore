@@ -33,3 +33,11 @@ sdl2/*
 
 /sdl2
 /sdl3
+/sdl2_VC
+/.vs
+/GameEngine
+GameEngine.vcxproj
+GameEngine.vcxproj.filters
+GameEngine.vcxproj.user
+/x64
+GameEngine.sln

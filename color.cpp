@@ -50,7 +50,7 @@ namespace PEngine
 
     Color Color::operator*(const double val)
     {
-        return Color(r * val, g * val, b * val, a);
+        return { r * val, g * val, b * val, a };
     }
 
     Color &Color::operator*=(const Color &c)

@@ -64,9 +64,6 @@ namespace PEngine
                     }
                 }
             }
-            std::cout << "VSphere created" << std::endl;
-            std::cout << "Vertices: " << vertices.size() << std::endl;
-            std::cout << "Triangles: " << triangles.size() << std::endl;
         }
     };
 };

@@ -18,10 +18,11 @@ namespace PEngine
         double viewportHeight = 1.0;
         double viewportDistance = 1.0;
         int maxRecursionDepth = 3;
-        Camera *currentCamera;
+        Camera *currentCamera = nullptr;
         std::vector<Camera *> *cameras = new std::vector<Camera *>();
         std::vector<BaseObject *> *objects = new std::vector<BaseObject *>();
         std::vector<BaseLight *> *lights = new std::vector<BaseLight *>();
+
     };
 };
 #endif

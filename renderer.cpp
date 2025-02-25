@@ -1,3 +1,5 @@
+#include <windows.h>
+#include <iostream>
 #include "renderer.h"
 #include "baseobject.h"
 #include "baselight.h"
@@ -13,6 +15,7 @@
 #include <array>
 #include <vector>
 #include <synchapi.h>
+#include <span>
 namespace PEngine
 {
 
@@ -131,11 +134,12 @@ namespace PEngine
             return new std::vector<double>{d0};
         }
         std::vector<double> *values = new std::vector<double>{};
+        values->reserve(i1 - i0);
         double a = (d1 - d0) / (i1 - i0);
         double d = d0;
-        for (int x = i0; x < i1; x++)
+        for (int x = i0; x < i1; ++x)
         {
-            values->emplace_back(d);
+            values->push_back(d);
             d += a;
         }
         return values;
@@ -198,15 +202,15 @@ namespace PEngine
         SDL_RenderPresent(renderer);
     }
 
-    void Renderer::SetPixel(int x, int y, Color *color)
+    void Renderer::SetPixel(int x, int y, Color color)
     {
         if (x < 0 || x >= windowWidth || y < 0 || y >= windowHeight)
             return;
 
-        Uint32 pixel = ((Uint32)color->r << 24) |
-                       ((Uint32)color->g << 16) |
-                       ((Uint32)color->b << 8) |
-                       ((Uint32)color->a);
+        Uint32 pixel = ((Uint32)color.r << 24) |
+                       ((Uint32)color.g << 16) |
+                       ((Uint32)color.b << 8) |
+                       ((Uint32)color.a);
 
         pixels[y * windowWidth + x] = pixel;
     }
@@ -214,7 +218,9 @@ namespace PEngine
     void Renderer::RenderInstance(BaseObject *obj)
     {
         std::vector<Vertice> projected = std::vector<Vertice>();
-        projected.reserve(obj->bVertices.size());
+        if (obj->bVertices.size() > 0) {
+                projected.reserve(obj->bVertices.size());
+        }
         for (Vertice *v : obj->bVertices)
         {
             Vector3 *vProj;
@@ -284,17 +290,17 @@ namespace PEngine
         double h1 = projected->at(triangle->p1).shade;
         double h2 = projected->at(triangle->p2).shade;
 
-        double tempSB = screenBuffer[P0->x + P0->y * windowWidth];
+        auto tempSB = screenBuffer.find(P0->x + P0->y * windowWidth);
         double tempZ = P0->z;
-        if (!std::isnan(tempSB) && tempSB > tempZ)
+        if (tempSB != screenBuffer.end() && tempSB->second > tempZ)
         {
-            double tempSB = screenBuffer[P1->x + P1->y * windowWidth];
+            tempSB = screenBuffer.find(P1->x + P1->y * windowWidth);
             double tempZ = P1->z;
-            if (!std::isnan(tempSB) && tempSB > tempZ)
+            if (tempSB != screenBuffer.end() && tempSB->second > tempZ)
             {
-                double tempSB = screenBuffer[P2->x + P2->y * windowWidth];
+                tempSB = screenBuffer.find(P2->x + P2->y * windowWidth);
                 double tempZ = P2->z;
-                if (!std::isnan(tempSB) && tempSB > tempZ)
+                if (tempSB != screenBuffer.end() && tempSB->second > tempZ)
                 {
                     return;
                 }
@@ -362,15 +368,18 @@ namespace PEngine
             zright = z012;
         }
 
-        Color *color = triangle->material->color;
+        Color color = *triangle->material->color;
         // bool fullDraw = true;
         for (int y = P0->y; y < P2->y; y++)
         {
             double ypy = y - P0->y;
             double xl = xleft->at(ypy);
             double xr = xright->at(ypy);
-            std::vector<double> *hsegment = Interpolate(xl, hleft->at(y - P0->y), xr, hright->at(y - P0->y));
-            std::vector<double> *zsegment = Interpolate(xl, 1 / zleft->at(y - P0->y), xr, 1 / zright->at(y - P0->y));
+            if (xl > xr) {
+                continue;
+            }
+            std::span<double> hsegment = *Interpolate(xl, hleft->at(y - P0->y), xr, hright->at(y - P0->y));
+            std::span<double> zsegment = *Interpolate(xl, 1 / zleft->at(y - P0->y), xr, 1 / zright->at(y - P0->y));
 
             for (int x = xl; x < xr; x++)
             {
@@ -381,22 +390,22 @@ namespace PEngine
                     continue;
                 }
                 double xxl = x - xl;
-                double screenElm = screenBuffer[x + y * windowWidth];
-                double zsegm = zsegment->at(xxl);
+                auto screenElm = screenBuffer.find(x + y * windowWidth);
+                double zsegm = zsegment[xxl];
 
-                if (!std::isnan(screenElm) && screenElm > zsegm)
+                if (screenElm != screenBuffer.end() && screenElm->second > zsegm)
                 {
                     // fullDraw = false;
                     continue;
                 }
 
-                screenBuffer[x + y * windowWidth] = zsegm;
-                Color *c = new Color(*color * hsegment->at(xxl));
+                screenBuffer.emplace(x + y * windowWidth, zsegm);
+                Color c = color * hsegment[xxl];
                 SetPixel(centeredX, centeredY, c);
             }
         }
 
-        // color = triangle->material->outlineColor;
+        // color = *triangle->material->outlineColor;
         // if (color && fullDraw)
         // {
         //     DrawLine(projected->at(triangle->p0), projected->at(triangle->p1), color);
@@ -405,7 +414,7 @@ namespace PEngine
         // }
     }
 
-    void Renderer::DrawLine(Vertice *V0, Vertice *V1, Color *color)
+    void Renderer::DrawLine(Vertice *V0, Vertice *V1, Color color)
     {
         Vector3 *P0 = ProjectVertex(V0->position);
         Vector3 *P1 = ProjectVertex(V1->position);
@@ -433,7 +442,7 @@ namespace PEngine
             std::vector<double> *xs = Interpolate(P0->y, P0->x, P1->y, P1->x);
             for (int y = P0->y; y < P1->y; y++)
             {
-                SDL_SetRenderDrawColor(renderer, color->r, color->g, color->b, color->a);
+                SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
                 SDL_RenderDrawPoint(renderer, xs->at(y - P0->y) + sceneManager->centeredCW, sceneManager->centeredCH - y);
             }
         }

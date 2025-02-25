@@ -1,11 +1,13 @@
-#include <vector>
-#include <chrono>
+
 // sleep function
+#include <windows.h>
 #include <iostream>
 #include <synchapi.h>
 #include <thread>
 #include <conio.h>
-#include <windows.h>
+
+#include <vector>
+#include <chrono>
 
 #include "vector3.h"
 #include "plane.h"
@@ -18,6 +20,7 @@
 #include "sphere.h"
 #include "sceneManager.h"
 #include "rectangle.h"
+
 using namespace PEngine;
 
 SceneManager *sceneManager;
@@ -56,7 +59,7 @@ DWORD WINAPI ThreadFunc(LPVOID data)
             running = false;
             return 0;
         }
-
+        newPosition.y = 0;
         sceneManager->currentCamera->transform->position = new Vector3(newPosition);
         Sleep(10);
     }
@@ -136,10 +139,10 @@ int main(int argc, char *argv[])
             if (event.type == SDL_QUIT)
                 running = false;
         }
-        // int x = 0;
-        // int y = 0;
-        // renderer.Get_MouseState(&x, &y);
-        // updateMouse(x, y);
+        int x = 0;
+        int y = 0;
+        renderer.Get_MouseState(&x, &y);
+        updateMouse(x, y);
 
         i++;
         if (i % 360 == 0)

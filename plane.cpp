@@ -1,4 +1,3 @@
-
 #include "plane.h"
 #include "baseobject.h"
 #include "basetype.h"
