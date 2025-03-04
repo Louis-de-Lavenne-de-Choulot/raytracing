@@ -3,7 +3,7 @@
 #include "renderer.h"
 #include "scenemanager.h"
 #include "Triangle.h"
-#include <SDL2/SDL.h>
+#include <SDL.h>
 #include <cfloat>
 #include <array>
 #include <map>

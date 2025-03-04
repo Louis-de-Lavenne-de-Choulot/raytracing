@@ -20,6 +20,7 @@
 #include "sphere.h"
 #include "sceneManager.h"
 #include "rectangle.h"
+#include <SDL.h>
 
 using namespace PEngine;
 
@@ -72,7 +73,8 @@ void updateMouse(int x, int y)
     Transform* cam = sceneManager->currentCamera->transform;
     // Calculate mouse movement
     Vector3 upAxis(*cam->absUP);          // Y-axis for pitch rotation (z-axis)
-    Vector3 rightAxis(*cam->absRight);          // Y-axis for pitch rotation (z-axis)
+    Vector3 rightAxis(*cam->absRight);
+    Vector3 forwardAxis(*cam->absForward);
 
 
     // Apply rotation only if there's movement
