@@ -10,6 +10,12 @@ namespace PEngine
     struct Quaternion
     {
         double w, x, y, z;
+        Quaternion(double w = 1, double x = 0, double y = 0, double z = 0) {
+            this->w = w;
+            this->x = x;
+            this->y = y;
+            this->z = z;
+        }
 
         // this implementation assumes normalized quaternion
         // converts to Euler angles in 3-2-1 sequence
@@ -58,9 +64,9 @@ namespace PEngine
             // Create the rotation quaternion
             Quaternion q(
                 cos(halfAngle),         // w
-                axis->z * sinHalfAngle, // x
+                axis->y * sinHalfAngle, // x
                 axis->x * sinHalfAngle, // y
-                axis->y * sinHalfAngle  // z
+                axis->z * sinHalfAngle  // z
             );
 
             // Convert vector to quaternion (v as quaternion)

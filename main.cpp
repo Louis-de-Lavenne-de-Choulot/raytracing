@@ -25,7 +25,7 @@ using namespace PEngine;
 
 SceneManager *sceneManager;
 int lastX = 0, lastY = 0;
-float sensitivity = 0.09f; // Adjust rotation sensitivity
+float sensitivity = 0.01f; // Adjust rotation sensitivity
 float moveSpeed = 0.1f;
 std::atomic<bool> running{true};
 
@@ -68,33 +68,27 @@ DWORD WINAPI ThreadFunc(LPVOID data)
 
 void updateMouse(int x, int y)
 {
+    // Get current camera transform
+    Transform* cam = sceneManager->currentCamera->transform;
     // Calculate mouse movement
-    int deltaX = x - lastX;
-    int deltaY = y - lastY;
+    Vector3 upAxis(*cam->absUP);          // Y-axis for pitch rotation (z-axis)
+    Vector3 rightAxis(*cam->absRight);          // Y-axis for pitch rotation (z-axis)
 
-    lastX = x;
-    lastY = y;
 
     // Apply rotation only if there's movement
-    if (deltaX != 0 || deltaY != 0)
+    if (x != 0 || y != 0)
     {
         // Convert mouse movement to rotation angles
-        float yaw = deltaX * sensitivity;
-        float pitch = deltaY * sensitivity;
-
-        // Get current camera transform
-        Transform *cam = sceneManager->currentCamera->transform;
+        float yaw = x * sensitivity;
+        float pitch = y * sensitivity;
 
         // Create rotation quaternions
-        Vector3 upAxis(0, 0, 1);          // Y-axis for pitch rotation (z-axis)
-        Vector3 rightAxis = cam->right(); // Local right axis for yaw rotation
+        //Vector3 rightAxis = cam->right(); // Local right axis for yaw rotation
 
         Quaternion tempx = Quaternion();
         Quaternion tempy = Quaternion();
-        tempx.Rotate(cam->position, &rightAxis, yaw);
-        tempy.Rotate(cam->position, &upAxis, pitch);
-        *sceneManager->currentCamera->transform->rotation *= tempx;
-        *sceneManager->currentCamera->transform->rotation *= tempy;
+        cam->Rotate(&rightAxis, yaw);
+        cam->Rotate(&upAxis, pitch);
     }
 }
 
@@ -128,6 +122,8 @@ int main(int argc, char *argv[])
     // Start input monitoring in separate thread
     HANDLE thread = CreateThread(NULL, 0, ThreadFunc, NULL, 0, NULL);
 
+    Vector3 endAT = Vector3(-8.5, 0, 5.5);
+    Vector3 endAT2 = Vector3(0, 0, 14);
     int i = 0;
     // render scene
     while (running)
@@ -149,13 +145,12 @@ int main(int argc, char *argv[])
         {
             i = 0;
         }
-        // rec->transform->Rotate(new Vector3(1, 0, 0), i);
-        // sceneManager->currentCamera->transform->Rotate(new Vector3(1, 0, 0), i);
 
         // Start measuring time
         auto start = std::chrono::high_resolution_clock::now();
 
         renderer.Render();
+
         // rec->transform->Rotate(new Vector3(1, 0, 0), 10);
         // Stop measuring time
         auto end = std::chrono::high_resolution_clock::now();
@@ -165,7 +160,6 @@ int main(int argc, char *argv[])
 
         // Output the duration in seconds
         std::cout << duration.count() << std::endl;
-        // SDL_Delay(16);
     }
 
     // Wait for input thread to finish

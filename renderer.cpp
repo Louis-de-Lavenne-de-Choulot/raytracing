@@ -10,7 +10,7 @@
 #include "directionallight.h"
 #include "scenemanager.h"
 #include <cfloat>
-#include <SDL2/SDL.h>
+#include <SDL.h>
 #include <cmath>
 #include <array>
 #include <vector>
@@ -111,7 +111,7 @@ namespace PEngine
 
     void Renderer::Get_MouseState(int *x, int *y)
     {
-        SDL_GetMouseState(x, y);
+        SDL_GetRelativeMouseState(x, y);
     }
 
     Vector3 *Renderer::CanvasToViewport(double x, double y)
@@ -178,13 +178,15 @@ namespace PEngine
 
         SDL_GetWindowSize(window, &windowWidth, &windowHeight);
 
+        SDL_SetRelativeMouseMode(SDL_TRUE);
+
+
         // Create texture to draw to
         texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888,
                                     SDL_TEXTUREACCESS_STREAMING,
                                     windowWidth, windowHeight);
         pixels = new Uint32[windowWidth * windowHeight];
         memset(pixels, 0, windowWidth * windowHeight * sizeof(Uint32));
-        SDL_SetRelativeMouseMode(SDL_TRUE);
     }
 
     void Renderer::Render()
@@ -242,19 +244,17 @@ namespace PEngine
             // project
             projected.emplace_back(Vertice(vProj, v->shade));
         }
+        Vector3 c = sceneManager->currentCamera->transform->forward();
         std::vector<Triangle *> triangles = obj->bTriangles;
         for (Triangle *triangle : triangles)
         {
-            // rotate direction by object rotation
-            Vector3 *rd = obj->transform->rotation->RotateVector3(triangle->direction);
-            // check if triangle is visible
-            double angle = obj->transform->position->angleBetween(rd);
-            if (angle > -90 && angle < 90)
-            {
+            //check if triangle direction is in player's view
+            if (c.angleBetween(triangle->direction) < 90) {
                 continue;
             }
 
-            std::array<Vertice, 3> vP = {projected[triangle->p0], projected.at(triangle->p1), projected.at(triangle->p2)};
+
+            std::array<Vertice, 3> vP = { projected[triangle->p0], projected.at(triangle->p1), projected.at(triangle->p2) };
 
             std::vector<Vertice> *trs = checkTriangle(vP);
             switch (trs->size())
@@ -272,6 +272,7 @@ namespace PEngine
                 break;
             }
         }
+        std::cout << std::endl;
     }
 
     void Renderer::DrawTriangle(Triangle *triangle, std::vector<Vertice> *projected)
