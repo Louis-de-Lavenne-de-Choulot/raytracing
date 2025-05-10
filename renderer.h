@@ -38,6 +38,7 @@ namespace PEngine
     public:
         Renderer(SceneManager *sceneManager);
 
+        bool IsFacing(std::array<Vertice, 3> tArr);
         void Get_MouseState(int *x, int *y);
         void Render();
         void SetPixel(int x, int y, Color color);

@@ -10,17 +10,16 @@ namespace PEngine
 {
     struct VPlane
     {
-        std::array<Vertice *, 4> vertices = std::array<Vertice *, 4>{
-            new Vertice(new Vector3(1, 1, 1), 1),
-            new Vertice(new Vector3(-1, 1, 1), 1),
-            new Vertice(new Vector3(-1, -1, 1), 1),
-            new Vertice(new Vector3(1, -1, 1), 1)};
+        std::array<Vertice*, 4> vertices = std::array<Vertice*, 4>{
+                new Vertice(new Vector3(-1, -1, -1), 1), // LBF - Left Bottom Front (0)
+                new Vertice(new Vector3(1, -1, -1),  1), // RBF - Right Bottom Front (1)
+                new Vertice(new Vector3(-1, -1, 1),  1), // LBB - Left Bottom Back (2)
+                new Vertice(new Vector3(1, -1, 1),   1), // RBB - Right Bottom Back (3)
+        };
 
-        Vector3 *forward = new Vector3(0, 0, -1);
-
-        std::array<Triangle *, 2> triangles = std::array<Triangle *, 2>{
-            new Triangle(0, 1, 2, forward),
-            new Triangle(0, 2, 3, forward)};
+        std::array<Triangle*, 2> triangles = std::array<Triangle*, 2>{
+            new Triangle(0, 3, 2), new Triangle(0, 1, 3)
+        };
     };
 };
 #endif

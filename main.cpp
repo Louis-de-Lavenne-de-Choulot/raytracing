@@ -26,7 +26,7 @@ using namespace PEngine;
 
 SceneManager *sceneManager;
 int lastX = 0, lastY = 0;
-float sensitivity = 0.01f; // Adjust rotation sensitivity
+float sensitivity = 0.04f; // Adjust rotation sensitivity
 float moveSpeed = 0.1f;
 std::atomic<bool> running{true};
 
@@ -72,25 +72,25 @@ void updateMouse(int x, int y)
     // Get current camera transform
     Transform* cam = sceneManager->currentCamera->transform;
     // Calculate mouse movement
-    Vector3 upAxis(*cam->absUP);          // Y-axis for pitch rotation (z-axis)
+    Vector3 upAxis(*cam->absUP);    
     Vector3 rightAxis(*cam->absRight);
-    Vector3 forwardAxis(*cam->absForward);
 
 
     // Apply rotation only if there's movement
     if (x != 0 || y != 0)
     {
         // Convert mouse movement to rotation angles
+        // yaw is left/right    pitch is up/down
         float yaw = x * sensitivity;
         float pitch = y * sensitivity;
 
-        // Create rotation quaternions
-        //Vector3 rightAxis = cam->right(); // Local right axis for yaw rotation
 
-        Quaternion tempx = Quaternion();
-        Quaternion tempy = Quaternion();
-        cam->Rotate(&rightAxis, yaw);
-        cam->Rotate(&upAxis, pitch);
+        //! seems like rotating x then y (vice-versa) produces rolling ?
+        //! should find a way to rotate both x and y at the same time ?
+        
+        // left/right is Up Axis because we rotate around and not along an axis
+        cam->Rotate(&upAxis, yaw);
+        //cam->Rotate(&rightAxis, pitch);
     }
 }
 
@@ -108,10 +108,12 @@ int main(int argc, char *argv[])
     Color *g = new Color(200, 0, 0, 255);
     Color *b = new Color(0, 0, 200, 255);
     PEngine::Rectangle *rec = new PEngine::Rectangle(new Vector3(1, 2, 1), new Vector3(-1.5, 0, 7), new Quaternion(1, 0, 0, 0), new Material(0, 0, g, b));
+    PEngine::Plane *plane = new PEngine::Plane(new Vector3(10, 1, 10), new Vector3(0, 0, 0), new Quaternion(1, 0, 0, 0), new Material(0, 0, new Color(50, 190, 190, 255), b));
     sceneManager->objects->emplace_back(rec);
+    sceneManager->objects->emplace_back(plane);
 
-    // PEngine::Sphere *sph = new PEngine::Sphere(new Vector3(1, 1, 1), new Vector3(0, 0, 3), new Quaternion(1, 0, 0, 0), new Material(0, 0, b, g));
-    // sceneManager->objects->emplace_back(sph);
+     //PEngine::Sphere *sph = new PEngine::Sphere(new Vector3(1, 1, 1), new Vector3(0, 0, 3), new Quaternion(1, 0, 0, 0), new Material(0, 0, b, g));
+     //sceneManager->objects->emplace_back(sph);
 
     sceneManager->lights->emplace_back(new BaseLight(0.2, new Color(255, 255, 255, 255)));
     sceneManager->lights->emplace_back(new PointLight(0.6, new Color(255, 255, 255, 255), new Vector3(5, 0, 0)));
@@ -162,6 +164,9 @@ int main(int argc, char *argv[])
 
         // Output the duration in seconds
         std::cout << duration.count() << std::endl;
+
+		// Sleep for a while to reduce CPU usage
+		Sleep(100);
     }
 
     // Wait for input thread to finish

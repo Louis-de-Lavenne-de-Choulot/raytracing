@@ -217,6 +217,19 @@ namespace PEngine
         pixels[y * windowWidth + x] = pixel;
     }
 
+    /*Back Face Culling, WE USE CLOCKWISE WINDING
+    https://en.wikipedia.org/wiki/Back-face_culling
+    https://cmichel.io/understanding-front-faces-winding-order-and-normals
+    */
+    bool Renderer::IsFacing(std::array<Vertice, 3> tArr)
+    {
+        Vector3 edge1 = *tArr[1].position - *tArr[0].position;
+        Vector3 edge2 = *tArr[2].position - *tArr[0].position;
+        Vector3 *normal = new Vector3(edge1.cross(edge2)); // -1 if counter clockwise winding
+        double dot_product = (*tArr[0].position).dot(normal);
+        return dot_product >= 0;
+    }
+
     void Renderer::RenderInstance(BaseObject *obj)
     {
         std::vector<Vertice> projected = std::vector<Vertice>();
@@ -245,34 +258,34 @@ namespace PEngine
             projected.emplace_back(Vertice(vProj, v->shade));
         }
         Vector3 c = sceneManager->currentCamera->transform->forward();
+
         std::vector<Triangle *> triangles = obj->bTriangles;
         for (Triangle *triangle : triangles)
         {
-            //check if triangle direction is in player's view
-            if (c.angleBetween(triangle->direction) < 90) {
-                continue;
-            }
-
 
             std::array<Vertice, 3> vP = { projected[triangle->p0], projected.at(triangle->p1), projected.at(triangle->p2) };
+
+			if (!IsFacing(vP))
+			{
+				continue;
+			}
 
             std::vector<Vertice> *trs = checkTriangle(vP);
             switch (trs->size())
             {
             case 6:
                 // with triangles 0, 1, 2 and 3, 1, 2
-                DrawTriangle(new Triangle(0, 1, 2, nullptr, triangle->material), trs);
-                DrawTriangle(new Triangle(3, 1, 2, nullptr, triangle->material), trs);
+                DrawTriangle(new Triangle(0, 1, 2, triangle->material), trs);
+                DrawTriangle(new Triangle(3, 1, 2, triangle->material), trs);
                 break;
             case 3:
                 // with triangle 0, 1, 2
-                DrawTriangle(new Triangle(0, 1, 2, nullptr, triangle->material), trs);
+                DrawTriangle(new Triangle(0, 1, 2, triangle->material), trs);
                 break;
             default:
                 break;
             }
         }
-        std::cout << std::endl;
     }
 
     void Renderer::DrawTriangle(Triangle *triangle, std::vector<Vertice> *projected)
@@ -352,7 +365,7 @@ namespace PEngine
         z012->insert(z012->end(), z12->begin(), z12->end());
 
         // Determine left from right
-        double m = floor(x012->size() / 2);
+        int m = floor(x012->size() / 2);
         std::vector<double> *xleft = x012;
         std::vector<double> *xright = x02;
         std::vector<double> *hleft = h012;

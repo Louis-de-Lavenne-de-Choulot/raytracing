@@ -48,8 +48,7 @@ namespace PEngine
                         triangles.push_back(new Triangle(
                             ringStart + segment,
                             ringStart + segment + 1,
-                            nextRingStart + segment,
-                            dir
+                            nextRingStart + segment
                         ));
                     }
 
@@ -58,8 +57,7 @@ namespace PEngine
                         triangles.push_back(new Triangle(
                             nextRingStart + segment,
                             ringStart + segment + 1,
-                            nextRingStart + segment + 1,
-                            dir
+                            nextRingStart + segment + 1
                         ));
                     }
                 }

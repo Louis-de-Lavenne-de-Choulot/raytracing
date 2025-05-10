@@ -12,22 +12,19 @@ namespace PEngine
         int p0;
         int p1;
         int p2;
-        Vector3 *direction;
         Material *material;
-        Triangle(int point0, int point1, int point2, Vector3 *direction, Material *mat)
+        Triangle(int point0, int point1, int point2, Material *mat)
         {
             p0 = point0;
             p1 = point1;
             p2 = point2;
-            this->direction = direction;
             material = mat;
         }
-        Triangle(int point0, int point1, int point2, Vector3 *direction)
+        Triangle(int point0, int point1, int point2)
         {
             p0 = point0;
             p1 = point1;
             p2 = point2;
-            this->direction = direction;
         }
     };
 };

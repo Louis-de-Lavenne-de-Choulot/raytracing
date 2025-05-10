@@ -5,6 +5,7 @@
 #include "vector3.h"
 #include <cmath>
 #include <numbers>
+#include <iostream>
 namespace PEngine
 {
     struct Quaternion
@@ -64,8 +65,8 @@ namespace PEngine
             // Create the rotation quaternion
             Quaternion q(
                 cos(halfAngle),         // w
-                axis->y * sinHalfAngle, // x
-                axis->x * sinHalfAngle, // y
+                axis->x * sinHalfAngle, // x
+                axis->y * sinHalfAngle, // y
                 axis->z * sinHalfAngle  // z
             );
 
@@ -77,10 +78,12 @@ namespace PEngine
 
             // Apply the rotation: q * v * q_conjugate
             Quaternion rotated = q * vQuat * qConjugate;
+
             this->w = q.w;
             this->x = q.x;
             this->y = q.y;
             this->z = q.z;
+
             // Return the rotated vector
             return Vector3(rotated.x, rotated.y, rotated.z);
         }

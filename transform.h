@@ -17,8 +17,8 @@ namespace PEngine
         Quaternion *rotation = new Quaternion();
         Vector3 *forwardP() { return rotation->RotateVector3(new Vector3(0, 0, 1)); };
         Vector3 forward() { return *forwardP(); };
-        Vector3 left() { return Quaternion().Rotate(forwardP(), new Vector3(1, 0, 0), -90); };
-        Vector3 right() { return Quaternion().Rotate(forwardP(), new Vector3(1, 0, 0), 90); };
+        Vector3 left() { return Quaternion().Rotate(forwardP(), new Vector3(0, 1, 0), -90); };
+        Vector3 right() { return Quaternion().Rotate(forwardP(), new Vector3(0, 1, 0), 90); };
         const Vector3 *absRight = new Vector3(1, 0, 0);
         const Vector3 *absUP = new Vector3(0, 1, 0);
         const Vector3 *absForward = new Vector3(0, 0, 1);
@@ -39,9 +39,9 @@ namespace PEngine
 
         void Rotate(Vector3* axis, double angle)
         {
-            Quaternion temp = Quaternion();
+            Quaternion temp = Quaternion();// rotate on empty quaternion because
+                                           // we want an incremental rotation
             temp.Rotate(this->position, axis, angle);
-            // Return the rotated vector
             *this->rotation *= temp;
         }
     };
