@@ -194,6 +194,14 @@ namespace PEngine
         memset(pixels, 0, windowWidth * windowHeight * sizeof(Uint32));
         screenBuffer.clear();
 
+        for (BaseLight* l : *sceneManager->lights)
+        {
+            if (l->type == AMBIENT_LIGHT)
+            {
+                globalIllumination = l;
+            }
+        }
+
         for (BaseObject *obj : *sceneManager->objects)
         {
             RenderInstance(obj);
@@ -270,6 +278,7 @@ namespace PEngine
 				continue;
 			}
 
+            //cut triangle in two if partially in view, if out then skip
             std::vector<Vertice> *trs = checkTriangle(vP);
             switch (trs->size())
             {
@@ -288,7 +297,13 @@ namespace PEngine
         }
     }
 
-    void Renderer::DrawTriangle(Triangle *triangle, std::vector<Vertice> *projected)
+    //double Renderer::ComputeShading(double shade)
+    //{
+    //    //TODO
+    //    return shade * globalIllumination->intensity;
+    //}
+
+    void Renderer::DrawTriangle(Triangle* triangle, std::vector<Vertice>* projected)
     {
 
         Vector3 *NP0 = projected->at(triangle->p0).position;

@@ -13,15 +13,15 @@ namespace PEngine
     struct VRectangle
     {
         std::array<Vertice*, 8> vertices = std::array<Vertice*, 8>{
-            new Vertice(new Vector3(-1, -1, -1), 1), // LBF - Left Bottom Front (0)
-            new Vertice(new Vector3(1, -1, -1),  1), // RBF - Right Bottom Front (1)
-            new Vertice(new Vector3(1, 1, -1),   1), // RTF - Right Top Front (2)
-            new Vertice(new Vector3(-1, 1, -1),  1), // LTF - Left Top Front (3)
+            new Vertice(new Vector3(-1, -1, -1)), // LBF - Left Bottom Front (0)
+            new Vertice(new Vector3(1, -1, -1)), // RBF - Right Bottom Front (1)
+            new Vertice(new Vector3(1, 1, -1)), // RTF - Right Top Front (2)
+            new Vertice(new Vector3(-1, 1, -1)), // LTF - Left Top Front (3)
 
-            new Vertice(new Vector3(-1, -1, 1),  1), // LBB - Left Bottom Back (4)
-            new Vertice(new Vector3(1, -1, 1),   1), // RBB - Right Bottom Back (5)
-            new Vertice(new Vector3(1, 1, 1),    1), // RTB - Right Top Back (6)
-            new Vertice(new Vector3(-1, 1, 1),   1)  // LTB - Left Top Back (7)
+            new Vertice(new Vector3(-1, -1, 1)), // LBB - Left Bottom Back (4)
+            new Vertice(new Vector3(1, -1, 1)), // RBB - Right Bottom Back (5)
+            new Vertice(new Vector3(1, 1, 1)), // RTB - Right Top Back (6)
+            new Vertice(new Vector3(-1, 1, 1))  // LTB - Left Top Back (7)
         };
 
         std::array<Triangle*, 12> triangles = std::array<Triangle*, 12>{

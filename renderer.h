@@ -24,6 +24,7 @@ namespace PEngine
         Uint32 *pixels;
         int windowWidth = 0;
         int windowHeight = 0;
+        BaseLight* globalIllumination = new BaseLight(0.2, new Color(255, 255, 255, 255));
 
         std::vector<Vertice> *checkTriangle(std::array<Vertice, 3> verts);
         // void ApplyRotation(array<Vertice *, 8> &vertices, Quaternion *rotation);
@@ -39,6 +40,8 @@ namespace PEngine
         Renderer(SceneManager *sceneManager);
 
         bool IsFacing(std::array<Vertice, 3> tArr);
+        //TODO
+        //double ComputeShading(double shade);
         void Get_MouseState(int *x, int *y);
         void Render();
         void SetPixel(int x, int y, Color color);

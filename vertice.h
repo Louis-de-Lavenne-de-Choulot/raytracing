@@ -8,7 +8,7 @@ namespace PEngine
     {
         Vector3 *position;
         double shade;
-        Vertice(Vector3 *pos, double shadeValue)
+        Vertice(Vector3 *pos, double shadeValue = 1)
         {
             position = pos;
             shade = shadeValue;

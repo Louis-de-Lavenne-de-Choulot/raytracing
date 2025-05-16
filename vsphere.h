@@ -31,7 +31,7 @@ namespace PEngine
                     float y = std::cos(phi);
                     float z = std::sin(phi) * std::sin(theta);
 
-                    vertices.push_back(new Vertice(new Vector3(x, y, z), 1));
+                    vertices.push_back(new Vertice(new Vector3(x, y, z)));
                 }
             }
 

@@ -90,7 +90,7 @@ void updateMouse(int x, int y)
         
         // left/right is Up Axis because we rotate around and not along an axis
         cam->Rotate(&upAxis, yaw);
-        //cam->Rotate(&rightAxis, pitch);
+        cam->Rotate(&rightAxis, pitch);
     }
 }
 
