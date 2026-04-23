@@ -9,10 +9,11 @@ namespace PEngine
         /* data */
         int specularity;
         double reflectivity;
-        Color *color;
-        Color *outlineColor;
+        Color color;
+        Color outlineColor;
 
-        Material(int spec, double ref, Color *col, Color *outlinning = nullptr)
+		Material() : specularity(0), reflectivity(0), color(), outlineColor() {}
+        Material(int spec, double ref, Color col, Color outlinning = Color(0, 0, 0, 255))
         {
             specularity = spec;
             reflectivity = ref;

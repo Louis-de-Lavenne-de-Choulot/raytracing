@@ -1,49 +1,44 @@
 #pragma once
-#ifndef TRANSFORM
-#define TRANSFORM
 #include "vector3.h"
-#include "material.h"
-#include "basetype.h"
 #include "quaternion.h"
-#include <cmath>
-#include <numbers>
-namespace PEngine
-{
-    struct Transform
-    {
-        /* data */
-        Vector3 *scale;
-        Vector3 *position;
-        Quaternion *rotation = new Quaternion();
-        Vector3 *forwardP() { return rotation->RotateVector3(new Vector3(0, 0, 1)); };
-        Vector3 forward() { return *forwardP(); };
-        Vector3 left() { return Quaternion().Rotate(forwardP(), new Vector3(0, 1, 0), -90); };
-        Vector3 right() { return Quaternion().Rotate(forwardP(), new Vector3(0, 1, 0), 90); };
-        const Vector3 *absRight = new Vector3(1, 0, 0);
-        const Vector3 *absUP = new Vector3(0, 1, 0);
-        const Vector3 *absForward = new Vector3(0, 0, 1);
 
+namespace PEngine {
+    struct Transform {
+        Vector3 scale;
+        Vector3 position;
+        Quaternion rotation;
 
-        Transform(Vector3 *scale, Vector3 *position, Quaternion *rotation)
-        {
-            this->scale = scale;
-            this->position = position;
-            this->rotation = rotation;
+        inline static const Vector3 absRight{ 1, 0, 0 };
+        inline static const Vector3 absUP{ 0, 1, 0 };
+        inline static const Vector3 absForward{ 0, 0, 1 };
+
+        Transform(Vector3 s = { 1,1,1 }, Vector3 p = { 0,0,0 }, Quaternion r = Quaternion())
+            : scale(s), position(p), rotation(r) {
         }
 
-        Vector3 RotateTo(Vector3 *axis, double angle)
-        {
-            // Return the rotated vector
-            return this->rotation->Rotate(this->position, axis, angle);
+        Vector3 forward() {
+			Vector3 temp(rotation.RotateVector3(&absForward));
+            return temp;
         }
 
-        void Rotate(Vector3* axis, double angle)
-        {
-            Quaternion temp = Quaternion();// rotate on empty quaternion because
-                                           // we want an incremental rotation
-            temp.Rotate(this->position, axis, angle);
-            *this->rotation *= temp;
+        Vector3 left() {
+            Vector3 tempF(forward());
+			Vector3 temp(Quaternion().Rotate(&tempF, &absUP, -90));
+            return temp;
+        }
+
+        Vector3 right() {
+            Vector3 tempF(forward());
+            Vector3 temp(Quaternion().Rotate(&tempF, &absUP, 90));
+            return temp;
+        }
+
+
+        void Rotate(Vector3 axis, double angle) {
+            Quaternion incremental;
+            // Assuming Rotate returns/modifies appropriately
+            incremental.Rotate(&position, &axis, angle);
+            rotation *= incremental;
         }
     };
-};
-#endif
+}

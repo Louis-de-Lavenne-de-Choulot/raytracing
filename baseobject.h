@@ -14,24 +14,24 @@ namespace PEngine
     struct BaseObject
     {
         /* data */
-        PEngine::Transform *transform;
+        PEngine::Transform transform;
         Material *material;
-        std::vector<Vertice *> bVertices;
-        std::vector<Triangle *> bTriangles;
+        std::vector<Vertice> bVertices;
+        std::vector<Triangle> bTriangles;
         ObjectType type;
-        BaseObject(Vector3 *scale, Vector3 *pos, Quaternion *rot, Material *mat)
+        BaseObject(Vector3 scale, Vector3 pos, Quaternion rot, Material *mat)
         {
-            transform = new PEngine::Transform(scale, pos, rot);
+            transform = PEngine::Transform(scale, pos, rot);
             material = mat;
             type = NONE;
         }
 
-        void setVertices(std::vector<Vertice *> vertices)
+        void setVertices(std::vector<Vertice> vertices)
         {
             this->bVertices = vertices;
         }
 
-        void setTriangles(std::vector<Triangle *> triangles)
+        void setTriangles(std::vector<Triangle> triangles)
         {
             this->bTriangles = triangles;
         }

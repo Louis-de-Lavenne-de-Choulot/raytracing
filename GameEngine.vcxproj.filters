@@ -113,10 +113,16 @@
     <ClCompile Include="vector3.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="defaults.h">
+      <Filter>Header Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="dockerfile" />
     <None Include="makefile" />
     <None Include="README.md" />
+  </ItemGroup>
+  <ItemGroup>
+    <CopyFileToFolders Include="..\SDL2-devel-2.32.10-VC\SDL2-2.32.10\lib\x64\SDL2.dll" />
   </ItemGroup>
 </Project>

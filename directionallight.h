@@ -10,9 +10,9 @@ namespace PEngine
     struct DirectionalLight : BaseLight
     {
         /* data */
-        Vector3 *direction;
+        Vector3 direction;
 
-        DirectionalLight(double intens, Color *col, Vector3 *dir) : BaseLight(intens, col)
+        DirectionalLight(double intens, Color col, Vector3 dir) : BaseLight(intens, col)
         {
             direction = dir;
             type = DIRECTIONAL_LIGHT;

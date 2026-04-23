@@ -10,9 +10,9 @@ namespace PEngine
     struct PointLight : BaseLight
     {
         /* data */
-        Vector3 *position;
+        Vector3 position;
 
-        PointLight(double intens, Color *col, Vector3 *pos) : BaseLight(intens, col)
+        PointLight(double intens, Color col, Vector3 pos) : BaseLight(intens, col)
         {
             position = pos;
             type = POINT_LIGHT;

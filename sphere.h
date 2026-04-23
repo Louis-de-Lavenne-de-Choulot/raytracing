@@ -12,7 +12,7 @@ namespace PEngine
 {
     struct Sphere : BaseObject, VSphere
     {
-        Sphere(Vector3* scale, Vector3* position, Quaternion* rotation, Material* material, int segments = 20, int rings = 20);
+        Sphere(Vector3 scale, Vector3 position, Quaternion rotation, Material* material, int segments = 20, int rings = 20);
     };
 };
 #endif

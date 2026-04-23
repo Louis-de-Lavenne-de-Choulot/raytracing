@@ -33,14 +33,23 @@ namespace PEngine
         }
 
         // Multiply two quaternions
-        Quaternion &operator*=(const Quaternion &q)
-        {
-            
-            this->w = w * q.w - x * q.x - y * q.y - z * q.z;
-            this->x = w * q.x + x * q.w + y * q.z - z * q.y;
-            this->y = w * q.y - x * q.z + y * q.w + z * q.x;
-            this->z = w * q.z + x * q.y - y * q.x + z * q.w;
+        Quaternion& operator*=(const Quaternion& q) {
+            double nw = w * q.w - x * q.x - y * q.y - z * q.z;
+            double nx = w * q.x + x * q.w + y * q.z - z * q.y;
+            double ny = w * q.y - x * q.z + y * q.w + z * q.x;
+            double nz = w * q.z + x * q.y - y * q.x + z * q.w;
+            w = nw; x = nx; y = ny; z = nz;
             return *this;
+        }
+
+		Quaternion Normalized() const {
+			double mag = sqrt(w * w + x * x + y * y + z * z);
+			return Quaternion(w / mag, x / mag, y / mag, z / mag);
+		}
+
+        void Normalize() {
+            double mag = sqrt(w * w + x * x + y * y + z * z);
+            w /= mag; x /= mag; y /= mag; z /= mag;
         }
 
         Quaternion Conjugate(Quaternion q)
@@ -48,15 +57,15 @@ namespace PEngine
             return Quaternion(q.w, -q.x, -q.y, -q.z);
         }
 
-        Vector3 *RotateVector3(Vector3 *v)
+        Vector3 RotateVector3(const Vector3 *v)
         {
             Quaternion qv = Quaternion(0, v->x, v->y, v->z);
             Quaternion qConj = Conjugate(*this);
             Quaternion qRes = *this * qv * qConj;
-            return new Vector3(qRes.x, qRes.y, qRes.z);
+            return Vector3(qRes.x, qRes.y, qRes.z);
         }
 
-        Vector3 Rotate(Vector3 *toRotate, Vector3 *axis, double angle)
+        Vector3 Rotate(const Vector3 *toRotate, const Vector3 *axis, double angle)
         {
             // Convert angle from degrees to radians
             double halfAngle = angle * 0.5 * (std::numbers::pi / 180.0);
@@ -83,6 +92,8 @@ namespace PEngine
             this->x = q.x;
             this->y = q.y;
             this->z = q.z;
+
+            Normalize();
 
             // Return the rotated vector
             return Vector3(rotated.x, rotated.y, rotated.z);

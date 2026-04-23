@@ -4,6 +4,7 @@
 #include "vector3.h"
 #include "vertice.h"
 #include "material.h"
+#include "defaults.h"
 namespace PEngine
 {
     struct Triangle
@@ -25,6 +26,7 @@ namespace PEngine
             p0 = point0;
             p1 = point1;
             p2 = point2;
+            material = Defaults::MissingMaterial;
         }
     };
 };

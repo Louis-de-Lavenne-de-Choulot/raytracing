@@ -6,12 +6,11 @@ namespace PEngine
 {
     struct Vertice
     {
-        Vector3 *position;
+        Vector3 position;
         double shade;
-        Vertice(Vector3 *pos, double shadeValue = 1)
+        Vertice(Vector3 pos, double shadeValue = 1)
+            : position(pos), shade(shadeValue)
         {
-            position = pos;
-            shade = shadeValue;
         }
     };
 };

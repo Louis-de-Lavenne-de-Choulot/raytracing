@@ -9,6 +9,7 @@ namespace PEngine
                 double y;
                 double z;
 
+				Vector3() : x(0), y(0), z(0) {}
                 Vector3(double valx, double valy, double valz);
 
                 double len();

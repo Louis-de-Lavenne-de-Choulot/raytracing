@@ -9,14 +9,13 @@ struct BaseLight
 {
     /* data */
     double intensity;
-    Color* color;
+    Color color;
     ObjectType type;
 
-    BaseLight(double intens, Color* col)
+    BaseLight() : intensity(0.0), color(), type(AMBIENT_LIGHT) {}
+    BaseLight(double intens, Color col)
+		: intensity(intens), color(col), type(AMBIENT_LIGHT)
     {
-        intensity = intens;
-        color = col;
-        type = AMBIENT_LIGHT;
     }
 };
 };

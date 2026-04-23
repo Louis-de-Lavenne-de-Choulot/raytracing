@@ -11,7 +11,7 @@ namespace PEngine
 {
     struct Plane : BaseObject, VPlane
     {
-        Plane(Vector3 *scale, Vector3 *position, Quaternion *rotation, Material *material);
+        Plane(Vector3 scale, Vector3 position, Quaternion rotation, Material *material);
     };
 };
 #endif

@@ -18,25 +18,26 @@ namespace PEngine
         SDL_Window *window;
         SDL_Renderer *renderer;
         SDL_Texture *texture;
-        SceneManager *sceneManager;
+        SceneManager *sceneManager; 
 
-        std::unordered_map<int, double> screenBuffer = std::unordered_map<int, double>();
         Uint32 *pixels;
         int windowWidth = 0;
         int windowHeight = 0;
-        BaseLight* globalIllumination = new BaseLight(0.2, new Color(255, 255, 255, 255));
+        BaseLight* globalIllumination = nullptr;
+        float* zBuffer = nullptr;
 
-        std::vector<Vertice> *checkTriangle(std::array<Vertice, 3> verts);
+        std::vector<Vertice> checkTriangle(std::array<Vertice, 3> verts);
         // void ApplyRotation(array<Vertice *, 8> &vertices, Quaternion *rotation);
-        Vector3 *CanvasToViewport(double x, double y);
-        Vector3 *ProjectVertex(Vector3 *v);
+        Vector3 CanvasToViewport(double x, double y);
+        Vector3 ProjectVertex(Vector3 *v);
         std::pair<double, BaseObject *> ClosestIntersection(Vector3 *rayOrigin, Vector3 *rayDirection, double dotDD, double minDistance = 0, double maxDistance = DBL_MAX, bool returnFirstFound = false);
         Vector3 *ReflectRay(Vector3 *point, Vector3 *normal);
         Color *ComputeLightning(Vector3 *point, Vector3 *normal, Vector3 *viewDirection, Material *material);
         Color *TraceRay(Vector3 *rayOrigin, Vector3 *rayDirection, double dotDD, int depth, int minDistance);
-        std::vector<double> *Interpolate(double i0, double d0, double i1, double d1);
+        std::vector<double> Interpolate(double i0, double d0, double i1, double d1);
 
     public:
+        static Material* DefaultMaterial;
         Renderer(SceneManager *sceneManager);
 
         bool IsFacing(std::array<Vertice, 3> tArr);

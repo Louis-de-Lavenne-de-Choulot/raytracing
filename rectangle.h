@@ -11,7 +11,7 @@ namespace PEngine
 {
     struct Rectangle : BaseObject, VRectangle
     {
-        Rectangle(Vector3 *scale, Vector3 *position, Quaternion *rotation, Material *material);
+        Rectangle(Vector3 scale, Vector3 position, Quaternion rotation, Material *material);
     };
 };
 #endif
