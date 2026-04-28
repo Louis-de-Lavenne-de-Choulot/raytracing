@@ -5,7 +5,7 @@
 namespace PEngine {
     namespace Defaults {
         inline Color Pink = Color(255, 0, 255, 255);
-        inline Material* MissingMaterial = new Material(0.0, 0.0, Pink);
+        inline Material* MissingMaterial = new Material(0, 0.0, Pink);
 
     }
 }

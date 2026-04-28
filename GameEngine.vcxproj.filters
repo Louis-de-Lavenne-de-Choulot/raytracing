@@ -13,108 +13,186 @@
       <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
       <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
     </Filter>
+    <Filter Include="object">
+      <UniqueIdentifier>{e96fb594-11ff-4db3-9051-fa12d1b2552c}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="light">
+      <UniqueIdentifier>{f71d7b57-1105-4d24-b435-4b32de76f3d0}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="engineBase">
+      <UniqueIdentifier>{a6f074c1-9949-45ab-9913-1bec5a0a45ad}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="examples">
+      <UniqueIdentifier>{fad39dbe-7e70-4041-9da2-b4d07f9ea368}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="importer">
+      <UniqueIdentifier>{827c4ac5-ad05-41de-9e4a-19a05197d1ec}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="baselight.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="baseobject.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="basetype.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="camera.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="color.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="directionallight.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="EulerAngle.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="main.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="material.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="plane.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="pointlight.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="quaternion.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="rectangle.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="renderer.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="scenemanager.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="basetype.h">
+      <Filter>object</Filter>
+    </ClInclude>
+    <ClInclude Include="rectangle.h">
+      <Filter>object</Filter>
+    </ClInclude>
+    <ClInclude Include="plane.h">
+      <Filter>object</Filter>
     </ClInclude>
     <ClInclude Include="sphere.h">
-      <Filter>Header Files</Filter>
+      <Filter>object</Filter>
     </ClInclude>
-    <ClInclude Include="transform.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="triangle.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="vector3.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="vertice.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="teapot.h">
+      <Filter>object</Filter>
     </ClInclude>
     <ClInclude Include="vPlane.h">
-      <Filter>Header Files</Filter>
+      <Filter>object</Filter>
     </ClInclude>
     <ClInclude Include="vrectangle.h">
-      <Filter>Header Files</Filter>
+      <Filter>object</Filter>
     </ClInclude>
     <ClInclude Include="vsphere.h">
+      <Filter>object</Filter>
+    </ClInclude>
+    <ClInclude Include="vTeapot.h">
+      <Filter>object</Filter>
+    </ClInclude>
+    <ClInclude Include="baseobject.h">
+      <Filter>object</Filter>
+    </ClInclude>
+    <ClInclude Include="baselight.h">
+      <Filter>light</Filter>
+    </ClInclude>
+    <ClInclude Include="directionallight.h">
+      <Filter>light</Filter>
+    </ClInclude>
+    <ClInclude Include="pointlight.h">
+      <Filter>light</Filter>
+    </ClInclude>
+    <ClInclude Include="vertice.h">
+      <Filter>engineBase</Filter>
+    </ClInclude>
+    <ClInclude Include="triangle.h">
+      <Filter>engineBase</Filter>
+    </ClInclude>
+    <ClInclude Include="vector3.h">
+      <Filter>engineBase</Filter>
+    </ClInclude>
+    <ClInclude Include="EulerAngle.h">
+      <Filter>engineBase</Filter>
+    </ClInclude>
+    <ClInclude Include="quaternion.h">
+      <Filter>engineBase</Filter>
+    </ClInclude>
+    <ClInclude Include="material.h">
+      <Filter>engineBase</Filter>
+    </ClInclude>
+    <ClInclude Include="color.h">
+      <Filter>engineBase</Filter>
+    </ClInclude>
+    <ClInclude Include="transform.h">
+      <Filter>engineBase</Filter>
+    </ClInclude>
+    <ClInclude Include="exampleScene.h">
+      <Filter>examples</Filter>
+    </ClInclude>
+    <ClInclude Include="scenemanager.h">
+      <Filter>engineBase</Filter>
+    </ClInclude>
+    <ClInclude Include="Importer.h">
+      <Filter>importer</Filter>
+    </ClInclude>
+    <ClInclude Include="lightTestScene.h">
+      <Filter>examples</Filter>
+    </ClInclude>
+    <ClInclude Include="settings.h">
+      <Filter>engineBase</Filter>
+    </ClInclude>
+    <ClInclude Include="verticeDTO.h">
       <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="guardScene.h">
+      <Filter>examples</Filter>
+    </ClInclude>
+    <ClInclude Include="rendererGPU.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="basicmovements.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="scenegroup.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="collisiontrigger.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="rigidbody.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="minecraftScene.h">
+      <Filter>examples</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="camera.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="color.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="main.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="plane.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="quaternion.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="rectangle.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="renderer.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="plane.cpp">
+      <Filter>object</Filter>
+    </ClCompile>
+    <ClCompile Include="rectangle.cpp">
+      <Filter>object</Filter>
+    </ClCompile>
     <ClCompile Include="sphere.cpp">
-      <Filter>Source Files</Filter>
+      <Filter>object</Filter>
+    </ClCompile>
+    <ClCompile Include="teapot.cpp">
+      <Filter>object</Filter>
     </ClCompile>
     <ClCompile Include="vector3.cpp">
-      <Filter>Source Files</Filter>
+      <Filter>engineBase</Filter>
+    </ClCompile>
+    <ClCompile Include="color.cpp">
+      <Filter>engineBase</Filter>
     </ClCompile>
     <ClCompile Include="defaults.h">
-      <Filter>Header Files</Filter>
+      <Filter>engineBase</Filter>
+    </ClCompile>
+    <ClCompile Include="exampleScene.cpp">
+      <Filter>examples</Filter>
+    </ClCompile>
+    <ClCompile Include="quaternion.cpp">
+      <Filter>engineBase</Filter>
+    </ClCompile>
+    <ClCompile Include="Importer.cpp">
+      <Filter>importer</Filter>
+    </ClCompile>
+    <ClCompile Include="lightTestScene.cpp">
+      <Filter>examples</Filter>
+    </ClCompile>
+    <ClCompile Include="guardScene.cpp">
+      <Filter>examples</Filter>
+    </ClCompile>
+    <ClCompile Include="rendererGPU.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="minecraftScene.cpp">
+      <Filter>examples</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>

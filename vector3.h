@@ -30,23 +30,23 @@ namespace PEngine
                         );
                     }
 
-                Vector3 operator+(const Vector3 *vec);
+                Vector3 operator+(const Vector3 *vec) const;
 
-                Vector3 operator+(const Vector3 &vec);
+                Vector3 operator+(const Vector3 &vec) const;
 
-                Vector3 operator+(const double val);
+                Vector3 operator+(const double val) const;
 
                 Vector3 &operator+=(const Vector3 &vec);
 
-                Vector3 operator-(const Vector3 &vec);
+                Vector3 operator-(const Vector3 &vec) const;
 
-                Vector3 operator-(const double val);
+                Vector3 operator-(const double val) const;
 
                 Vector3 &operator-=(const Vector3 &vec);
 
-                Vector3 operator*(const Vector3 &vec);
+                Vector3 operator*(const Vector3 &vec) const;
 
-                Vector3 operator*(const double val);
+                Vector3 operator*(const double val) const;
 
                 Vector3 &operator*=(const Vector3 &vec);
         };

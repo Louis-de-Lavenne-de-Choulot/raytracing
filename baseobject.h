@@ -19,6 +19,8 @@ namespace PEngine
         std::vector<Vertice> bVertices;
         std::vector<Triangle> bTriangles;
         ObjectType type;
+		std::string tag;
+
         BaseObject(Vector3 scale, Vector3 pos, Quaternion rot, Material *mat)
         {
             transform = PEngine::Transform(scale, pos, rot);

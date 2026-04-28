@@ -17,6 +17,7 @@ namespace PEngine
         CUBE,
         CYLINDER,
         CONE,
+        TEAPOT
     };
 };
 #endif

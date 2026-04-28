@@ -38,16 +38,16 @@ namespace PEngine
         return this->x * vec->x + this->y * vec->y + this->z * vec->z;
     }
 
-    Vector3 Vector3::operator+(const Vector3 *vec)
+    Vector3 Vector3::operator+(const Vector3 *vec) const
     {
         return Vector3(x + vec->x, y + vec->y, z + vec->z);
     }
-    Vector3 Vector3::operator+(const Vector3 &vec)
+    Vector3 Vector3::operator+(const Vector3 &vec) const
     {
         return Vector3(x + vec.x, y + vec.y, z + vec.z);
     }
 
-    Vector3 Vector3::operator+(const double val)
+    Vector3 Vector3::operator+(const double val) const
     {
         return Vector3(x + val, y + val, z + val);
     }
@@ -60,12 +60,12 @@ namespace PEngine
         return *this;
     }
 
-    Vector3 Vector3::operator-(const Vector3 &vec)
+    Vector3 Vector3::operator-(const Vector3 &vec) const
     {
         return Vector3(x - vec.x, y - vec.y, z - vec.z);
     }
 
-    Vector3 Vector3::operator-(const double val)
+    Vector3 Vector3::operator-(const double val) const
     {
         return Vector3(x - val, y - val, z - val);
     }
@@ -78,12 +78,12 @@ namespace PEngine
         return *this;
     }
 
-    Vector3 Vector3::operator*(const Vector3 &vec)
+    Vector3 Vector3::operator*(const Vector3 &vec) const
     {
         return Vector3(x * vec.x, y * vec.y, z * vec.z);
     }
 
-    Vector3 Vector3::operator*(const double val)
+    Vector3 Vector3::operator*(const double val) const
     {
         return Vector3(x * val, y * val, z * val);
     }

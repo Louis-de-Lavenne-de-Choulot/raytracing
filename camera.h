@@ -13,7 +13,7 @@ namespace PEngine
         double fov;
         ObjectType type;
 
-        Camera(Vector3 position = Vector3(0, 0, 0), Quaternion rotation = Quaternion(1, 0, 0, 0), double fov = 90);
+        Camera(Vector3 position = Vector3(0, 0, 0), Quaternion rotation = Quaternion(), double fov = 90);
     };
 };
 #endif

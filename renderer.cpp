@@ -5,21 +5,25 @@
 #include "baseobject.h"
 #include "baselight.h"
 #include "vertice.h"
+#include "verticeDTO.h"
 #include "vector3.h"
 #include "triangle.h"
 #include "pointlight.h"
 #include "directionallight.h"
 #include "scenemanager.h"
+#include "settings.h"
 #include <cfloat>
 #include <SDL.h>
 #include <cmath>
+#include <thread>
 #include <array>
 #include <vector>
 #include <synchapi.h>
+#include <algorithm>
 #include <span>
 namespace PEngine
 {
-    Material* Renderer::DefaultMaterial = new Material(0.0, 0.0, Color(255, 0, 255, 255));
+    Material* Renderer::DefaultMaterial = new Material(0, 0.0, Color(255, 0, 255, 255));
 
     //---------------------------------------------------------------------------------------------------
     //               FINDING INTERSECTION BETWEEN 2xVECTOR3 (a, b) AND PLANE p (0, 0, pd)               |
@@ -42,16 +46,16 @@ namespace PEngine
     //              dy = (by - ay) * (pz + az)/(bz-az) + ay                                             |
     //              dz = pd                                                                             |
     //---------------------------------------------------------------------------------------------------
-    std::vector<Vertice> Renderer::checkTriangle(std::array<Vertice, 3> verts)
+    std::vector<VerticeDTO> Renderer::checkTriangle(std::array<VerticeDTO, 3> verts)
     {
         short invalidV = 0;
-        std::vector<Vertice> result;
-        std::vector<Vertice> valids;
-        std::vector<Vertice> invalids;
+        std::vector<VerticeDTO> result;
+        std::vector<VerticeDTO> valids;
+        std::vector<VerticeDTO> invalids;
 
         for (int i = 0; i < 3; i++)
         {
-            if (verts[i].position.z <= sceneManager->viewportDistance)
+            if (verts[i].position.z <= Settings::viewportDistance)
             {
                 invalidV++;
                 invalids.emplace_back(verts[i]);
@@ -68,53 +72,106 @@ namespace PEngine
         double interZ2 = 0;
         double intersecX2 = 0;
         double intersecY2 = 0;
+
+        Vector3 intersecPosWorld;
+        Vector3 intersecNormal;
+        Vector3 intersecPos2World;
+        Vector3 intersecNormal2;
+        Vector3 intersecPos;
+        Vector3 intersecPos2;
+        Color intersecColor;
+        Color intersecColor2;
         switch (invalidV)
         {
         case 3:
-            // All vertices behind near plane — return empty, triangle is fully clipped
+            // All vertices behind near plane
             break;
         case 2:
             // One valid vertex: clip to two intersection points, forming one triangle
             // Find intersection valid0->invalid0 at near plane Z
-            interZ = (sceneManager->viewportDistance - invalids[0].position.z) / (valids[0].position.z - invalids[0].position.z);
+            interZ = (Settings::viewportDistance - invalids[0].position.z) / (valids[0].position.z - invalids[0].position.z);
             intersecX = (valids[0].position.x - invalids[0].position.x) * interZ + invalids[0].position.x;
             intersecY = (valids[0].position.y - invalids[0].position.y) * interZ + invalids[0].position.y;
 
             // Find intersection valid0->invalid1 at near plane Z
-            interZ2 = (sceneManager->viewportDistance - invalids[1].position.z) / (valids[0].position.z - invalids[1].position.z);
+            interZ2 = (Settings::viewportDistance - invalids[1].position.z) / (valids[0].position.z - invalids[1].position.z);
             intersecX2 = (valids[0].position.x - invalids[1].position.x) * interZ2 + invalids[1].position.x;
             intersecY2 = (valids[0].position.y - invalids[1].position.y) * interZ2 + invalids[1].position.y;
 
-            // Winding order — valid0, inter(invalid1 side), inter(invalid0 side)
+            intersecPos = Vector3(intersecX2, intersecY2, Settings::viewportDistance);
+            intersecPos2 = Vector3(intersecX, intersecY, Settings::viewportDistance);
+
+            if (Settings::shadingMode == Settings::PHONG) {
+                intersecPosWorld = invalids[0].worldPos + (valids[0].worldPos - invalids[0].worldPos) * interZ;
+                intersecNormal = invalids[0].normalPos + (valids[0].normalPos - invalids[0].normalPos) * interZ;
+                intersecPos2World = invalids[1].worldPos + (valids[0].worldPos - invalids[1].worldPos) * interZ2;
+                intersecNormal2 = invalids[1].normalPos + (valids[0].normalPos - invalids[1].normalPos) * interZ2;
+            }
+            else
+            {
+                intersecPosWorld = invalids[0].worldPos;
+                intersecNormal = invalids[0].normalPos;
+                intersecPos2World = invalids[1].worldPos;
+                intersecNormal2 = invalids[1].normalPos;
+            }
+
+            // Interpolate color at each clip point so Gouraud survives clipping.
+            // lerp(a,b,t): t=0 → a (invalid side), t=1 → b (valid side).
+            intersecColor = Color::lerp(invalids[0].color, valids[0].color, (float)interZ);
+            intersecColor2 = Color::lerp(invalids[1].color, valids[0].color, (float)interZ2);
+
+            // Winding order
             result = {
                 valids[0],
-                Vertice(Vector3(intersecX2, intersecY2, sceneManager->viewportDistance), invalids[1].shade),
-                Vertice(Vector3(intersecX,  intersecY,  sceneManager->viewportDistance), invalids[0].shade)
+                VerticeDTO(intersecPos,  intersecPosWorld,  intersecNormal,  intersecColor),
+                VerticeDTO(intersecPos2, intersecPos2World, intersecNormal2, intersecColor2)
             };
             break;
         case 1:
             // Two valid vertices: clip to quad (two triangles)
             // Find intersection valid0->invalid0 at near plane Z
-            interZ = (sceneManager->viewportDistance - invalids[0].position.z) / (valids[0].position.z - invalids[0].position.z);
+            interZ = (Settings::viewportDistance - invalids[0].position.z) / (valids[0].position.z - invalids[0].position.z);
             intersecX = (valids[0].position.x - invalids[0].position.x) * interZ + invalids[0].position.x;
             intersecY = (valids[0].position.y - invalids[0].position.y) * interZ + invalids[0].position.y;
 
             // Find intersection valid1->invalid0 at near plane Z
-            interZ2 = (sceneManager->viewportDistance - invalids[0].position.z) / (valids[1].position.z - invalids[0].position.z);
+            interZ2 = (Settings::viewportDistance - invalids[0].position.z) / (valids[1].position.z - invalids[0].position.z);
             intersecX2 = (valids[1].position.x - invalids[0].position.x) * interZ2 + invalids[0].position.x;
             intersecY2 = (valids[1].position.y - invalids[0].position.y) * interZ2 + invalids[0].position.y;
 
+
+            intersecPos = Vector3(intersecX2, intersecY2, Settings::viewportDistance);
+            intersecPos2 = Vector3(intersecX, intersecY, Settings::viewportDistance);
+
+            if (Settings::shadingMode == Settings::PHONG) {
+                intersecPosWorld = invalids[0].worldPos + (valids[0].worldPos - invalids[0].worldPos) * interZ;
+                intersecNormal = invalids[0].normalPos + (valids[0].normalPos - invalids[0].normalPos) * interZ;
+                intersecPos2World = invalids[0].worldPos + (valids[1].worldPos - invalids[0].worldPos) * interZ2;
+                intersecNormal2 = invalids[0].normalPos + (valids[1].normalPos - invalids[0].normalPos) * interZ2;
+            }
+            else
+            {
+                intersecPosWorld = invalids[0].worldPos;
+                intersecNormal = invalids[0].normalPos;
+                intersecPos2World = invalids[0].worldPos;
+                intersecNormal2 = invalids[0].normalPos;
+            }
+
+            // Interpolate color at each clip point so Gouraud survives clipping.
+            intersecColor = Color::lerp(invalids[0].color, valids[0].color, (float)interZ);
+            intersecColor2 = Color::lerp(invalids[0].color, valids[1].color, (float)interZ2);
+
             // Returns 4 vertices: two triangles drawn as (0,1,2) and (0,2,3)
-            // Winding order — both sub-triangles wound consistently with original
+            // Winding order
             result = {
                 valids[0],
                 valids[1],
-                Vertice(Vector3(intersecX2, intersecY2, sceneManager->viewportDistance), invalids[0].shade),
-                Vertice(Vector3(intersecX,  intersecY,  sceneManager->viewportDistance), invalids[0].shade)
+                VerticeDTO(intersecPos,  intersecPosWorld,  intersecNormal,  intersecColor),
+                VerticeDTO(intersecPos2, intersecPos2World, intersecNormal2, intersecColor2)
             };
             break;
         default:
-            // All three vertices in front of near plane — pass through unchanged
+            // All three vertices in front of near plane
             result = { valids[0], valids[1], valids[2] };
             break;
         }
@@ -129,16 +186,100 @@ namespace PEngine
 
     Vector3 Renderer::CanvasToViewport(double x, double y)
     {
-        return Vector3(x * (sceneManager->canvasWidth / sceneManager->viewportWidth),
-            y * (sceneManager->canvasHeight / sceneManager->viewportHeight), 0);
+        return Vector3(x * (Settings::canvasWidth / Settings::viewportWidth),
+            y * (Settings::canvasHeight / Settings::viewportHeight), 0);
     }
 
     Vector3 Renderer::ProjectVertex(Vector3* v)
     {
         if (abs(v->z) < 1e-9) return Vector3(0, 0, 0);
         return CanvasToViewport(
-            v->x * sceneManager->viewportDistance / v->z,
-            v->y * sceneManager->viewportDistance / v->z);
+            v->x * Settings::viewportDistance / v->z,
+            v->y * Settings::viewportDistance / v->z);
+    }
+
+    Color Renderer::ComputeIllumination(Vector3 normalized, Vector3 worldPos, Color shadedColor)
+    {
+        // Normalize surface color to [0, 1] working space.
+        // All light math is done in [0,1]; we scale back to [0,255] at the end.
+        // This prevents the catastrophic overflow that occurred when raw 0-255
+        // color channels were multiplied together (e.g. 200 * 255 * 0.1 = 5100).
+        double sr = shadedColor.r / 255.0;
+        double sg = shadedColor.g / 255.0;
+        double sb = shadedColor.b / 255.0;
+
+        // Accumulate light contributions additively into these channels.
+        // Each light adds its own tinted, attenuated contribution independently.
+        // Additive accumulation is physically correct: two lights on a surface
+        // are brighter than one. The old *= caused each light to *attenuate*
+        // the previous result, which is wrong and also why surfaces went white
+        // (ambient * point light with diffuse=1 kept multiplying up to 1.0).
+        double accR = 0.0, accG = 0.0, accB = 0.0;
+
+        for (BaseLight* light : *sceneManager->lights)
+        {
+            // Normalize light color to [0, 1]
+            double lr = light->color.r / 255.0;
+            double lg = light->color.g / 255.0;
+            double lb = light->color.b / 255.0;
+
+            if (light->type == AMBIENT_LIGHT)
+            {
+                // Ambient 
+                // Flat contribution, same for every surface point.
+                // contribution = surfaceColor * lightColor * intensity
+                accR += sr * lr * light->intensity;
+                accG += sg * lg * light->intensity;
+                accB += sb * lb * light->intensity;
+            }
+            else if (light->type == POINT_LIGHT)
+            {
+                // Point light (diffuse / Lambertian) 
+                // L = normalize(lightPos - worldPos)
+                // contribution = surfaceColor * lightColor * intensity * max(0, dot(N, L))
+                //
+                // TODO: add depth attenuation (1 / dist^2)
+                PointLight* pl = static_cast<PointLight*>(light);
+
+                Vector3 rotated = pl->rotation.RotateVector3(&pl->position);
+                Vector3 toLight = rotated - worldPos;
+
+                double dist = toLight.magnitude();
+                if (dist < 1e-9) continue;                // vertex ON the light
+                Vector3 L = toLight * (1.0 / dist);       // normalize
+                double diffuse = normalized.dot(&L);
+                if (diffuse > 0.0)
+                {
+                    accR += sr * lr * light->intensity * diffuse;
+                    accG += sg * lg * light->intensity * diffuse;
+                    accB += sb * lb * light->intensity * diffuse;
+                }
+            }
+            else if (light->type == DIRECTIONAL_LIGHT)
+            {
+                // Directional light (diffuse / Lambertian) 
+                // L = normalize(direction), it is constant across the scene.
+                // contribution = surfaceColor * lightColor * intensity * max(0, dot(N, L))
+                DirectionalLight* dl = static_cast<DirectionalLight*>(light);
+                Vector3 L = dl->direction.normalize();
+                double diffuse = normalized.dot(&L);
+                if (diffuse > 0.0)
+                {
+                    accR += sr * lr * light->intensity * diffuse;
+                    accG += sg * lg * light->intensity * diffuse;
+                    accB += sb * lb * light->intensity * diffuse;
+                }
+            }
+        }
+
+        // Scale back to [0, 255] and clamp to prevent any overflow from
+        // multiple bright lights summing above 1.0.
+        return Color(
+            std::clamp(accR * 255.0, 0.0, 255.0),
+            std::clamp(accG * 255.0, 0.0, 255.0),
+            std::clamp(accB * 255.0, 0.0, 255.0),
+            255.0
+        );
     }
 
     std::vector<double> Renderer::Interpolate(double i0, double d0, double i1, double d1)
@@ -170,7 +311,7 @@ namespace PEngine
 
         window = SDL_CreateWindow("Set Pixel Example",
             SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
-            sceneManager->canvasWidth, sceneManager->canvasHeight, SDL_WINDOW_SHOWN);
+            Settings::canvasWidth, Settings::canvasHeight, SDL_WINDOW_SHOWN);
         if (!window)
         {
             std::cerr << "Window could not be created! SDL_Error: " << SDL_GetError() << std::endl;
@@ -197,6 +338,11 @@ namespace PEngine
         zBuffer = new float[windowWidth * windowHeight];
         memset(pixels, 0, windowWidth * windowHeight * sizeof(Uint32));
         memset(zBuffer, 0, windowWidth * windowHeight * sizeof(float));
+
+
+        threadCount = std::thread::hardware_concurrency();
+        if (threadCount == 0)
+            threadCount = 4;
     }
 
     void Renderer::Render()
@@ -204,27 +350,38 @@ namespace PEngine
         // Clear pixel buffer and z-buffer
         memset(pixels, 0, windowWidth * windowHeight * sizeof(Uint32));
         // how to use :
-        // 0.0f = "nothing drawn here" - 1/z is positive and grows toward camera
-		// if dist is 2m, z is 2, 1/z is 0.5
-		// if dist is 1m, z is 1, 1/z is 1.0
+        // 0.0f = "nothing drawn here",  1/z is positive and grows toward camera
+        // if dist is 2m, z is 2, 1/z is 0.5
+        // if dist is 1m, z is 1, 1/z is 1.0
         memset(zBuffer, 0, windowWidth * windowHeight * sizeof(float));
 
-        for (BaseLight* l : *sceneManager->lights)
-        {
-            if (l->type == AMBIENT_LIGHT)
+        workIndex.store(0);
+
+        std::vector<std::thread> frameWorkers;
+        // leave 1 core free for the pc to live
+        frameWorkers.reserve(threadCount - 1);
+        int objectCount = (int)sceneManager->objects->size();
+
+        auto workerFn = [&]()
             {
-                globalIllumination = l;
-            }
+                while (true)
+                {
+                    int index = workIndex.fetch_add(1);
+                    if (index >= objectCount)
+                        break;
+
+                    RenderInstance(sceneManager->objects->at(index));
+                }
+            };
+
+        for (int i = 0; i < threadCount - 1; ++i)
+        {
+            frameWorkers.emplace_back(workerFn);
         }
 
-        if (!globalIllumination)
+        for (auto& worker : frameWorkers)
         {
-            globalIllumination = new BaseLight(0.2, Color(255, 255, 255, 255));
-        }
-
-        for (BaseObject* obj : *sceneManager->objects)
-        {
-            RenderInstance(obj);
+            worker.join();
         }
 
         SDL_UpdateTexture(texture, NULL, pixels, windowWidth * sizeof(Uint32));
@@ -249,7 +406,7 @@ namespace PEngine
     https://en.wikipedia.org/wiki/Back-face_culling
     https://cmichel.io/understanding-front-faces-winding-order-and-normals
     */
-    bool Renderer::IsFacing(std::array<Vertice, 3> tArr)
+    bool Renderer::IsFacing(std::array<VerticeDTO, 3> tArr)
     {
         Vector3 edge1 = tArr[1].position - tArr[0].position;
         Vector3 edge2 = tArr[2].position - tArr[0].position;
@@ -260,7 +417,7 @@ namespace PEngine
 
     void Renderer::RenderInstance(BaseObject* obj)
     {
-        std::vector<Vertice> projected;
+        std::vector<VerticeDTO> projected;
         if (obj->bVertices.empty()) return;
 
         projected.reserve(obj->bVertices.size());
@@ -271,21 +428,30 @@ namespace PEngine
         Quaternion camRot = sceneManager->currentCamera->transform.rotation;
         Quaternion camConjugate = camRot.Conjugate(camRot);
 
-        for (Vertice v : obj->bVertices)
+        for (const Vertice v : obj->bVertices)
         {
+            // conv to world pos
             Vector3 vPos = v.position;
             Vector3 vProj = objScale * vPos;
             vProj = obj->transform.rotation.RotateVector3(&vProj);
-            vProj = vProj + objPos;
-            vProj = vProj - camPos;
+            Vector3 vProjWorld = vProj + objPos;
+
+            Vector3 normal = obj->transform.rotation.RotateVector3(&vPos).normalize();
+            Color color = obj->material->color * v.shade;
+
+            if (Settings::shadingMode == Settings::ShadingMode::GOURAUD)
+                color = ComputeIllumination(normal, vProjWorld, color);
+
+            //conv to camera space
+            vProj = vProjWorld - camPos;
             vProj = camConjugate.RotateVector3(&vProj);
-            projected.emplace_back(Vertice(vProj, v.shade));
+            projected.emplace_back(VerticeDTO(vProj, vProjWorld, normal, color));
         }
 
         std::vector<Triangle> triangles = obj->bTriangles;
         for (const Triangle& triangle : triangles)
         {
-            std::array<Vertice, 3> vP = {
+            std::array<VerticeDTO, 3> vP = {
                 projected[triangle.p0],
                 projected.at(triangle.p1),
                 projected.at(triangle.p2)
@@ -296,15 +462,13 @@ namespace PEngine
                 continue;
             }
 
-            std::vector<Vertice> trs = checkTriangle(vP);
+            std::vector<VerticeDTO> trs = checkTriangle(vP);
             switch (trs.size())
             {
             case 4:
             {
-                // First triangle: (0,1,2)
                 Triangle tempTriangle(0, 1, 2, triangle.material);
                 DrawTriangle(&tempTriangle, &trs);
-                // Second triangle uses (0,2,3)
                 Triangle tempTriangle2(0, 2, 3, triangle.material);
                 DrawTriangle(&tempTriangle2, &trs);
                 break;
@@ -321,101 +485,183 @@ namespace PEngine
         }
     }
 
-    void Renderer::DrawTriangle(Triangle* triangle, std::vector<Vertice>* projected)
+    void Renderer::DrawTriangle(Triangle* triangle, std::vector<VerticeDTO>* projected)
     {
         Vector3 NP0 = projected->at(triangle->p0).position;
         Vector3 NP1 = projected->at(triangle->p1).position;
         Vector3 NP2 = projected->at(triangle->p2).position;
 
-        Vector3 P0 = ProjectVertex(&NP0);
-        P0.z = NP0.z;
-        Vector3 P1 = ProjectVertex(&NP1);
-        P1.z = NP1.z;
-        Vector3 P2 = ProjectVertex(&NP2);
-        P2.z = NP2.z;
+        Vector3 P0 = ProjectVertex(&NP0); P0.z = NP0.z;
+        Vector3 P1 = ProjectVertex(&NP1); P1.z = NP1.z;
+        Vector3 P2 = ProjectVertex(&NP2); P2.z = NP2.z;
 
         double h0 = projected->at(triangle->p0).shade;
         double h1 = projected->at(triangle->p1).shade;
         double h2 = projected->at(triangle->p2).shade;
 
-        // The per-pixel z-buffer check inside the scanline loop handles occlusion correctly.
+        Color c0 = projected->at(triangle->p0).color;
+        Color c1 = projected->at(triangle->p1).color;
+        Color c2 = projected->at(triangle->p2).color;
 
-        // Sort points so that Y0 <= Y1 <= Y2
-        if (P1.y < P0.y) { std::swap(P1, P0); std::swap(h1, h0); }
-        if (P2.y < P0.y) { std::swap(P2, P0); std::swap(h2, h0); }
-        if (P2.y < P1.y) { std::swap(P2, P1); std::swap(h2, h1); }
+        Vector3 WP0 = projected->at(triangle->p0).worldPos;
+        Vector3 WP1 = projected->at(triangle->p1).worldPos;
+        Vector3 WP2 = projected->at(triangle->p2).worldPos;
 
-        // Compute X coordinates of edges
-        // 1/z for perspective-correct interpolation across the scanline
-        // interpolate 1/z along edges now so zsegment does not need to later
+        Vector3 WN0 = projected->at(triangle->p0).normalPos;
+        Vector3 WN1 = projected->at(triangle->p1).normalPos;
+        Vector3 WN2 = projected->at(triangle->p2).normalPos;
+
+        // Sort by Y
+        if (P1.y < P0.y) { std::swap(P1, P0); std::swap(h1, h0); std::swap(c1, c0); std::swap(WP1, WP0); std::swap(WN1, WN0); }
+        if (P2.y < P0.y) { std::swap(P2, P0); std::swap(h2, h0); std::swap(c2, c0); std::swap(WP2, WP0); std::swap(WN2, WN0); }
+        if (P2.y < P1.y) { std::swap(P2, P1); std::swap(h2, h1); std::swap(c2, c1); std::swap(WP2, WP1); std::swap(WN2, WN1); }
+
+        // Gouraud: interpolate pre-lit vertex colours perspective-correctly (r/z, g/z, b/z)
+        std::vector<double> cr01 = Interpolate(P0.y, (double)c0.r / P0.z, P1.y, (double)c1.r / P1.z);
+        std::vector<double> cg01 = Interpolate(P0.y, (double)c0.g / P0.z, P1.y, (double)c1.g / P1.z);
+        std::vector<double> cb01 = Interpolate(P0.y, (double)c0.b / P0.z, P1.y, (double)c1.b / P1.z);
+
+        std::vector<double> cr12 = Interpolate(P1.y, (double)c1.r / P1.z, P2.y, (double)c2.r / P2.z);
+        std::vector<double> cg12 = Interpolate(P1.y, (double)c1.g / P1.z, P2.y, (double)c2.g / P2.z);
+        std::vector<double> cb12 = Interpolate(P1.y, (double)c1.b / P1.z, P2.y, (double)c2.b / P2.z);
+
+        std::vector<double> cr02 = Interpolate(P0.y, (double)c0.r / P0.z, P2.y, (double)c2.r / P2.z);
+        std::vector<double> cg02 = Interpolate(P0.y, (double)c0.g / P0.z, P2.y, (double)c2.g / P2.z);
+        std::vector<double> cb02 = Interpolate(P0.y, (double)c0.b / P0.z, P2.y, (double)c2.b / P2.z);
         std::vector<double> x01 = Interpolate(P0.y, P0.x, P1.y, P1.x);
-        std::vector<double> h01 = Interpolate(P0.y, h0, P1.y, h1);
-        std::vector<double> z01 = Interpolate(P0.y, 1.0 / P0.z, P1.y, 1.0 / P1.z);
-
         std::vector<double> x12 = Interpolate(P1.y, P1.x, P2.y, P2.x);
-        std::vector<double> h12 = Interpolate(P1.y, h1, P2.y, h2);
-        std::vector<double> z12 = Interpolate(P1.y, 1.0 / P1.z, P2.y, 1.0 / P2.z);
-
         std::vector<double> x02 = Interpolate(P0.y, P0.x, P2.y, P2.x);
-        std::vector<double> h02 = Interpolate(P0.y, h0, P2.y, h2);
+
+        std::vector<double> z01 = Interpolate(P0.y, 1.0 / P0.z, P1.y, 1.0 / P1.z);
+        std::vector<double> z12 = Interpolate(P1.y, 1.0 / P1.z, P2.y, 1.0 / P2.z);
         std::vector<double> z02 = Interpolate(P0.y, 1.0 / P0.z, P2.y, 1.0 / P2.z);
 
-        // Remove overlapping vertex at P1 before concatenation
+        // world pos (perspective-correct)
+        std::vector<double> wx01 = Interpolate(P0.y, WP0.x / P0.z, P1.y, WP1.x / P1.z);
+        std::vector<double> wy01 = Interpolate(P0.y, WP0.y / P0.z, P1.y, WP1.y / P1.z);
+        std::vector<double> wz01 = Interpolate(P0.y, WP0.z / P0.z, P1.y, WP1.z / P1.z);
+
+        std::vector<double> wx12 = Interpolate(P1.y, WP1.x / P1.z, P2.y, WP2.x / P2.z);
+        std::vector<double> wy12 = Interpolate(P1.y, WP1.y / P1.z, P2.y, WP2.y / P2.z);
+        std::vector<double> wz12 = Interpolate(P1.y, WP1.z / P1.z, P2.y, WP2.z / P2.z);
+
+        std::vector<double> wx02 = Interpolate(P0.y, WP0.x / P0.z, P2.y, WP2.x / P2.z);
+        std::vector<double> wy02 = Interpolate(P0.y, WP0.y / P0.z, P2.y, WP2.y / P2.z);
+        std::vector<double> wz02 = Interpolate(P0.y, WP0.z / P0.z, P2.y, WP2.z / P2.z);
+
+        std::vector<double> nx01 = Interpolate(P0.y, WN0.x / P0.z, P1.y, WN1.x / P1.z);
+        std::vector<double> ny01 = Interpolate(P0.y, WN0.y / P0.z, P1.y, WN1.y / P1.z);
+        std::vector<double> nz01 = Interpolate(P0.y, WN0.z / P0.z, P1.y, WN1.z / P1.z);
+
+        std::vector<double> nx12 = Interpolate(P1.y, WN1.x / P1.z, P2.y, WN2.x / P2.z);
+        std::vector<double> ny12 = Interpolate(P1.y, WN1.y / P1.z, P2.y, WN2.y / P2.z);
+        std::vector<double> nz12 = Interpolate(P1.y, WN1.z / P1.z, P2.y, WN2.z / P2.z);
+
+        std::vector<double> nx02 = Interpolate(P0.y, WN0.x / P0.z, P2.y, WN2.x / P2.z);
+        std::vector<double> ny02 = Interpolate(P0.y, WN0.y / P0.z, P2.y, WN2.y / P2.z);
+        std::vector<double> nz02 = Interpolate(P0.y, WN0.z / P0.z, P2.y, WN2.z / P2.z);
+
         if (!x01.empty()) x01.pop_back();
-        if (!h01.empty()) h01.pop_back();
         if (!z01.empty()) z01.pop_back();
+        if (!wx01.empty()) wx01.pop_back();
+        if (!wy01.empty()) wy01.pop_back();
+        if (!wz01.empty()) wz01.pop_back();
+        if (!nx01.empty()) nx01.pop_back();
+        if (!ny01.empty()) ny01.pop_back();
+        if (!nz01.empty()) nz01.pop_back();
+        if (!cr01.empty()) cr01.pop_back();
+        if (!cg01.empty()) cg01.pop_back();
+        if (!cb01.empty()) cb01.pop_back();
 
-        std::vector<double> x012, h012, z012;
+        std::vector<double> x012, z012;
+        std::vector<double> wx012, wy012, wz012;
+        std::vector<double> nx012, ny012, nz012;
+        std::vector<double> cr012, cg012, cb012;
 
-        x012.reserve(x01.size() + x12.size());
         x012.insert(x012.end(), x01.begin(), x01.end());
         x012.insert(x012.end(), x12.begin(), x12.end());
 
-        h012.reserve(h01.size() + h12.size());
-        h012.insert(h012.end(), h01.begin(), h01.end());
-        h012.insert(h012.end(), h12.begin(), h12.end());
-
-        z012.reserve(z01.size() + z12.size());
         z012.insert(z012.end(), z01.begin(), z01.end());
         z012.insert(z012.end(), z12.begin(), z12.end());
 
-        if (x012.empty() || x02.empty())
-        {
-            return;
-        }
+        wx012.insert(wx012.end(), wx01.begin(), wx01.end());
+        wx012.insert(wx012.end(), wx12.begin(), wx12.end());
+        wy012.insert(wy012.end(), wy01.begin(), wy01.end());
+        wy012.insert(wy012.end(), wy12.begin(), wy12.end());
+        wz012.insert(wz012.end(), wz01.begin(), wz01.end());
+        wz012.insert(wz012.end(), wz12.begin(), wz12.end());
+
+        nx012.insert(nx012.end(), nx01.begin(), nx01.end());
+        nx012.insert(nx012.end(), nx12.begin(), nx12.end());
+        ny012.insert(ny012.end(), ny01.begin(), ny01.end());
+        ny012.insert(ny012.end(), ny12.begin(), ny12.end());
+        nz012.insert(nz012.end(), nz01.begin(), nz01.end());
+        nz012.insert(nz012.end(), nz12.begin(), nz12.end());
+
+        cr012.insert(cr012.end(), cr01.begin(), cr01.end());
+        cr012.insert(cr012.end(), cr12.begin(), cr12.end());
+        cg012.insert(cg012.end(), cg01.begin(), cg01.end());
+        cg012.insert(cg012.end(), cg12.begin(), cg12.end());
+        cb012.insert(cb012.end(), cb01.begin(), cb01.end());
+        cb012.insert(cb012.end(), cb12.begin(), cb12.end());
 
         int m = (int)(x012.size() / 2);
         m = (std::min)(m, (int)x02.size() - 1);
 
         std::vector<double> xleft = x012, xright = x02;
-        std::vector<double> hleft = h012, hright = h02;
         std::vector<double> zleft = z012, zright = z02;
 
-        if (x02.at(m) < x012.at(m))
+        std::vector<double> wxleft = wx012, wxright = wx02;
+        std::vector<double> wyleft = wy012, wyright = wy02;
+        std::vector<double> wzleft = wz012, wzright = wz02;
+
+        std::vector<double> nxleft = nx012, nxright = nx02;
+        std::vector<double> nyleft = ny012, nyright = ny02;
+        std::vector<double> nzleft = nz012, nzright = nz02;
+
+        std::vector<double> crleft = cr012, crright = cr02;
+        std::vector<double> cgleft = cg012, cgright = cg02;
+        std::vector<double> cbleft = cb012, cbright = cb02;
+
+        if (x02[m] < x012[m])
         {
-            xleft = x02;  xright = x012;
-            hleft = h02;  hright = h012;
-            zleft = z02;  zright = z012;
+            xleft = x02; xright = x012;
+            zleft = z02; zright = z012;
+
+            wxleft = wx02; wxright = wx012;
+            wyleft = wy02; wyright = wy012;
+            wzleft = wz02; wzright = wz012;
+
+            nxleft = nx02; nxright = nx012;
+            nyleft = ny02; nyright = ny012;
+            nzleft = nz02; nzright = nz012;
+
+            crleft = cr02; crright = cr012;
+            cgleft = cg02; cgright = cg012;
+            cbleft = cb02; cbright = cb012;
         }
 
+
         Color color = triangle->material->color;
-        bool fullDraw = true;
 
         for (int y = (int)P0.y; y < (int)P2.y; y++)
         {
             int ypy = y - (int)P0.y;
             if ((size_t)ypy >= xleft.size() || (size_t)ypy >= xright.size()) continue;
 
-            double xl = xleft.at(ypy);
-            double xr = xright.at(ypy);
+            double xl = xleft[ypy];
+            double xr = xright[ypy];
             if (xl > xr) continue;
 
-            // Guard against out-of-bounds on h/z lookups
-            if ((size_t)ypy >= hleft.size() || (size_t)ypy >= hright.size()) continue;
-            if ((size_t)ypy >= zleft.size() || (size_t)ypy >= zright.size()) continue;
+            std::vector<double> zsegment = Interpolate(xl, zleft[ypy], xr, zright[ypy]);
 
-            std::vector<double> hsegment = Interpolate(xl, hleft.at(ypy), xr, hright.at(ypy));
-            std::vector<double> zsegment = Interpolate(xl, zleft.at(ypy), xr, zright.at(ypy));
+            std::vector<double> wxseg = Interpolate(xl, wxleft[ypy], xr, wxright[ypy]);
+            std::vector<double> wyseg = Interpolate(xl, wyleft[ypy], xr, wyright[ypy]);
+            std::vector<double> wzseg = Interpolate(xl, wzleft[ypy], xr, wzright[ypy]);
+
+            std::vector<double> nxseg = Interpolate(xl, nxleft[ypy], xr, nxright[ypy]);
+            std::vector<double> nyseg = Interpolate(xl, nyleft[ypy], xr, nyright[ypy]);
+            std::vector<double> nzseg = Interpolate(xl, nzleft[ypy], xr, nzright[ypy]);
 
             for (int x = (int)xl; x < (int)xr; x++)
             {
@@ -424,40 +670,56 @@ namespace PEngine
                 if (centeredX < 0 || centeredX >= windowWidth || centeredY < 0 || centeredY >= windowHeight)
                     continue;
 
-                int xxl = x - (int)xl;
-                if ((size_t)xxl >= zsegment.size() || (size_t)xxl >= hsegment.size()) continue;
+                int idx = x - (int)xl;
+                if ((size_t)idx >= zsegment.size()) continue;
 
-                double zsegm = zsegment[xxl];
-
-                // We store 1/z — larger value = closer to camera.
-                // Skip this pixel only if something CLOSER (larger 1/z) is already drawn.
+                double invZ = zsegment[idx];
                 int bufIdx = centeredX + centeredY * windowWidth;
-                if (zsegm < zBuffer[bufIdx])
+
+                if (invZ < zBuffer[bufIdx]) continue;
+
+                zBuffer[bufIdx] = invZ;
+
+                double realZ = (invZ > 1e-9) ? 1.0 / invZ : 1.0;
+
+                Color c;
+                if (Settings::shadingMode == Settings::GOURAUD)
                 {
-                    fullDraw = false;
-                    continue;
+                    // We stored r/z, g/z, b/z along the edges; multiply by realZ to get r,g,b.
+                    std::vector<double> crseg = Interpolate(xl, crleft[ypy], xr, crright[ypy]);
+                    std::vector<double> cgseg = Interpolate(xl, cgleft[ypy], xr, cgright[ypy]);
+                    std::vector<double> cbseg = Interpolate(xl, cbleft[ypy], xr, cbright[ypy]);
+                    if ((size_t)idx >= crseg.size()) continue;
+                    uint8_t r = (uint8_t)std::clamp(crseg[idx] * realZ, 0.0, 255.0);
+                    uint8_t g = (uint8_t)std::clamp(cgseg[idx] * realZ, 0.0, 255.0);
+                    uint8_t b = (uint8_t)std::clamp(cbseg[idx] * realZ, 0.0, 255.0);
+                    c = Color(r, g, b, 255);
+                }
+                else // PHONG
+                {
+                    Vector3 pixelWorldPos(
+                        wxseg[idx] * realZ,
+                        wyseg[idx] * realZ,
+                        wzseg[idx] * realZ
+                    );
+
+                    Vector3 pixelNormal(
+                        nxseg[idx] * realZ,
+                        nyseg[idx] * realZ,
+                        nzseg[idx] * realZ
+                    );
+                    pixelNormal = pixelNormal.normalize();
+
+                    c = ComputeIllumination(pixelNormal, pixelWorldPos, color);
                 }
 
-                zBuffer[bufIdx] = zsegm;
-                Color c = color * hsegment[xxl];
                 SetPixel(centeredX, centeredY, c);
-
             }
-        }
-        color = triangle->material->outlineColor;
-
-        //deactivate this, this should become an option in the future.
-        if (fullDraw && false)
-        {
-            DrawLine(&projected->at(triangle->p0), &projected->at(triangle->p1), color);
-            DrawLine(&projected->at(triangle->p0), &projected->at(triangle->p2), color);
-            DrawLine(&projected->at(triangle->p1), &projected->at(triangle->p2), color);
         }
     }
 
     void Renderer::DrawLine(Vertice* V0, Vertice* V1, Color color)
     {
-        // FIX: ProjectVertex returns by value now
         Vector3 P0 = ProjectVertex(&V0->position);
         Vector3 P1 = ProjectVertex(&V1->position);
 
@@ -499,6 +761,8 @@ namespace PEngine
 
     void Renderer::cleanup()
     {
+        delete[] pixels;
+        delete[] zBuffer;
         SDL_DestroyRenderer(renderer);
         SDL_DestroyWindow(window);
         SDL_Quit();

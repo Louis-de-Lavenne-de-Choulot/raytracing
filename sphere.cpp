@@ -22,7 +22,7 @@ namespace PEngine
                 colorIndex = (colorIndex + 1) % 6;
             }
             // On assigne le matériau directement dans le vecteur de VSphere
-            VSphere::triangles[i].material = new Material(0, 0, colors[colorIndex]);
+            VSphere::triangles[i].material = material;//new Material(0, 0, colors[colorIndex]);
         }
 
         // 2. On synchronise BaseObject avec les données de VSphere qui viennent d'être modifiées

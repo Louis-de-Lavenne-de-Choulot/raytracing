@@ -65,37 +65,24 @@ namespace PEngine
             return Vector3(qRes.x, qRes.y, qRes.z);
         }
 
-        Vector3 Rotate(const Vector3 *toRotate, const Vector3 *axis, double angle)
+        Vector3 Rotate(const Vector3* toRotate, const Vector3* axis, double angle)
         {
-            // Convert angle from degrees to radians
             double halfAngle = angle * 0.5 * (std::numbers::pi / 180.0);
             double sinHalfAngle = sin(halfAngle);
 
-            // Create the rotation quaternion
             Quaternion q(
-                cos(halfAngle),         // w
-                axis->x * sinHalfAngle, // x
-                axis->y * sinHalfAngle, // y
-                axis->z * sinHalfAngle  // z
+                cos(halfAngle),
+                axis->x * sinHalfAngle,
+                axis->y * sinHalfAngle,
+                axis->z * sinHalfAngle
             );
 
-            // Convert vector to quaternion (v as quaternion)
             Quaternion vQuat(0, toRotate->x, toRotate->y, toRotate->z);
-
-            // Rotate the vector using the quaternion
             Quaternion qConjugate(q.w, -q.x, -q.y, -q.z);
-
-            // Apply the rotation: q * v * q_conjugate
             Quaternion rotated = q * vQuat * qConjugate;
 
-            this->w = q.w;
-            this->x = q.x;
-            this->y = q.y;
-            this->z = q.z;
+            *this = (q * (*this)).Normalized();
 
-            Normalize();
-
-            // Return the rotated vector
             return Vector3(rotated.x, rotated.y, rotated.z);
         }
     };

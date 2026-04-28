@@ -174,7 +174,7 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>SDL2.lib;SDL2main.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>SDL2.lib;SDL2main.lib;opengl32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
@@ -211,37 +211,58 @@
     <ClInclude Include="baselight.h" />
     <ClInclude Include="baseobject.h" />
     <ClInclude Include="basetype.h" />
+    <ClInclude Include="basicmovements.h" />
     <ClInclude Include="camera.h" />
+    <ClInclude Include="collisiontrigger.h" />
     <ClInclude Include="color.h" />
     <ClInclude Include="directionallight.h" />
     <ClInclude Include="EulerAngle.h" />
+    <ClInclude Include="exampleScene.h" />
+    <ClInclude Include="guardScene.h" />
+    <ClInclude Include="lightTestScene.h" />
     <ClInclude Include="main.h" />
     <ClInclude Include="material.h" />
+    <ClInclude Include="Importer.h" />
+    <ClInclude Include="minecraftScene.h" />
     <ClInclude Include="plane.h" />
     <ClInclude Include="pointlight.h" />
     <ClInclude Include="quaternion.h" />
     <ClInclude Include="rectangle.h" />
     <ClInclude Include="renderer.h" />
+    <ClInclude Include="rendererGPU.h" />
+    <ClInclude Include="rigidbody.h" />
+    <ClInclude Include="scenegroup.h" />
     <ClInclude Include="scenemanager.h" />
+    <ClInclude Include="settings.h" />
     <ClInclude Include="sphere.h" />
+    <ClInclude Include="teapot.h" />
     <ClInclude Include="transform.h" />
     <ClInclude Include="triangle.h" />
     <ClInclude Include="vector3.h" />
     <ClInclude Include="vertice.h" />
+    <ClInclude Include="verticeDTO.h" />
     <ClInclude Include="vPlane.h" />
     <ClInclude Include="vrectangle.h" />
     <ClInclude Include="vsphere.h" />
+    <ClInclude Include="vTeapot.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="camera.cpp" />
     <ClCompile Include="color.cpp" />
     <ClCompile Include="defaults.h" />
+    <ClCompile Include="exampleScene.cpp" />
+    <ClCompile Include="guardScene.cpp" />
+    <ClCompile Include="lightTestScene.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="Importer.cpp" />
+    <ClCompile Include="minecraftScene.cpp" />
     <ClCompile Include="plane.cpp" />
     <ClCompile Include="quaternion.cpp" />
     <ClCompile Include="rectangle.cpp" />
     <ClCompile Include="renderer.cpp" />
+    <ClCompile Include="rendererGPU.cpp" />
     <ClCompile Include="sphere.cpp" />
+    <ClCompile Include="teapot.cpp" />
     <ClCompile Include="vector3.cpp" />
   </ItemGroup>
   <ItemGroup>
