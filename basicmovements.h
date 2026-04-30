@@ -150,6 +150,28 @@ namespace PEngine {
         bool   canJump = false;         // enable jump via jump key
         double jumpForce = 5.0;           // m/s upward (needs rigidbody attached)
 
+        // ── God mode (free-fly, 6-DOF) ────────────────────────────────────────
+        // Toggle at runtime with the godModeKey scancode (default: G).
+        // While active:
+        //   • Terrain snapping and eyeHeight lock are both suspended.
+        //   • WASD flies along the camera's full look direction (including pitch).
+        //   • godModeUpKey   (default: Space)    moves straight up  in world space.
+        //   • godModeDownKey (default: L-Ctrl)   moves straight down in world space.
+        //   • flySpeed overrides moveSpeed for god-mode movement.
+        bool         godMode = false;
+        double       flySpeed = 0.25;           // units/tick at 60 Hz baseline
+        SDL_Scancode godModeKey = SDL_SCANCODE_G;
+        SDL_Scancode godModeUpKey = SDL_SCANCODE_SPACE;
+        SDL_Scancode godModeDownKey = SDL_SCANCODE_LCTRL;
+
+        // ── Terrain-snap callback ─────────────────────────────────────────────
+        // Assign a function that returns the terrain Y for a given (x, z).
+        // When set (and godMode is off), the player's Y is locked to
+        //   terrainSnapFn(x, z) + eyeHeight
+        // instead of the flat eyeHeight constant.  Leave nullptr to keep the
+        // original flat-floor behaviour.
+        std::function<float(float, float)> terrainSnapFn;
+
         KeyBindings keys = KeyBindings::ZQSD();
         SdlBindings sdlKeys = SdlBindings::WASD(); // used by TickKeys()
 
@@ -264,28 +286,77 @@ namespace PEngine {
 
             if (sdlKeyState[SDL_SCANCODE_ESCAPE]) return false;
 
+            // ── God-mode toggle (debounced) ────────────────────────────────────
+            {
+                bool gDown = sdlKeyState[godModeKey] != 0;
+                if (gDown && !_godModeWasDown)
+                {
+                    godMode = !godMode;
+                    // Print a small hint so the player knows the state changed.
+                    // (Remove this line if you prefer silent toggles.)
+                    // std::cout << "[Player] God mode " << (godMode ? "ON" : "OFF") << "\n";
+                }
+                _godModeWasDown = gDown;
+            }
+
             // ── Movement ──────────────────────────────────────────────────────
             {
                 Camera* cam = _sm->currentCamera;
                 Vector3 pos = cam->transform.position;
-                Vector3 fwd = cam->transform.forward();
-                Vector3 left = cam->transform.left();
-                Vector3 rgt = cam->transform.right();
 
-                // Flatten to XZ plane for FPS feel
-                fwd = Vector3(fwd.x, 0, fwd.z).normalize();
-                left = Vector3(left.x, 0, left.z).normalize();
-                rgt = Vector3(rgt.x, 0, rgt.z).normalize();
+                double step = (godMode ? flySpeed : moveSpeed) * dt * 60.0;
 
-                double step = moveSpeed * dt * 60.0;
+                if (godMode)
+                {
+                    // ── 6-DOF free-fly ────────────────────────────────────────
+                    // Forward/backward follow the camera's true look direction
+                    // (including pitch), so you can fly straight up by looking up.
+                    Vector3 fwd = cam->transform.forward();   // full 3-D direction
+                    Vector3 rgt = cam->transform.right();
 
-                if (sdlKeyState[sdlKeys.forward])  pos = pos + fwd * step;
-                if (sdlKeyState[sdlKeys.left])     pos = pos + left * step;
-                if (sdlKeyState[sdlKeys.backward]) pos = pos - fwd * step;
-                if (sdlKeyState[sdlKeys.right])    pos = pos + rgt * step;
+                    if (sdlKeyState[sdlKeys.forward])  pos = pos + fwd * step;
+                    if (sdlKeyState[sdlKeys.backward]) pos = pos - fwd * step;
+                    if (sdlKeyState[sdlKeys.right])    pos = pos + rgt * step;
+                    if (sdlKeyState[sdlKeys.left])     pos = pos - rgt * step;
 
-                // ── Eye height lock ───────────────────────────────────────────
-                if (eyeHeight > 0.0) pos.y = eyeHeight;
+                    // Dedicated world-space up/down keys.
+                    if (sdlKeyState[godModeUpKey])   pos.y -= step;
+                    if (sdlKeyState[godModeDownKey]) pos.y += step;
+                    // (eyeHeight lock and terrain snap are intentionally skipped)
+                }
+                else
+                {
+                    // ── Normal FPS movement ───────────────────────────────────
+                    Vector3 fwd = cam->transform.forward();
+                    Vector3 left = cam->transform.left();
+                    Vector3 rgt = cam->transform.right();
+
+                    // Flatten to XZ plane so walking doesn't drift vertically.
+                    fwd = Vector3(fwd.x, 0, fwd.z).normalize();
+                    left = Vector3(left.x, 0, left.z).normalize();
+                    rgt = Vector3(rgt.x, 0, rgt.z).normalize();
+
+                    if (sdlKeyState[sdlKeys.forward])  pos = pos + fwd * step;
+                    if (sdlKeyState[sdlKeys.left])     pos = pos + left * step;
+                    if (sdlKeyState[sdlKeys.backward]) pos = pos - fwd * step;
+                    if (sdlKeyState[sdlKeys.right])    pos = pos + rgt * step;
+
+                    // ── Terrain snap (ground walking) ─────────────────────────
+                    // If the scene supplied a height function, lock Y to
+                    // terrain + eyeHeight so the player walks on the ground.
+                    if (terrainSnapFn)
+                    {
+                        float groundY = terrainSnapFn(
+                            static_cast<float>(pos.x),
+                            static_cast<float>(pos.z));
+                        pos.y = static_cast<double>(groundY) + eyeHeight;
+                    }
+                    else if (eyeHeight > 0.0)
+                    {
+                        // Fallback: flat-floor lock (original behaviour).
+                        pos.y = eyeHeight;
+                    }
+                }
 
                 // ── Bounds clamp ──────────────────────────────────────────────
                 if (useBounds)
@@ -299,7 +370,7 @@ namespace PEngine {
                 }
 
                 // ── Physics integration ───────────────────────────────────────
-                if (rigidbody)
+                if (rigidbody && !godMode)
                 {
                     Vector3 inputVel(
                         pos.x - cam->transform.position.x,
@@ -312,8 +383,8 @@ namespace PEngine {
                 cam->transform.position = pos;
             }
 
-            // ── Jump ──────────────────────────────────────────────────────────
-            if (canJump && rigidbody && rigidbody->isGrounded)
+            // ── Jump (only in normal mode) ────────────────────────────────────
+            if (!godMode && canJump && rigidbody && rigidbody->isGrounded)
                 if (sdlKeyState[sdlKeys.jump])
                     rigidbody->Jump(jumpForce);
 
@@ -354,6 +425,7 @@ namespace PEngine {
         float                     _yaw = 0.f;
         float                     _pitch = 0.f;
         std::vector<ToggleAction> _toggles;
+        bool                      _godModeWasDown = false; // debounce for godModeKey
 
         void RebuildCameraRotation()
         {

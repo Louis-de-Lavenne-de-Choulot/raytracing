@@ -224,52 +224,72 @@ namespace PEngine
             stateTimer = randFloat(1.0f, 4.0f);
             heading = randFloat(0.0f, 6.2831853f);
 
-            // Snap to ground immediately
-            SnapToGround();
+            // Snap to ground and orient immediately on spawn.
+            float initSlope = SnapToGround();
+            ApplyRotation(initSlope);
 
             // Begin Survey animation
             if (clipSurvey) obj->animator.play(clipSurvey);
         }
 
-        // ── Snap Y to terrain surface ─────────────────────────────────────────
-        void SnapToGround()
+        // ── Snap Y to terrain surface and compute terrain slope pitch ────────
+        //
+        //  Samples two points straddling the fox's pivot along its heading:
+        //    front : kProbeOffset world units ahead
+        //    rear  : kProbeOffset world units behind
+        //
+        //  Y is set to the average of front/rear heights so neither end floats.
+        //  kGroundOffset corrects for the GLB pivot sitting above the feet —
+        //  tune this if the paws sink into or hover above the sand.
+        //
+        //  Returns the terrain slope pitch (radians) for ApplyRotation().
+        //
+        static constexpr float kProbeOffset = 0.8f;   // half-footprint, world units
+        static constexpr float kGroundOffset = 0.35f;  // pivot-to-paw distance (world scale)
+
+        float SnapToGround()
         {
             float x = static_cast<float>(object->transform.position.x);
             float z = static_cast<float>(object->transform.position.z);
-            object->transform.position.y = static_cast<double>(TerrainHeight(x, z));
+
+            float fwdX = std::cos(heading);
+            float fwdZ = std::sin(heading);
+
+            float hFront = TerrainHeight(x + fwdX * kProbeOffset, z + fwdZ * kProbeOffset);
+            float hRear = TerrainHeight(x - fwdX * kProbeOffset, z - fwdZ * kProbeOffset);
+
+            // Midpoint height minus the pivot offset so paws sit on the ground.
+            object->transform.position.y =
+                static_cast<double>((hFront + hRear) * 0.6f - kGroundOffset);
+
+            float slopePitch = std::atan2(hFront - hRear, 2.0f * kProbeOffset);
+            return slopePitch;
         }
 
-        // ── Apply heading as a Y-axis rotation on the object transform ─────────
+        // ── Apply heading + slope pitch as a composed rotation ────────────────
         //
-        //  The Khronos Fox GLB is exported with its face pointing along +X and
-        //  a -90° X-axis rotation baked into the root joint (making it head-down
-        //  at runtime).  We correct that with two parts:
+        //  Composition order (right-to-left):
+        //    qYaw * qSlope * qPitch
         //
-        //    1. A permanent -90° X rotation (corrects the head-down orientation).
-        //    2. The per-frame heading rotation around Y (turns the fox to face its
-        //       movement direction).
+        //  1. qPitch  : permanent -90° X fix for the GLB's baked root tilt.
+        //  2. qSlope  : nose-up/down to match the terrain gradient.
+        //  3. qYaw    : turn to face the movement direction.
         //
-        //  Both are composed here so only one Quaternion is written each tick.
-        //
-        void ApplyRotation()
+        void ApplyRotation(float slopePitch)
         {
-            float pitchRad = glm::radians(-90.0f);
-            float halfPitch = pitchRad * 0.5f;
-            Quaternion qPitch(
-                std::cos(halfPitch),        // w
-                std::sin(halfPitch),        // x  (rotation around X)
-                0.0, 0.0);
+            // 1. GLB baked-tilt correction (-90° around X).
+            float halfPitch = glm::radians(-90.0f) * 0.5f;
+            Quaternion qPitch(std::cos(halfPitch), std::sin(halfPitch), 0.0, 0.0);
 
-            // Step 2 — heading: rotate around Y to face movement direction.
+            // 2. Terrain slope tilt around local X.
+            float halfSlope = slopePitch * 0.5f;
+            Quaternion qSlope(std::cos(halfSlope), std::sin(halfSlope), 0.0, 0.0);
+
+            // 3. Heading yaw around Y.
             float halfYaw = heading * 0.5f;
-            Quaternion qYaw(
-                std::cos(halfYaw),          // w
-                0.0,
-                std::sin(halfYaw),          // y  (rotation around Y)
-                0.0);
+            Quaternion qYaw(std::cos(halfYaw), 0.0, std::sin(halfYaw), 0.0);
 
-            // Compose: first apply pitch correction, then yaw on top.
-            object->transform.rotation = qYaw * qPitch;
+            object->transform.rotation = qYaw * qSlope * qPitch;
         }
 
         // ── Per-frame update ──────────────────────────────────────────────────
@@ -322,8 +342,8 @@ namespace PEngine
             }
             }
 
-            SnapToGround();
-            ApplyRotation();
+            float slopePitch = SnapToGround();
+            ApplyRotation(slopePitch);
         }
 
     private:
@@ -385,7 +405,7 @@ namespace PEngine
         // ── Scene setup ───────────────────────────────────────────────────────
         SceneManager* sm = new SceneManager();
 
-        Camera* camera = new Camera(Vector3(10.0, 6.0, 10.0), Quaternion());
+        Camera* camera = new Camera(Vector3(10.0, 1.7, 10.0), Quaternion());
         sm->cameras->push_back(camera);
         sm->currentCamera = camera;
 
@@ -457,9 +477,23 @@ namespace PEngine
 
         // ── Player movement ───────────────────────────────────────────────────
         BasicMovements player(sm);
-        player.eyeHeight = 6.0;
+        // eyeHeight in world units above the terrain surface.
+        // The beach terrain spans roughly ±6 Y units; a value of 1.7 gives a
+        // human-scale viewpoint without towering over the foxes.
+        player.eyeHeight = 3.7;
         player.moveSpeed = 0.15;
+        player.flySpeed = 0.35;   // faster in god mode
         player.sdlKeys = SdlBindings::WASD();
+
+        // Walk on the terrain: Y is locked to TerrainHeight(x,z) + eyeHeight.
+        // God mode (G key) suspends this and enables free-fly.
+        player.terrainSnapFn = [](float x, float z) {
+            return TerrainHeight(x, z);
+            };
+
+        std::cout << "[Player] Press G to toggle god mode (free-fly).\n"
+            << "         In god mode: WASD = fly along look dir, "
+            << "Space = up, L-Ctrl = down.\n";
 
         // ─────────────────────────────────────────────────────────────────────
         //  Fox spawner
