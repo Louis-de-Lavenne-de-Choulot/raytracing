@@ -12,6 +12,9 @@ namespace PEngine
         /* data */
         Vector3 direction;
 
+		DirectionalLight() : BaseLight(), direction() {
+			type = DIRECTIONAL_LIGHT;
+		}
         DirectionalLight(double intens, Color col, Vector3 dir) : BaseLight(intens, col)
         {
             direction = dir;

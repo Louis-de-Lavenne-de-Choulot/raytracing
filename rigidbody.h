@@ -1,11 +1,11 @@
 #pragma once
-// rigidbody.h  —  PEngine
+// rigidbody.h  -  PEngine
 // ─────────────────────────────────────────────────────────────────────────────
 //  RigidBody
 //
 //  A physics component you attach to any BaseObject*.  It owns the object's
 //  linear and angular dynamics.  The host object keeps full ownership of its
-//  own transform — RigidBody reads & writes it every Integrate() call.
+//  own transform - RigidBody reads & writes it every Integrate() call.
 //
 //  Design notes
 //  ────────────
@@ -44,7 +44,7 @@
 namespace PEngine {
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  AABB  (Axis-Aligned Bounding Box) — used by both RigidBody and
+    //  AABB  (Axis-Aligned Bounding Box) - used by both RigidBody and
     //  CollisionTrigger for fast broad-phase tests.
     // ─────────────────────────────────────────────────────────────────────────
     struct AABB
@@ -257,7 +257,7 @@ namespace PEngine {
             for (auto* rb : _bodies)
                 rb->Integrate(dt, gravity);
 
-            // 2) Broad-phase AABB collision — O(n²), fine for small scenes
+            // 2) Broad-phase AABB collision - O(n²), fine for small scenes
             for (size_t i = 0; i < _bodies.size(); ++i)
             {
                 for (size_t j = i + 1; j < _bodies.size(); ++j)

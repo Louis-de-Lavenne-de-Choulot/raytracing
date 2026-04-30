@@ -35,6 +35,12 @@ namespace PEngine {
             return Vector3(-r.x, -r.y, -r.z);
         }
 
+		Vector3 up() {
+			Vector3 fwd = forward();
+			Vector3 rgt = right();
+			return fwd.cross(rgt);
+		}
+
         void Rotate(Vector3 axis, double angle) {
             Quaternion incremental;
             incremental.Rotate(&position, &axis, angle);

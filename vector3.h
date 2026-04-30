@@ -12,15 +12,15 @@ namespace PEngine
 				Vector3() : x(0), y(0), z(0) {}
                 Vector3(double valx, double valy, double valz);
 
-                double len();
+                double len() const;
 
-                Vector3 normalize();
+                Vector3 normalize() const;
 
                 double angleBetween(Vector3 *vec);
 
-                double magnitude();
+                double magnitude() const;
 
-                double dot(const Vector3 *vec);
+                double dot(const Vector3 *vec) const;
 
                 Vector3 cross(const Vector3& other) const {
                         return Vector3(

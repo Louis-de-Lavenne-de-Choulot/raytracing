@@ -1,6 +1,8 @@
 #pragma once
 #include "material.h"
 #include "basetype.h"
+#include "color.h"
+#include "material.h"
 
 namespace PEngine {
     namespace Defaults {

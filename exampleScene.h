@@ -1,12 +1,13 @@
 #pragma once
+#ifndef EXAMPLESCENE
+#define EXAMPLESCENE
 
 namespace PEngine
 {
-    class SceneManager;
-
-    class ExampleScene
+    struct ExampleScene
     {
-    public:
-        static void LoadScene(SceneManager* sceneManager);
+        static void Run();
     };
 }
+
+#endif

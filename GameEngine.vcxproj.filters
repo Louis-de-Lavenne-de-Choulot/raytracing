@@ -28,15 +28,15 @@
     <Filter Include="importer">
       <UniqueIdentifier>{827c4ac5-ad05-41de-9e4a-19a05197d1ec}</UniqueIdentifier>
     </Filter>
+    <Filter Include="externals">
+      <UniqueIdentifier>{4e175d0b-878b-4ed7-bfd1-5ff2f3db506d}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="camera.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="main.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="renderer.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="basetype.h">
@@ -102,17 +102,11 @@
     <ClInclude Include="transform.h">
       <Filter>engineBase</Filter>
     </ClInclude>
-    <ClInclude Include="exampleScene.h">
-      <Filter>examples</Filter>
-    </ClInclude>
     <ClInclude Include="scenemanager.h">
       <Filter>engineBase</Filter>
     </ClInclude>
     <ClInclude Include="Importer.h">
       <Filter>importer</Filter>
-    </ClInclude>
-    <ClInclude Include="lightTestScene.h">
-      <Filter>examples</Filter>
     </ClInclude>
     <ClInclude Include="settings.h">
       <Filter>engineBase</Filter>
@@ -120,10 +114,7 @@
     <ClInclude Include="verticeDTO.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="guardScene.h">
-      <Filter>examples</Filter>
-    </ClInclude>
-    <ClInclude Include="rendererGPU.h">
+    <ClInclude Include="GPURenderer.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="basicmovements.h">
@@ -141,15 +132,48 @@
     <ClInclude Include="minecraftScene.h">
       <Filter>examples</Filter>
     </ClInclude>
+    <ClInclude Include="textureManager.h">
+      <Filter>engineBase</Filter>
+    </ClInclude>
+    <ClInclude Include="shaderLibrary.h">
+      <Filter>engineBase</Filter>
+    </ClInclude>
+    <ClInclude Include="UIRenderer.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="stb_image.h">
+      <Filter>externals</Filter>
+    </ClInclude>
+    <ClInclude Include="exampleScene.h">
+      <Filter>examples</Filter>
+    </ClInclude>
+    <ClInclude Include="texture.h">
+      <Filter>engineBase</Filter>
+    </ClInclude>
+    <ClInclude Include="beachShader.h">
+      <Filter>examples</Filter>
+    </ClInclude>
+    <ClInclude Include="waterShader.h">
+      <Filter>examples</Filter>
+    </ClInclude>
+    <ClInclude Include="animation.h">
+      <Filter>engineBase</Filter>
+    </ClInclude>
+    <ClInclude Include="skinnedVertex.h">
+      <Filter>engineBase</Filter>
+    </ClInclude>
+    <ClInclude Include="skinnedShader.h">
+      <Filter>engineBase</Filter>
+    </ClInclude>
+    <ClInclude Include="GltfImporter.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="camera.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="main.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="renderer.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="plane.cpp">
@@ -173,26 +197,35 @@
     <ClCompile Include="defaults.h">
       <Filter>engineBase</Filter>
     </ClCompile>
-    <ClCompile Include="exampleScene.cpp">
-      <Filter>examples</Filter>
-    </ClCompile>
     <ClCompile Include="quaternion.cpp">
       <Filter>engineBase</Filter>
     </ClCompile>
     <ClCompile Include="Importer.cpp">
       <Filter>importer</Filter>
     </ClCompile>
-    <ClCompile Include="lightTestScene.cpp">
-      <Filter>examples</Filter>
-    </ClCompile>
-    <ClCompile Include="guardScene.cpp">
-      <Filter>examples</Filter>
-    </ClCompile>
-    <ClCompile Include="rendererGPU.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="minecraftScene.cpp">
       <Filter>examples</Filter>
+    </ClCompile>
+    <ClCompile Include="textureManager.cpp">
+      <Filter>engineBase</Filter>
+    </ClCompile>
+    <ClCompile Include="shaderLibrary.cpp">
+      <Filter>engineBase</Filter>
+    </ClCompile>
+    <ClCompile Include="UIRenderer.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="GPURenderer.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="exampleScene.cpp">
+      <Filter>examples</Filter>
+    </ClCompile>
+    <ClCompile Include="exampleScene_gltf_snippet.cpp">
+      <Filter>examples</Filter>
+    </ClCompile>
+    <ClCompile Include="GltfImporter.cpp">
+      <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
@@ -202,5 +235,16 @@
   </ItemGroup>
   <ItemGroup>
     <CopyFileToFolders Include="..\SDL2-devel-2.32.10-VC\SDL2-2.32.10\lib\x64\SDL2.dll" />
+    <CopyFileToFolders Include="assets\sand.png">
+      <Filter>Resource Files</Filter>
+    </CopyFileToFolders>
+    <CopyFileToFolders Include="assets\Fox.glb">
+      <Filter>Resource Files</Filter>
+    </CopyFileToFolders>
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="assets\sand.jpg">
+      <Filter>Resource Files</Filter>
+    </Image>
   </ItemGroup>
 </Project>

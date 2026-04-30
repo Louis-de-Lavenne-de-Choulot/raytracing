@@ -10,7 +10,7 @@
 #include <vector>
 
 // ---------------------------------------------------------------------------
-//  Teapot — concrete shape, follows the same multiple-inheritance pattern
+//  Teapot - concrete shape, follows the same multiple-inheritance pattern
 //  as Sphere (BaseObject + VShape).
 //
 //  NOTE: basetype.h must have TEAPOT added to the ObjectType enum,

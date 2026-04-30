@@ -10,39 +10,70 @@
 
 namespace PEngine
 {
+    // A box needs 24 vertices (4 per face × 6 faces) so every vertex can carry
+    // a constant per-face normal.
+    //
+    // Winding matches the original CW convention (GL_CW front-face).
+    // Vertex index layout:
+    //   Front  (-Z) : 0-3    Back   (+Z) : 4-7
+    //   Left   (-X) : 8-11   Right  (+X) : 12-15
+    //   Top    (+Y) : 16-19  Bottom (-Y) : 20-23
+
     struct VRectangle
     {
-        std::array<Vertice, 8> vertices = std::array<Vertice, 8>{
-            Vertice(Vector3(-1, -1, -1)), // LBF - Left Bottom Front (0)
-            Vertice(Vector3(1, -1, -1)), // RBF - Right Bottom Front (1)
-            Vertice(Vector3(1, 1, -1)), // RTF - Right Top Front (2)
-            Vertice(Vector3(-1, 1, -1)), // LTF - Left Top Front (3)
+        std::array<Vertice, 24> vertices = std::array<Vertice, 24>{
+            // ── Front face  (normal  0, 0,-1) ──────────────────────────────
+            Vertice(Vector3(-1, -1, -1), Vector3(0,  0, -1)), // 0  LBF
+            Vertice(Vector3(1, -1, -1), Vector3(0,  0, -1)), // 1  RBF
+            Vertice(Vector3(1,  1, -1), Vector3(0,  0, -1)), // 2  RTF
+            Vertice(Vector3(-1,  1, -1), Vector3(0,  0, -1)), // 3  LTF
 
-            Vertice(Vector3(-1, -1, 1)), // LBB - Left Bottom Back (4)
-            Vertice(Vector3(1, -1, 1)), // RBB - Right Bottom Back (5)
-            Vertice(Vector3(1, 1, 1)), // RTB - Right Top Back (6)
-            Vertice(Vector3(-1, 1, 1))  // LTB - Left Top Back (7)
+            // ── Back face   (normal  0, 0,+1) ──────────────────────────────
+            Vertice(Vector3(-1, -1,  1), Vector3(0,  0,  1)), // 4  LBB
+            Vertice(Vector3(1, -1,  1), Vector3(0,  0,  1)), // 5  RBB
+            Vertice(Vector3(1,  1,  1), Vector3(0,  0,  1)), // 6  RTB
+            Vertice(Vector3(-1,  1,  1), Vector3(0,  0,  1)), // 7  LTB
+
+            // ── Left face   (normal -1, 0, 0) ──────────────────────────────
+            Vertice(Vector3(-1, -1, -1), Vector3(-1,  0,  0)), // 8
+            Vertice(Vector3(-1,  1, -1), Vector3(-1,  0,  0)), // 9
+            Vertice(Vector3(-1,  1,  1), Vector3(-1,  0,  0)), // 10
+            Vertice(Vector3(-1, -1,  1), Vector3(-1,  0,  0)), // 11
+
+            // ── Right face  (normal +1, 0, 0) ──────────────────────────────
+            Vertice(Vector3(1, -1, -1), Vector3(1,  0,  0)), // 12
+            Vertice(Vector3(1, -1,  1), Vector3(1,  0,  0)), // 13
+            Vertice(Vector3(1,  1,  1), Vector3(1,  0,  0)), // 14
+            Vertice(Vector3(1,  1, -1), Vector3(1,  0,  0)), // 15
+
+            // ── Top face    (normal  0,+1, 0) ──────────────────────────────
+            Vertice(Vector3(-1,  1, -1), Vector3(0,  1,  0)), // 16
+            Vertice(Vector3(1,  1, -1), Vector3(0,  1,  0)), // 17
+            Vertice(Vector3(1,  1,  1), Vector3(0,  1,  0)), // 18
+            Vertice(Vector3(-1,  1,  1), Vector3(0,  1,  0)), // 19
+
+            // ── Bottom face (normal  0,-1, 0) ──────────────────────────────
+            Vertice(Vector3(-1, -1, -1), Vector3(0, -1,  0)), // 20
+            Vertice(Vector3(-1, -1,  1), Vector3(0, -1,  0)), // 21
+            Vertice(Vector3(1, -1,  1), Vector3(0, -1,  0)), // 22
+            Vertice(Vector3(1, -1, -1), Vector3(0, -1,  0)), // 23
         };
 
         std::array<Triangle, 12> triangles = std::array<Triangle, 12>{
-            // in CW, Front facing means in order (0,1,2), Back facing means reverse clock order (0,2,1)
-            // Front Face
-            Triangle(0, 1, 2), Triangle(0, 2, 3),
+            // CW winding - same convention as the original VRectangle.
 
-            // Back Face
-            Triangle(4, 6, 5), Triangle(4, 7, 6),
-
-            // Left Face
-            Triangle(0, 3, 7), Triangle(0, 7, 4),
-
-            // Right Face
-            Triangle(1, 5, 6), Triangle(1, 6, 2),
-
-            // Top Face
-            Triangle(3, 2, 6), Triangle(3, 6, 7),
-
-            // Bottom Face
-            Triangle(0, 4, 5), Triangle(0, 5, 1)
+            // Front  (-Z)
+            Triangle(0,  1,  2), Triangle(0,  2,  3),
+            // Back   (+Z)
+            Triangle(4,  6,  5), Triangle(4,  7,  6),
+            // Left   (-X)
+            Triangle(8,  9, 10), Triangle(8, 10, 11),
+            // Right  (+X)
+            Triangle(12, 13, 14), Triangle(12, 14, 15),
+            // Top    (+Y)
+            Triangle(16, 17, 18), Triangle(16, 18, 19),
+            // Bottom (-Y)
+            Triangle(20, 21, 22), Triangle(20, 22, 23),
         };
     };
 };

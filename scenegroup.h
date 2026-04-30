@@ -1,7 +1,7 @@
 #pragma once
-// scenegroup.h  —  PEngine
+// scenegroup.h  -  PEngine
 // ─────────────────────────────────────────────────────────────────────────────
-//  SceneGroup  —  Unity-style "folder" / parent object
+//  SceneGroup  -  Unity-style "folder" / parent object
 //
 //  A SceneGroup owns a transform (position, rotation, scale) and holds
 //  references to any number of BaseObject* children and nested SceneGroup*
@@ -49,7 +49,7 @@
 //      guard->Add(botHead);
 //      guard->Add(torchBody);
 //
-//      // In patrol loop — just move the group:
+//      // In patrol loop - just move the group:
 //      guard->SetPosition(botPos);
 //      guard->SetRotation(qFace);
 //      guard->ApplyTransform();  // propagates to all children
@@ -68,7 +68,7 @@
 namespace PEngine {
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  LocalOffset  —  child's transform relative to the group's transform
+    //  LocalOffset  -  child's transform relative to the group's transform
     //  at the time Add() was called.
     // ─────────────────────────────────────────────────────────────────────────
     struct LocalOffset

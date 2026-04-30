@@ -12,7 +12,6 @@
 #include "vector3.h"
 #include "plane.h"
 #include "triangle.h"
-#include "renderer.h"
 #include "camera.h"
 #include "baselight.h"
 #include "pointlight.h"
@@ -23,8 +22,6 @@
 #include "teapot.h"
 #include "importer.h"
 #include "exampleScene.h"
-#include "lightTestScene.h"
-#include "guardScene.h"
 #include "minecraftScene.h"
 
 using namespace PEngine;
@@ -39,7 +36,7 @@ PointLight *pointLight;
 
 // Store yaw and pitch as plain floats instead of accumulating them
 // into the quaternion. This is the only reliable way to prevent roll:
-// we never compound rotations — we rebuild the quaternion from scratch
+// we never compound rotations - we rebuild the quaternion from scratch
 // every time either angle changes.
 float cameraYaw = 0.0f;   // horizontal rotation, degrees, around world Y
 float cameraPitch = 0.0f;   // vertical   rotation, degrees, around local X
@@ -129,7 +126,7 @@ void updateMouse(int x, int y)
     if (cameraPitch > PITCH_LIMIT) cameraPitch = PITCH_LIMIT;
     if (cameraPitch < -PITCH_LIMIT) cameraPitch = -PITCH_LIMIT;
 
-    // Rebuild the quaternion cleanly from the two angles — no drift possible
+    // Rebuild the quaternion cleanly from the two angles - no drift possible
     RebuildCameraRotation();
 }
 
@@ -137,9 +134,7 @@ void updateMouse(int x, int y)
 int main(int argc, char* argv[])
 {
     sceneManager = new SceneManager();
-	Settings::canvasWidth = 1080;
-	Settings::canvasHeight = 720;
-    GuardScene::LoadScene(sceneManager);
+    ExampleScene::Run();
     return 0;
 }
 

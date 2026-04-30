@@ -174,10 +174,6 @@ void main()
         glCompileShader(id);
 
         GLint ok = 0;
-        glGetShaderiv(id, GL_COMPILE_STATUS, &ok);
-        if (!ok)
-        {
-            char log[1024];
             glGetShaderInfoLog(id, sizeof(log), nullptr, log);
             std::cerr << "[RendererGPU] Shader compile error:\n" << log << "\n";
             glDeleteShader(id);

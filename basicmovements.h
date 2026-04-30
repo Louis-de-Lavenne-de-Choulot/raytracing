@@ -1,5 +1,5 @@
 #pragma once
-// basicmovements.h  —  PEngine
+// basicmovements.h  -  PEngine
 // ─────────────────────────────────────────────────────────────────────────────
 //  BasicMovements
 //
@@ -61,24 +61,27 @@
 // Replace these stubs with your platform's key query if not using Windows.
 static short GetAsyncKeyState(int) { return 0; }
 static constexpr int VK_ESCAPE = 0x1B;
-static constexpr int VK_SPACE  = 0x20;
+static constexpr int VK_SPACE = 0x20;
 #endif
+
+// SDL is available on all platforms; include it for TickKeys().
+#include <SDL.h>
 
 namespace PEngine {
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  Key scheme  — choose ZQSD (French AZERTY) or WASD (English QWERTY)
+    //  Key scheme  - choose ZQSD (French AZERTY) or WASD (English QWERTY)
     // ─────────────────────────────────────────────────────────────────────────
     enum class KeyScheme { ZQSD, WASD };
 
     struct KeyBindings
     {
-        int forward  = 'Z';
+        int forward = 'Z';
         int backward = 'S';
-        int left     = 'Q';
-        int right    = 'D';
-        int jump     = VK_SPACE;
-        int quit     = VK_ESCAPE;
+        int left = 'Q';
+        int right = 'D';
+        int jump = VK_SPACE;
+        int quit = VK_ESCAPE;
 
         static KeyBindings ZQSD()
         {
@@ -91,13 +94,39 @@ namespace PEngine {
     };
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  ToggleAction  — key + callback registered via RegisterToggle()
+    //  SdlBindings - SDL_Scancode equivalent of KeyBindings.
+    //  Used by TickKeys(const Uint8* sdlKeys, double dt).
+    // ─────────────────────────────────────────────────────────────────────────
+    struct SdlBindings
+    {
+        SDL_Scancode forward = SDL_SCANCODE_W;
+        SDL_Scancode backward = SDL_SCANCODE_S;
+        SDL_Scancode left = SDL_SCANCODE_A;
+        SDL_Scancode right = SDL_SCANCODE_D;
+        SDL_Scancode jump = SDL_SCANCODE_SPACE;
+
+        static SdlBindings WASD()
+        {
+            return { SDL_SCANCODE_W, SDL_SCANCODE_S,
+                     SDL_SCANCODE_A, SDL_SCANCODE_D,
+                     SDL_SCANCODE_SPACE };
+        }
+        static SdlBindings ZQSD()
+        {
+            return { SDL_SCANCODE_W, SDL_SCANCODE_S,
+                     SDL_SCANCODE_Q, SDL_SCANCODE_D,
+                     SDL_SCANCODE_SPACE };
+        }
+    };
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  ToggleAction  - key + callback registered via RegisterToggle()
     // ─────────────────────────────────────────────────────────────────────────
     struct ToggleAction
     {
-        int  key        = 0;
-        bool state      = false;   // current on/off
-        bool wasDown    = false;   // debounce
+        int  key = 0;
+        bool state = false;   // current on/off
+        bool wasDown = false;   // debounce
         std::function<void(bool)> callback;  // called with new state
     };
 
@@ -108,38 +137,40 @@ namespace PEngine {
     {
     public:
         // ── Configuration ─────────────────────────────────────────────────────
-        double moveSpeed   = 0.08;          // units per tick (at 60 Hz feel)
+        double moveSpeed = 0.08;          // units per tick (at 60 Hz feel)
         double sensitivity = 0.04f;         // mouse degrees-per-pixel
-        float  pitchLimit  = 89.f;          // degrees
+        float  pitchLimit = 89.f;          // degrees
 
-        double eyeHeight   = 1.7;           // if > 0, Y is locked to this
-                                            // set ≤ 0 for free vertical movement
+        double eyeHeight = 1.7;           // if > 0, Y is locked to this
+        // set ≤ 0 for free vertical movement
 
-        bool   useBounds   = false;
-        AABB   bounds      = {};            // world AABB the player is clamped to
+        bool   useBounds = false;
+        AABB   bounds = {};            // world AABB the player is clamped to
 
-        bool   canJump     = false;         // enable jump via jump key
-        double jumpForce   = 5.0;           // m/s upward (needs rigidbody attached)
+        bool   canJump = false;         // enable jump via jump key
+        double jumpForce = 5.0;           // m/s upward (needs rigidbody attached)
 
-        KeyBindings keys   = KeyBindings::ZQSD();
+        KeyBindings keys = KeyBindings::ZQSD();
+        SdlBindings sdlKeys = SdlBindings::WASD(); // used by TickKeys()
 
         // Optional: link a RigidBody for physics-driven movement
-        RigidBody*  rigidbody = nullptr;    // non-owning; null = no physics
+        RigidBody* rigidbody = nullptr;    // non-owning; null = no physics
 
         // ── Constructor ───────────────────────────────────────────────────────
         explicit BasicMovements(SceneManager* sm)
             : _sm(sm)
-        {}
+        {
+        }
 
         // ── Toggle actions ────────────────────────────────────────────────────
         // Register a key that toggles a bool and calls cb(newState) on change.
         void RegisterToggle(int key, std::function<void(bool)> cb,
-                            bool initialState = true)
+            bool initialState = true)
         {
             _toggles.push_back({ key, initialState, false, std::move(cb) });
         }
 
-        // ── Per-tick input processing (call from fixed-step thread) ───────────
+        // ── Per-tick input processing ───────────
         // Returns false when the player pressed Quit.
         bool TickInput(double dt)
         {
@@ -150,24 +181,24 @@ namespace PEngine {
 
             // ── WASD / ZQSD movement ──────────────────────────────────────────
             {
-                Camera*  cam  = _sm->currentCamera;
-                Vector3  pos  = cam->transform.position;
-                Vector3  fwd  = cam->transform.forward();
+                Camera* cam = _sm->currentCamera;
+                Vector3  pos = cam->transform.position;
+                Vector3  fwd = cam->transform.forward();
                 Vector3  left = cam->transform.left();
-                Vector3  rgt  = cam->transform.right();
+                Vector3  rgt = cam->transform.right();
 
                 // Flatten forward/strafe vectors to XZ plane for FPS feel
-                fwd  = Vector3(fwd.x,  0, fwd.z ).normalize();
+                fwd = Vector3(fwd.x, 0, fwd.z).normalize();
                 left = Vector3(left.x, 0, left.z).normalize();
-                rgt  = Vector3(rgt.x,  0, rgt.z ).normalize();
+                rgt = Vector3(rgt.x, 0, rgt.z).normalize();
 
                 // Rescale speed to be frame-rate independent (60 Hz baseline)
                 double step = moveSpeed * dt * 60.0;
 
-                if (GetAsyncKeyState(keys.forward)  & 0x8000) pos = pos + fwd  * step;
-                if (GetAsyncKeyState(keys.left)      & 0x8000) pos = pos + left * step;
-                if (GetAsyncKeyState(keys.backward)  & 0x8000) pos = pos - fwd  * step;
-                if (GetAsyncKeyState(keys.right)     & 0x8000) pos = pos + rgt  * step;
+                if (GetAsyncKeyState(keys.forward) & 0x8000) pos = pos + fwd * step;
+                if (GetAsyncKeyState(keys.left) & 0x8000) pos = pos + left * step;
+                if (GetAsyncKeyState(keys.backward) & 0x8000) pos = pos - fwd * step;
+                if (GetAsyncKeyState(keys.right) & 0x8000) pos = pos + rgt * step;
 
                 // ── Eye height lock ───────────────────────────────────────────
                 if (eyeHeight > 0.0) pos.y = eyeHeight;
@@ -193,7 +224,7 @@ namespace PEngine {
                         pos.z - cam->transform.position.z
                     );
                     rigidbody->velocity = inputVel;
-                    // Don't write pos.y — let the rigidbody do it
+                    // Don't write pos.y - let the rigidbody do it
                     pos.y = cam->transform.position.y;
                 }
 
@@ -222,6 +253,77 @@ namespace PEngine {
             return true;  // still running
         }
 
+        // ── SDL keyboard tick (call from render loop with SDL_GetKeyboardState) ─
+        // sdlKeyState : pointer returned by SDL_GetKeyboardState(nullptr).
+        // dt          : frame delta in seconds.
+        // Returns false when Escape is held.
+        bool TickKeys(const Uint8* sdlKeyState, double dt)
+        {
+            if (!_sm || !_sm->currentCamera) return true;
+            if (!sdlKeyState) return true;
+
+            if (sdlKeyState[SDL_SCANCODE_ESCAPE]) return false;
+
+            // ── Movement ──────────────────────────────────────────────────────
+            {
+                Camera* cam = _sm->currentCamera;
+                Vector3 pos = cam->transform.position;
+                Vector3 fwd = cam->transform.forward();
+                Vector3 left = cam->transform.left();
+                Vector3 rgt = cam->transform.right();
+
+                // Flatten to XZ plane for FPS feel
+                fwd = Vector3(fwd.x, 0, fwd.z).normalize();
+                left = Vector3(left.x, 0, left.z).normalize();
+                rgt = Vector3(rgt.x, 0, rgt.z).normalize();
+
+                double step = moveSpeed * dt * 60.0;
+
+                if (sdlKeyState[sdlKeys.forward])  pos = pos + fwd * step;
+                if (sdlKeyState[sdlKeys.left])     pos = pos + left * step;
+                if (sdlKeyState[sdlKeys.backward]) pos = pos - fwd * step;
+                if (sdlKeyState[sdlKeys.right])    pos = pos + rgt * step;
+
+                // ── Eye height lock ───────────────────────────────────────────
+                if (eyeHeight > 0.0) pos.y = eyeHeight;
+
+                // ── Bounds clamp ──────────────────────────────────────────────
+                if (useBounds)
+                {
+                    if (pos.x < bounds.min.x) pos.x = bounds.min.x;
+                    if (pos.x > bounds.max.x) pos.x = bounds.max.x;
+                    if (pos.y < bounds.min.y) pos.y = bounds.min.y;
+                    if (pos.y > bounds.max.y) pos.y = bounds.max.y;
+                    if (pos.z < bounds.min.z) pos.z = bounds.min.z;
+                    if (pos.z > bounds.max.z) pos.z = bounds.max.z;
+                }
+
+                // ── Physics integration ───────────────────────────────────────
+                if (rigidbody)
+                {
+                    Vector3 inputVel(
+                        pos.x - cam->transform.position.x,
+                        rigidbody->velocity.y,
+                        pos.z - cam->transform.position.z);
+                    rigidbody->velocity = inputVel;
+                    pos.y = cam->transform.position.y;
+                }
+
+                cam->transform.position = pos;
+            }
+
+            // ── Jump ──────────────────────────────────────────────────────────
+            if (canJump && rigidbody && rigidbody->isGrounded)
+                if (sdlKeyState[sdlKeys.jump])
+                    rigidbody->Jump(jumpForce);
+
+            // ── Toggle actions ────────────────────────────────────────────────
+            // Toggle keys registered via RegisterToggle() use VK codes (Windows).
+            // For SDL toggles, callers should check SDL_GetKeyboardState directly.
+
+            return true;
+        }
+
         // ── Mouse look (call from render/event loop with SDL relative motion) ─
         // dx, dy: pixels moved this frame (from SDL_GetRelativeMouseState or
         // your Get_MouseState wrapper).
@@ -229,33 +331,33 @@ namespace PEngine {
         {
             if (!_sm || !_sm->currentCamera) return;
 
-            _yaw   += static_cast<float>(dx) * sensitivity;
+            _yaw += static_cast<float>(dx) * sensitivity;
             _pitch += static_cast<float>(dy) * sensitivity;
 
             if (_yaw >= 360.f) _yaw -= 360.f;
-            if (_yaw <    0.f) _yaw += 360.f;
-            if (_pitch >  pitchLimit) _pitch =  pitchLimit;
+            if (_yaw < 0.f) _yaw += 360.f;
+            if (_pitch > pitchLimit) _pitch = pitchLimit;
             if (_pitch < -pitchLimit) _pitch = -pitchLimit;
 
             RebuildCameraRotation();
         }
 
         // ── Direct yaw/pitch setters (for scene init or cutscenes) ───────────
-        void SetYaw  (float deg) { _yaw   = deg; RebuildCameraRotation(); }
+        void SetYaw(float deg) { _yaw = deg; RebuildCameraRotation(); }
         void SetPitch(float deg) { _pitch = deg; RebuildCameraRotation(); }
 
         float GetYaw()   const { return _yaw; }
         float GetPitch() const { return _pitch; }
 
     private:
-        SceneManager*             _sm      = nullptr;
-        float                     _yaw     = 0.f;
-        float                     _pitch   = 0.f;
+        SceneManager* _sm = nullptr;
+        float                     _yaw = 0.f;
+        float                     _pitch = 0.f;
         std::vector<ToggleAction> _toggles;
 
         void RebuildCameraRotation()
         {
-            float yr = _yaw   * (3.14159265f / 180.f);
+            float yr = _yaw * (3.14159265f / 180.f);
             float pr = _pitch * (3.14159265f / 180.f);
             float hy = yr * 0.5f, hp = pr * 0.5f;
             Quaternion qY(std::cos(hy), 0.f, std::sin(hy), 0.f);

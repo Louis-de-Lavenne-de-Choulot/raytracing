@@ -94,12 +94,6 @@ namespace PEngine {
                         tempTriangles.emplace_back(indices[0], indices[i], indices[i + 1]);
                     }
                 }
-
-                // Debug
-                std::cout << "Parsed face:";
-                for (int idx : indices)
-                    std::cout << " " << idx;
-                std::cout << std::endl;
             }
         }
 

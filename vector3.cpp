@@ -12,12 +12,12 @@ namespace PEngine
         z = valz;
     }
 
-    double Vector3::len()
+    double Vector3::len() const
     {
         return sqrt(x * x + y * y + z * z);
     }
 
-    Vector3 Vector3::normalize()
+    Vector3 Vector3::normalize() const
     {
         double l = len();
         return Vector3(this->x / l, this->y / l, this->z / l);
@@ -28,12 +28,12 @@ namespace PEngine
         return acos(this->dot(vec) / (this->magnitude() * vec->magnitude())) * 180 / std::numbers::pi;
     }
 
-    double Vector3::magnitude()
+    double Vector3::magnitude() const
     {
         return sqrt((*this).dot(this));
     }
 
-    double Vector3::dot(const Vector3 *vec)
+    double Vector3::dot(const Vector3 *vec) const
     {
         return this->x * vec->x + this->y * vec->y + this->z * vec->z;
     }

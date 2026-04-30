@@ -6,15 +6,16 @@
 
 namespace PEngine
 {
-    Plane::Plane(Vector3 scale, Vector3 position, Quaternion rotation, Material *material) : BaseObject(scale, position, rotation, material)
+    Plane::Plane(Vector3 scale, Vector3 position, Quaternion rotation, Material* material)
+        : BaseObject(scale, position, rotation, material)
     {
-        std::vector<Vertice> vts = std::vector<Vertice>(this->vertices.begin(), this->vertices.end());
-        std::vector<Triangle> trs = std::vector<Triangle>(this->triangles.begin(), this->triangles.end());
-        // foreach triangle, add material
-        for (Triangle triangle : trs)
-        {
+        std::vector<Vertice>  vts(this->vertices.begin(), this->vertices.end());
+        std::vector<Triangle> trs(this->triangles.begin(), this->triangles.end());
+
+        // Must iterate by reference
+        for (Triangle& triangle : trs)
             triangle.material = material;
-        }
+
         this->setVertices(vts);
         this->setTriangles(trs);
         type = PLANE;

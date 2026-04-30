@@ -80,7 +80,7 @@ namespace PEngine
     // In the clipper, `t` is the parametric distance along the triangle edge
     // from the invalid vertex (behind the near plane) to the valid vertex
     // (in front of it).  So t=0 is the invalid end, t=1 is the valid end,
-    // and the clipped point sits exactly at t — giving the correct blended
+    // and the clipped point sits exactly at t - giving the correct blended
     // colour for Gouraud interpolation to continue across the new vertex.
     //
     // No clamping is needed here: since t is always in [0,1] and both input

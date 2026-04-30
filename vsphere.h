@@ -13,29 +13,31 @@ namespace PEngine
 {
     struct VSphere
     {
-        std::vector<Vertice> vertices;
+        std::vector<Vertice>  vertices;
         std::vector<Triangle> triangles;
         Vector3* dir = new Vector3(0, 0, 1); // TODO
 
-        VSphere(int segments = 20, int rings = 20, Material *mat = Defaults::MissingMaterial)
+        VSphere(int segments = 20, int rings = 20, Material* mat = Defaults::MissingMaterial)
         {
-            // Generate vertices
+            // Generate vertices - for a unit sphere the position vector IS the
+            // outward normal, so we pass it as both arguments.
             for (int ring = 0; ring <= rings; ring++)
             {
                 float phi = std::numbers::pi * float(ring) / float(rings);
                 for (int segment = 0; segment <= segments; segment++)
                 {
                     float theta = 2.0f * std::numbers::pi * float(segment) / float(segments);
-                    
+
                     float x = std::sin(phi) * std::cos(theta);
                     float y = std::cos(phi);
                     float z = std::sin(phi) * std::sin(theta);
 
-                    vertices.push_back(Vertice(Vector3(x, y, z)));
+                    Vector3 pos(x, y, z);
+                    vertices.push_back(Vertice(pos, pos)); // normal == position on unit sphere
                 }
             }
 
-            // Generate triangles
+            // Generate triangles (unchanged)
             for (int ring = 0; ring < rings; ring++)
             {
                 int ringStart = ring * (segments + 1);
@@ -49,8 +51,7 @@ namespace PEngine
                             ringStart + segment,
                             ringStart + segment + 1,
                             nextRingStart + segment,
-                            mat
-                        ));
+                            mat));
                     }
 
                     if (ring != rings - 1)
@@ -59,8 +60,7 @@ namespace PEngine
                             nextRingStart + segment,
                             ringStart + segment + 1,
                             nextRingStart + segment + 1,
-                            mat
-                        ));
+                            mat));
                     }
                 }
             }

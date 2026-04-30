@@ -1,5 +1,5 @@
 #pragma once
-// collisiontrigger.h  —  PEngine
+// collisiontrigger.h  -  PEngine
 // ─────────────────────────────────────────────────────────────────────────────
 //  CollisionTrigger
 //
@@ -8,9 +8,9 @@
 //  callbacks fire.
 //
 //  Three distinct events:
-//    OnEnter  — fires once, the frame the overlap first begins
-//    OnStay   — fires every tick while the overlap continues
-//    OnExit   — fires once, the frame the overlap ends
+//    OnEnter  - fires once, the frame the overlap first begins
+//    OnStay   - fires every tick while the overlap continues
+//    OnExit   - fires once, the frame the overlap ends
 //
 //  Callbacks receive a CollisionEvent carrying both participants.
 //
@@ -59,7 +59,7 @@
 namespace PEngine {
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  CollisionEvent  — passed to every callback
+    //  CollisionEvent  - passed to every callback
     // ─────────────────────────────────────────────────────────────────────────
     struct CollisionEvent
     {
@@ -132,12 +132,12 @@ namespace PEngine {
 
                 if (_prevOverlaps.find(other) == _prevOverlaps.end())
                 {
-                    // New overlap — fire OnEnter
+                    // New overlap - fire OnEnter
                     for (auto& cb : _onEnter) cb(ev);
                 }
                 else
                 {
-                    // Continuing overlap — fire OnStay
+                    // Continuing overlap - fire OnStay
                     for (auto& cb : _onStay) cb(ev);
                 }
             }
@@ -192,7 +192,7 @@ namespace PEngine {
                 _triggers.end());
         }
 
-        // One call per tick — broadcasts to all registered triggers.
+        // One call per tick - broadcasts to all registered triggers.
         void Poll(const std::vector<BaseObject*>& objects)
         {
             for (auto* t : _triggers)
