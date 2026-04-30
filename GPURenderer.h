@@ -79,6 +79,11 @@ namespace PEngine
             bool depthWrite,
             bool blend) const;
 
+        void      initShadowMap();
+        glm::mat4 buildLightSpaceMatrix() const;
+        void      renderShadowPass(const std::vector<BaseObject*>& renderComps,
+            const std::vector<BaseObject*>& opaqueObjs);
+
         // ── Members ───────────────────────────────────────────────────────────
         SceneManager* sceneManager = nullptr;
 
@@ -91,6 +96,11 @@ namespace PEngine
         // Internal streaming VAO for the built-in batcher.
         GLuint vao = 0;
         GLuint vbo = 0;
+
+        GLuint    shadowFBO = 0;
+        GLuint    shadowMap = 0;   // depth texture with GL_COMPARE_REF_TO_TEXTURE
+        GLuint    shadowProgram = 0;   // depth-only shader program
+        glm::mat4 lightSpaceMatrix = glm::mat4(1.0f); // Light-space MVP used by all shaders
 
         std::vector<GPUVertex> cpuVerts;
         std::vector<GPUVertex> transparentVerts;

@@ -26,6 +26,7 @@
 #include "vector3.h"
 #include "settings.h"
 #include "texture.h"
+#include "skinnedShader.h"   // SHADOW_VERT / SHADOW_FRAG
 
 namespace PEngine
 {
@@ -33,6 +34,10 @@ namespace PEngine
     static constexpr float NEAR_PLANE = 0.05f;
     static constexpr float FAR_PLANE = 1000.0f;
     static constexpr int   MAX_TEX_LAYERS = 8;
+
+    // Shadow-map resolution and scene-coverage half-extent.
+    static constexpr int   SHADOW_RES = 2048;
+    static constexpr float SHADOW_EXTENT = 80.0f;   // ortho half-width / half-height
 
     static glm::vec3 toGLM(const Vector3& v)
     {
@@ -117,10 +122,238 @@ namespace PEngine
 
         uiRenderer.init(Settings::canvasWidth, Settings::canvasHeight,
             shaderLib.get(ShaderType::UI));
+
+        // ── Shadow map setup ──────────────────────────────────────────────────
+        initShadowMap();
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  RegisterShader  — public entry point for scenes to add named shaders
+    //  initShadowMap
+    //  Creates the depth-only FBO + texture and compiles the depth shader.
+    //  Called once from the constructor.
+    // ─────────────────────────────────────────────────────────────────────────
+    void GPURenderer::initShadowMap()
+    {
+        // Depth texture with hardware comparison mode (feeds sampler2DShadow).
+        glGenTextures(1, &shadowMap);
+        glBindTexture(GL_TEXTURE_2D, shadowMap);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24,
+            SHADOW_RES, SHADOW_RES, 0,
+            GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+        // Fragments outside the shadow frustum should read as fully lit (1.0).
+        float borderColor[] = { 1.0f, 1.0f, 1.0f, 1.0f };
+        glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
+        // Enable hardware PCF via sampler2DShadow.
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
+        glBindTexture(GL_TEXTURE_2D, 0);
+
+        // Framebuffer — depth attachment only.
+        glGenFramebuffers(1, &shadowFBO);
+        glBindFramebuffer(GL_FRAMEBUFFER, shadowFBO);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+            GL_TEXTURE_2D, shadowMap, 0);
+        glDrawBuffer(GL_NONE);
+        glReadBuffer(GL_NONE);
+
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+            std::cerr << "[GPURenderer] Shadow FBO incomplete!\n";
+
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+        // Depth-only shader (handles both skinned and static geometry).
+        shadowProgram = shaderLib.AddShader("__shadow__", SHADOW_VERT, SHADOW_FRAG);
+        std::cout << "[GPURenderer] Shadow map initialised ("
+            << SHADOW_RES << "x" << SHADOW_RES << ")\n";
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  buildLightSpaceMatrix
+    //  Builds an orthographic projection from the sun's perspective.
+    //  The result is cached in lightSpaceMatrix for the whole frame.
+    // ─────────────────────────────────────────────────────────────────────────
+    glm::mat4 GPURenderer::buildLightSpaceMatrix() const
+    {
+        // Re-use the same sun direction logic as uploadSunUniforms.
+        glm::vec3 sunDir = glm::normalize(glm::vec3(0.5f, 0.8f, 0.3f));
+
+        for (BaseLight* bl : *sceneManager->lights)
+        {
+            if (bl && bl->type == DIRECTIONAL_LIGHT)
+            {
+                DirectionalLight* dl = static_cast<DirectionalLight*>(bl);
+                Vector3 d = dl->direction.normalize();
+                sunDir = glm::normalize(glm::vec3(
+                    static_cast<float>(-d.x),
+                    static_cast<float>(-d.y),
+                    static_cast<float>(-d.z)));
+                break;
+            }
+        }
+
+        // Position the light camera far enough above the scene.
+        const float dist = 200.0f;
+        glm::vec3 lightPos = sunDir * dist;
+
+        glm::mat4 lightView = glm::lookAt(lightPos, glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+        glm::mat4 lightProj = glm::ortho(
+            -SHADOW_EXTENT, SHADOW_EXTENT,
+            -SHADOW_EXTENT, SHADOW_EXTENT,
+            0.1f, dist * 2.0f);
+
+        return lightProj * lightView;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  renderShadowPass
+    //  Renders all visible geometry into the shadow-map FBO using the
+    //  depth-only shader.  Must be called before the main colour pass.
+    // ─────────────────────────────────────────────────────────────────────────
+    void GPURenderer::renderShadowPass(
+        const std::vector<BaseObject*>& renderComps,
+        const std::vector<BaseObject*>& opaqueObjs)
+    {
+        if (!shadowProgram || !shadowFBO) return;
+
+        glBindFramebuffer(GL_FRAMEBUFFER, shadowFBO);
+        glViewport(0, 0, SHADOW_RES, SHADOW_RES);
+        glClear(GL_DEPTH_BUFFER_BIT);
+
+        // Cull front faces to reduce peter-panning on thin geometry.
+        glCullFace(GL_FRONT);
+
+        glUseProgram(shadowProgram);
+        glUniformMatrix4fv(
+            glGetUniformLocation(shadowProgram, "uLightSpaceMatrix"),
+            1, GL_FALSE, glm::value_ptr(lightSpaceMatrix));
+
+        // ── Draw RenderComponent objects (foxes, etc.) ────────────────────────
+        for (BaseObject* obj : renderComps)
+        {
+            if (!obj || !obj->visible) continue;
+
+            RenderComponent& rc = obj->render;
+            if (!rc._uploaded) continue;   // not yet on GPU — skip this frame
+
+            // Build model matrix.
+            glm::mat4 model = glm::mat4(1.0f);
+            model = glm::translate(model, toGLM(obj->transform.position));
+            auto& q = obj->transform.rotation;
+            glm::quat glmRot(
+                static_cast<float>(q.w),
+                static_cast<float>(q.x),
+                static_cast<float>(q.y),
+                static_cast<float>(q.z));
+            model *= glm::mat4_cast(glmRot);
+            model = glm::scale(model, toGLM(obj->transform.scale));
+
+            glUniformMatrix4fv(
+                glGetUniformLocation(shadowProgram, "uModel"),
+                1, GL_FALSE, glm::value_ptr(model));
+
+            // Skinning.
+            AnimatorComponent& anim = obj->animator;
+            const bool skinned = anim.active();
+            glUniform1i(glGetUniformLocation(shadowProgram, "uSkinned"), skinned ? 1 : 0);
+
+            if (skinned && !anim.bonePalette.empty())
+            {
+                glUniformMatrix4fv(
+                    glGetUniformLocation(shadowProgram, "uBonePalette"),
+                    static_cast<GLsizei>(anim.bonePalette.size()),
+                    GL_FALSE,
+                    glm::value_ptr(anim.bonePalette[0]));
+            }
+
+            glBindVertexArray(rc._vao.vao);
+            if (!rc.indices.empty())
+                glDrawElements(GL_TRIANGLES,
+                    static_cast<GLsizei>(rc._indexCount),
+                    GL_UNSIGNED_INT, nullptr);
+            else
+                glDrawArrays(GL_TRIANGLES, 0,
+                    static_cast<GLsizei>(rc._indexCount));
+            glBindVertexArray(0);
+        }
+
+        // ── Draw built-in opaque objects (beach, terrain, etc.) ───────────────
+        // These use the streaming VBO; batch them all into one draw here
+        // since we only need depth, not per-material uniforms.
+        if (!opaqueObjs.empty())
+        {
+            // Static meshes have uSkinned = 0.
+            glUniform1i(glGetUniformLocation(shadowProgram, "uSkinned"), 0);
+
+            // The built-in batcher already pre-transforms vertices into world
+            // space before uploading, so uModel = identity is correct.
+            glm::mat4 identity(1.0f);
+            glUniformMatrix4fv(
+                glGetUniformLocation(shadowProgram, "uModel"),
+                1, GL_FALSE, glm::value_ptr(identity));
+
+            // Collect all triangles into a temporary depth-pass VBO.
+            // We reuse the existing streaming vao/vbo pair.
+            std::vector<GPUVertex> depthVerts;
+            depthVerts.reserve(4096);
+
+            for (BaseObject* obj : opaqueObjs)
+            {
+                if (!obj || !obj->visible) continue;
+
+                Vector3    sc = obj->transform.scale;
+                Vector3    pos = obj->transform.position;
+                Quaternion rot = obj->transform.rotation;
+
+                std::vector<Vector3> wPos;
+                wPos.reserve(obj->bVertices.size());
+                for (const Vertice& v : obj->bVertices)
+                {
+                    Vector3 vp(v.position.x * sc.x,
+                        v.position.y * sc.y,
+                        v.position.z * sc.z);
+                    wPos.push_back(rot.RotateVector3(&vp) + pos);
+                }
+
+                for (const Triangle& tri : obj->bTriangles)
+                {
+                    int idx[3] = { tri.p0, tri.p1, tri.p2 };
+                    for (int j = 0; j < 3; ++j)
+                    {
+                        int k = idx[j];
+                        GPUVertex gv{};
+                        gv.px = static_cast<float>(wPos[k].x);
+                        gv.py = static_cast<float>(wPos[k].y);
+                        gv.pz = static_cast<float>(wPos[k].z);
+                        depthVerts.push_back(gv);
+                    }
+                }
+            }
+
+            if (!depthVerts.empty())
+            {
+                glBindVertexArray(vao);
+                glBindBuffer(GL_ARRAY_BUFFER, vbo);
+                glBufferData(GL_ARRAY_BUFFER,
+                    static_cast<GLsizeiptr>(depthVerts.size() * sizeof(GPUVertex)),
+                    depthVerts.data(), GL_STREAM_DRAW);
+                glDrawArrays(GL_TRIANGLES, 0,
+                    static_cast<GLsizei>(depthVerts.size()));
+                glBindVertexArray(0);
+            }
+        }
+
+        // Restore main framebuffer and render state.
+        glCullFace(GL_BACK);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, Settings::canvasWidth, Settings::canvasHeight);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  RegisterShader
     // ─────────────────────────────────────────────────────────────────────────
     void GPURenderer::RegisterShader(const std::string& name,
         const char* vertSrc,
@@ -138,7 +371,7 @@ namespace PEngine
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  uploadTextureLayersToShader  — built-in multi-layer material system
+    //  uploadTextureLayersToShader
     // ─────────────────────────────────────────────────────────────────────────
     void GPURenderer::uploadTextureLayersToShader(GLuint program, const Material* mat) const
     {
@@ -274,8 +507,6 @@ namespace PEngine
 
     // ─────────────────────────────────────────────────────────────────────────
     //  uploadSunUniforms
-    //  Extracts the first directional light and uploads uSunDir / uSunColor /
-    //  uSunIntensity. Used automatically for every RenderComponent object.
     // ─────────────────────────────────────────────────────────────────────────
     void GPURenderer::uploadSunUniforms(GLuint program) const
     {
@@ -309,8 +540,6 @@ namespace PEngine
 
     // ─────────────────────────────────────────────────────────────────────────
     //  drawRenderComponent
-    //  Called once per RenderComponent object inside Render().
-    //  Lazy-uploads the VAO on the first call, then issues a draw every frame.
     // ─────────────────────────────────────────────────────────────────────────
     void GPURenderer::drawRenderComponent(BaseObject* obj,
         const glm::mat4& view,
@@ -336,14 +565,13 @@ namespace PEngine
             rc._uploaded = true;
         }
 
-        // ── Tick animator and compute bone palette ────────────────────────────
+        // ── Tick animator ─────────────────────────────────────────────────────
         AnimatorComponent& anim = obj->animator;
         const bool skinned = anim.active();
         if (skinned)
             anim.update(dt);
 
-        // ── Build model matrix from the object's transform ────────────────────
-        // Scale is applied here — this is what was missing for the fox.
+        // ── Build model matrix ────────────────────────────────────────────────
         glm::mat4 model = glm::mat4(1.0f);
         model = glm::translate(model, toGLM(obj->transform.position));
 
@@ -354,7 +582,6 @@ namespace PEngine
             static_cast<float>(q.y),
             static_cast<float>(q.z));
         model *= glm::mat4_cast(glmRot);
-
         model = glm::scale(model, toGLM(obj->transform.scale));
 
         // ── Render state ──────────────────────────────────────────────────────
@@ -383,10 +610,19 @@ namespace PEngine
 
         uploadSunUniforms(program);
 
+        // ── Shadow uniforms ───────────────────────────────────────────────────
+        // Bind the shadow map to slot 1 and tell the shader about it.
+        // (Slot 0 is reserved for uAlbedo, bound below via rc.textures.)
+        glUniformMatrix4fv(glGetUniformLocation(program, "uLightSpaceMatrix"),
+            1, GL_FALSE, glm::value_ptr(lightSpaceMatrix));
+        glUniform1i(glGetUniformLocation(program, "uShadowMap"), 1);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, shadowMap);
+
         // ── Skinning uniforms ─────────────────────────────────────────────────
         glUniform1i(glGetUniformLocation(program, "uSkinned"), skinned ? 1 : 0);
 
-        if (skinned)
+        if (skinned && !anim.bonePalette.empty())
         {
             glUniformMatrix4fv(
                 glGetUniformLocation(program, "uBonePalette"),
@@ -395,7 +631,7 @@ namespace PEngine
                 glm::value_ptr(anim.bonePalette[0]));
         }
 
-        // ── Bind textures declared on the object ──────────────────────────────
+        // ── Bind per-object textures (albedo etc.) ────────────────────────────
         for (const TextureBinding& tb : rc.textures)
         {
             glUniform1i(glGetUniformLocation(program, tb.uniformName.c_str()), tb.slot);
@@ -422,8 +658,12 @@ namespace PEngine
         glDepthMask(GL_TRUE);
         glDisable(GL_BLEND);
         glEnable(GL_CULL_FACE);
-    }
 
+        // Unbind shadow map slot so it doesn't bleed into other draws.
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glActiveTexture(GL_TEXTURE0);
+    }
 
     // ─────────────────────────────────────────────────────────────────────────
     //  drawPass — built-in streaming batcher (legacy pipeline)
@@ -463,18 +703,7 @@ namespace PEngine
     // ─────────────────────────────────────────────────────────────────────────
     void GPURenderer::Render(float dt)
     {
-        glClearColor(0.60f, 0.70f, 0.78f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-        glm::mat4 view = buildViewMatrix();
-        glm::mat4 proj = buildProjectionMatrix();
-        glm::vec3 camPos = toGLM(sceneManager->currentCamera->transform.position);
-        float     uTime = SDL_GetTicks() / 1000.0f;
-
-        // ── Partition objects into the three dispatch buckets ─────────────────
-        //   • renderComps : objects with a valid RenderComponent (custom shader)
-        //   • opaqueObjs  : built-in pipeline, opaque
-        //   • transObjs   : built-in pipeline, transparent
+        // ── Partition objects ─────────────────────────────────────────────────
         std::vector<BaseObject*> renderComps, opaqueObjs, transObjs;
 
         for (BaseObject* obj : *sceneManager->objects)
@@ -494,7 +723,21 @@ namespace PEngine
             }
         }
 
-        // ── 1. Built-in opaque pass ───────────────────────────────────────────
+        // ── 0. Shadow pass ────────────────────────────────────────────────────
+        //  Compute light-space matrix once per frame; re-used by all shaders.
+        lightSpaceMatrix = buildLightSpaceMatrix();
+        renderShadowPass(renderComps, opaqueObjs);
+
+        // ── Clear main framebuffer ────────────────────────────────────────────
+        glClearColor(0.60f, 0.70f, 0.78f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        glm::mat4 view = buildViewMatrix();
+        glm::mat4 proj = buildProjectionMatrix();
+        glm::vec3 camPos = toGLM(sceneManager->currentCamera->transform.position);
+        float     uTime = SDL_GetTicks() / 1000.0f;
+
+        // ── 1. Built-in opaque / transparent pass ─────────────────────────────
         {
             auto buildVerts = [&](BaseObject* obj) -> std::vector<GPUVertex>
                 {
@@ -579,6 +822,18 @@ namespace PEngine
                                     1, glm::value_ptr(camPos));
                                 glUniform1f(glGetUniformLocation(currentProgram, "uTime"), uTime);
                                 uploadLights(currentProgram);
+
+                                // ── Shadow uniforms for built-in shaders ──────
+                                // The WORLD_FRAG shader doesn't consume these,
+                                // but the uploads are harmless and future custom
+                                // materials bound here will benefit.
+                                glUniformMatrix4fv(
+                                    glGetUniformLocation(currentProgram, "uLightSpaceMatrix"),
+                                    1, GL_FALSE, glm::value_ptr(lightSpaceMatrix));
+                                glUniform1i(glGetUniformLocation(currentProgram, "uShadowMap"), 8);
+                                glActiveTexture(GL_TEXTURE8);
+                                glBindTexture(GL_TEXTURE_2D, shadowMap);
+                                glActiveTexture(GL_TEXTURE0);
                             }
 
                             if (mat != lastMat) {
@@ -599,8 +854,6 @@ namespace PEngine
         }
 
         // ── 2. RenderComponent (custom shader) pass ───────────────────────────
-        // Drawn after the built-in opaque pass. Blend order within this group
-        // is determined by the order objects were pushed into sceneManager.
         for (BaseObject* obj : renderComps)
         {
             drawRenderComponent(obj, view, proj, camPos, uTime, dt);
@@ -622,7 +875,10 @@ namespace PEngine
     {
         uiRenderer.cleanup();
         texManager.clear();
-        shaderLib.clear();   // frees all ManagedVAOs
+        shaderLib.clear();
+
+        if (shadowFBO) { glDeleteFramebuffers(1, &shadowFBO);  shadowFBO = 0; }
+        if (shadowMap) { glDeleteTextures(1, &shadowMap);       shadowMap = 0; }
 
         SDL_GL_DeleteContext(glContext);
         SDL_DestroyWindow(window);

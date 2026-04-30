@@ -271,7 +271,7 @@ namespace PEngine
         //  Composition order (right-to-left):
         //    qYaw * qSlope * qPitch
         //
-        //  1. qPitch  : permanent -90° X fix for the GLB's baked root tilt.
+        //  1. qPitch  : -90° X.
         //  2. qSlope  : nose-up/down to match the terrain gradient.
         //  3. qYaw    : turn to face the movement direction.
         //
