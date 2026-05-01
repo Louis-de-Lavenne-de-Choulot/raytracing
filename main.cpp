@@ -19,7 +19,6 @@
 #include "sphere.h"
 #include "sceneManager.h"
 #include "rectangle.h"
-#include "teapot.h"
 #include "importer.h"
 #include "exampleScene.h"
 #include "minecraftScene.h"

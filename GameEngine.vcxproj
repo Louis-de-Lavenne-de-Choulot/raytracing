@@ -241,7 +241,6 @@
     <ClInclude Include="settings.h" />
     <ClInclude Include="shaderLibrary.h" />
     <ClInclude Include="sphere.h" />
-    <ClInclude Include="teapot.h" />
     <ClInclude Include="textureManager.h" />
     <ClInclude Include="transform.h" />
     <ClInclude Include="triangle.h" />
@@ -251,7 +250,6 @@
     <ClInclude Include="vPlane.h" />
     <ClInclude Include="vrectangle.h" />
     <ClInclude Include="vsphere.h" />
-    <ClInclude Include="vTeapot.h" />
     <ClInclude Include="waterShader.h" />
   </ItemGroup>
   <ItemGroup>
@@ -271,7 +269,6 @@
     <ClCompile Include="UIRenderer.cpp" />
     <ClCompile Include="shaderLibrary.cpp" />
     <ClCompile Include="sphere.cpp" />
-    <ClCompile Include="teapot.cpp" />
     <ClCompile Include="textureManager.cpp" />
     <ClCompile Include="vector3.cpp" />
   </ItemGroup>

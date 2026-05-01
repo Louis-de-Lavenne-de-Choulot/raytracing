@@ -17,6 +17,7 @@ namespace PEngine
     // Vertex index layout:
     //   Front  (-Z) : 0-3    Back   (+Z) : 4-7
     //   Left   (-X) : 8-11   Right  (+X) : 12-15
+    //   Left   (-X) : 8-11   Right  (+X) : 12-15
     //   Top    (+Y) : 16-19  Bottom (-Y) : 20-23
 
     struct VRectangle

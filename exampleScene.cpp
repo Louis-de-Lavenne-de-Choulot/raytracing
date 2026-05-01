@@ -15,6 +15,7 @@
 #include "GPURenderer.h"
 #include "sceneManager.h"
 #include "camera.h"
+#include "importer.h"    // includes GltfImporter — use Importer::ImportFromOBJ / ImportFromGLTF
 #include "baseobject.h"
 #include "baselight.h"
 #include "directionallight.h"
@@ -25,7 +26,6 @@
 #include "skinnedShader.h"
 #include "skinnedVertex.h"
 #include "animation.h"
-#include "GltfImporter.h"
 #include "textureManager.h"
 
 namespace PEngine
@@ -420,6 +420,7 @@ namespace PEngine
         renderer.FlushGLErrors();
 
         renderer.texManager.load("sand", "assets/sand.jpg");
+        renderer.texManager.load("teapot", "assets/default.png");
 
         renderer.RegisterShader("beach", BEACH_VERT, BEACH_FRAG);
         renderer.RegisterShader("water", WATER_VERT, WATER_FRAG);
@@ -524,12 +525,18 @@ namespace PEngine
             {  -3.0,  0.0,  16.0 },
         };
 
+        // ImportFromOBJ always produces [pos(3), normal(3), uv(2)] with shaderName="beach".
+        // Normals are auto-computed if the OBJ has none — no manual layout wiring needed.
+        BaseObject* teapot = Importer::ImportFromOBJ("assets/teapot.obj");
+        teapot->render.textures = { { "uAlbedo", "teapot", 0 } };
+        teapot->transform.scale = Vector3(0.1, 0.1, 0.1);
+        sm->objects->push_back(teapot);
+
         // AI controllers — one per fox, lives as long as the scene does
         std::vector<FoxAI> foxAIs(FOX_COUNT);
 
         {
-            GltfImporter imp;
-            auto result = imp.load<TextureManager>("assets/Fox.glb", &renderer.texManager);
+            auto result = Importer::ImportFromGLTF<TextureManager>("assets/Fox.glb", &renderer.texManager);
 
             if (!result.ok)
             {

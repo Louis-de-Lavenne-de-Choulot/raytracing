@@ -51,9 +51,6 @@
     <ClInclude Include="sphere.h">
       <Filter>object</Filter>
     </ClInclude>
-    <ClInclude Include="teapot.h">
-      <Filter>object</Filter>
-    </ClInclude>
     <ClInclude Include="vPlane.h">
       <Filter>object</Filter>
     </ClInclude>
@@ -61,9 +58,6 @@
       <Filter>object</Filter>
     </ClInclude>
     <ClInclude Include="vsphere.h">
-      <Filter>object</Filter>
-    </ClInclude>
-    <ClInclude Include="vTeapot.h">
       <Filter>object</Filter>
     </ClInclude>
     <ClInclude Include="baseobject.h">
@@ -166,7 +160,7 @@
       <Filter>engineBase</Filter>
     </ClInclude>
     <ClInclude Include="GltfImporter.h">
-      <Filter>Header Files</Filter>
+      <Filter>importer</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
@@ -183,9 +177,6 @@
       <Filter>object</Filter>
     </ClCompile>
     <ClCompile Include="sphere.cpp">
-      <Filter>object</Filter>
-    </ClCompile>
-    <ClCompile Include="teapot.cpp">
       <Filter>object</Filter>
     </ClCompile>
     <ClCompile Include="vector3.cpp">
@@ -225,7 +216,7 @@
       <Filter>examples</Filter>
     </ClCompile>
     <ClCompile Include="GltfImporter.cpp">
-      <Filter>Source Files</Filter>
+      <Filter>importer</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
