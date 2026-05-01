@@ -1,7 +1,7 @@
 #pragma once
 #include "sceneManager.h"
 
-namespace PEngine
+namespace HonHengine
 {
     class MinecraftScene
     {

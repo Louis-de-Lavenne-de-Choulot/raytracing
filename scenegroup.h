@@ -1,5 +1,5 @@
 #pragma once
-// scenegroup.h  -  PEngine
+// scenegroup.h  -  HonHengine
 // ─────────────────────────────────────────────────────────────────────────────
 //  SceneGroup  -  Unity-style "folder" / parent object
 //
@@ -11,7 +11,7 @@
 //  Analogy
 //  ───────
 //    Unity:     Create Empty → name it "Guard" → drag children under it
-//    PEngine:   SceneGroup* guard = new SceneGroup("Guard", pos, rot, scale);
+//    HonHengine:   SceneGroup* guard = new SceneGroup("Guard", pos, rot, scale);
 //               guard->Add(botBody);
 //               guard->Add(botHead);
 //               guard->Add(torchGroup);        // nested sub-group
@@ -31,7 +31,7 @@
 //  ─────────
 //  SceneGroup does NOT own its children's memory.  The scene's object list
 //  (SceneManager::objects) still owns them.  The group only holds raw
-//  non-owning pointers, matching PEngine's existing ownership model.
+//  non-owning pointers, matching HonHengine's existing ownership model.
 //
 //  Usage example (guard bot refactored):
 //
@@ -65,7 +65,7 @@
 #include <functional>
 #include <stdexcept>
 
-namespace PEngine {
+namespace HonHengine {
 
     // ─────────────────────────────────────────────────────────────────────────
     //  LocalOffset  -  child's transform relative to the group's transform
@@ -301,4 +301,4 @@ namespace PEngine {
         }
     };
 
-} // namespace PEngine
+} // namespace HonHengine

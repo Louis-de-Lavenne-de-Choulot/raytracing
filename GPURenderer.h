@@ -16,7 +16,7 @@
 struct SDL_Window;
 typedef void* SDL_GLContext;
 
-namespace PEngine
+namespace HonHengine
 {
     struct GPUVertex
     {
@@ -106,6 +106,6 @@ namespace PEngine
         std::vector<GPUVertex> transparentVerts;
     };
 
-} // namespace PEngine
+} // namespace HonHengine
 
 #endif // GPURENDERER

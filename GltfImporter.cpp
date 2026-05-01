@@ -16,7 +16,7 @@ using json = nlohmann::json;
 #include <stdexcept>
 #include <set>
 
-namespace PEngine
+namespace HonHengine
 {
     struct GltfImporter::Impl
     {
@@ -259,7 +259,7 @@ namespace PEngine
         return skel;
     }
 
-    bool PEngine::GltfImporter::_buildMesh(
+    bool HonHengine::GltfImporter::_buildMesh(
         int                              meshIndex,
         int                              skinIndex,
         const std::shared_ptr<Skeleton>& skel,

@@ -6,7 +6,7 @@
 #include "baselight.h"
 #include <vector>
 #include "settings.h"
-namespace PEngine
+namespace HonHengine
 {
     struct SceneManager
     {

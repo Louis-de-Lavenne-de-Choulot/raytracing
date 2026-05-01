@@ -4,7 +4,7 @@
 
 #include <string>
 
-namespace PEngine
+namespace HonHengine
 {
     // ─────────────────────────────────────────────────────────────────────────
     //  Sampler parameters stored alongside the texture name/path.
@@ -155,6 +155,6 @@ namespace PEngine
         }
     };
 
-} // namespace PEngine
+} // namespace HonHengine
 
 #endif // TEXTURE_H

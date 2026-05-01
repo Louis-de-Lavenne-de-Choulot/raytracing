@@ -8,7 +8,7 @@
 
 #include "texture.h"   // Texture, WrapMode, FilterMode
 
-namespace PEngine
+namespace HonHengine
 {
     class TextureManager
     {
@@ -57,6 +57,6 @@ namespace PEngine
         std::unordered_map<std::string, Entry> textures;
     };
 
-} // namespace PEngine
+} // namespace HonHengine
 
 #endif // TEXTUREMANAGER_H

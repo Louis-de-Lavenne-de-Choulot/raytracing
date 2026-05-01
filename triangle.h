@@ -5,7 +5,7 @@
 #include "vertice.h"
 #include "material.h"
 #include "defaults.h"
-namespace PEngine
+namespace HonHengine
 {
     struct Triangle
     {

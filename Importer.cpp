@@ -15,7 +15,7 @@
 #include <array>
 #include <iostream>
 
-namespace PEngine {
+namespace HonHengine {
 
     // ─────────────────────────────────────────────────────────────────────────
     //  Internal vertex type used during OBJ import.
@@ -239,4 +239,4 @@ namespace PEngine {
         return obj;
     }
 
-} // namespace PEngine
+} // namespace HonHengine

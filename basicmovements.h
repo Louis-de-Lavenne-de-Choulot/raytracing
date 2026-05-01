@@ -1,5 +1,5 @@
 #pragma once
-// basicmovements.h  -  PEngine
+// basicmovements.h  -  HonHengine
 // ─────────────────────────────────────────────────────────────────────────────
 //  BasicMovements
 //
@@ -67,7 +67,7 @@ static constexpr int VK_SPACE = 0x20;
 // SDL is available on all platforms; include it for TickKeys().
 #include <SDL.h>
 
-namespace PEngine {
+namespace HonHengine {
 
     // ─────────────────────────────────────────────────────────────────────────
     //  Key scheme  - choose ZQSD (French AZERTY) or WASD (English QWERTY)
@@ -438,4 +438,4 @@ namespace PEngine {
         }
     };
 
-} // namespace PEngine
+} // namespace HonHengine

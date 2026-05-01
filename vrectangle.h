@@ -8,7 +8,7 @@
 #include "triangle.h"
 #include <array>
 
-namespace PEngine
+namespace HonHengine
 {
     // A box needs 24 vertices (4 per face × 6 faces) so every vertex can carry
     // a constant per-face normal.

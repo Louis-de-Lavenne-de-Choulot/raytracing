@@ -1,5 +1,5 @@
 #pragma once
-// collisiontrigger.h  -  PEngine
+// collisiontrigger.h  -  HonHengine
 // ─────────────────────────────────────────────────────────────────────────────
 //  CollisionTrigger
 //
@@ -56,7 +56,7 @@
 #include <unordered_set>
 #include <string>
 
-namespace PEngine {
+namespace HonHengine {
 
     // ─────────────────────────────────────────────────────────────────────────
     //  CollisionEvent  - passed to every callback
@@ -213,4 +213,4 @@ namespace PEngine {
         std::vector<CollisionTrigger*> _triggers;
     };
 
-} // namespace PEngine
+} // namespace HonHengine

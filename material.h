@@ -10,7 +10,7 @@
 // Assuming glad or GL headers are available for GLuint, or use unsigned int
 typedef unsigned int GLuint;
 
-namespace PEngine
+namespace HonHengine
 {
     static constexpr int MAX_TEXTURE_LAYERS = 8;
 

@@ -4,7 +4,7 @@
 #include "vector3.h"
 #include "vertice.h"
 #include "color.h"          // <-- THIS WAS MISSING
-namespace PEngine
+namespace HonHengine
 {
     struct VerticeDTO : public Vertice
     {

@@ -6,7 +6,7 @@
 #include <iostream>
 #include <algorithm>   // std::clamp
 
-namespace PEngine
+namespace HonHengine
 {
     // ─────────────────────────────────────────────────────────────────────────
     //  Internal helpers: convert our enums to GL constants
@@ -189,4 +189,4 @@ namespace PEngine
         textures.clear();
     }
 
-} // namespace PEngine
+} // namespace HonHengine

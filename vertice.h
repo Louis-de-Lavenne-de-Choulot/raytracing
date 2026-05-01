@@ -3,7 +3,7 @@
 #define VERTICE
 #include "vector3.h"
 
-namespace PEngine
+namespace HonHengine
 {
     struct Vertice
     {

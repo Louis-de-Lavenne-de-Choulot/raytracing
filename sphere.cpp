@@ -4,7 +4,7 @@
 #include "quaternion.h"
 #include <vector>
 
-namespace PEngine
+namespace HonHengine
 {
     Sphere::Sphere(Vector3 scale, Vector3 position, Quaternion rotation,
         Material* material, int segments, int rings)

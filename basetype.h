@@ -1,7 +1,7 @@
 #pragma once
 #ifndef OBJECTTYPE
 #define OBJECTTYPE
-namespace PEngine
+namespace HonHengine
 {
     enum ObjectType
     {

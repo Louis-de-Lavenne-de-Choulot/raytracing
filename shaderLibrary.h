@@ -8,7 +8,7 @@
 #include <vector>
 #include <cstddef>   // offsetof
 
-namespace PEngine
+namespace HonHengine
 {
     enum class ShaderType { Opaque = 0, Transparent = 1, UI = 2 };
 
@@ -103,6 +103,6 @@ namespace PEngine
         std::vector<ManagedVAO>                 managedVAOs;
     };
 
-} // namespace PEngine
+} // namespace HonHengine
 
 #endif // SHADERLIBRARY_H

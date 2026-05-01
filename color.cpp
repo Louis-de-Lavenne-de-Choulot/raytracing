@@ -1,6 +1,6 @@
 #include "color.h"
 #include <algorithm>
-namespace PEngine
+namespace HonHengine
 {
     Color::Color(double valr, double valg, double valb, double vala)
     {

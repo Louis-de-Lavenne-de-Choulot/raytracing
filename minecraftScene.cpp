@@ -33,7 +33,7 @@
 #include "rigidbody.h"
 #include "settings.h"
 
-namespace PEngine
+namespace HonHengine
 {
     static constexpr double S = 1.0;
     static constexpr double EYE_HEIGHT = 1.7;
@@ -1123,4 +1123,4 @@ namespace PEngine
         }
     }
 
-} // namespace PEngine
+} // namespace HonHengine

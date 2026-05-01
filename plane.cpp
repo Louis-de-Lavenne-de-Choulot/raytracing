@@ -4,7 +4,7 @@
 #include "quaternion.h"
 #include <vector>
 
-namespace PEngine
+namespace HonHengine
 {
     Plane::Plane(Vector3 scale, Vector3 position, Quaternion rotation, Material* material)
         : BaseObject(scale, position, rotation, material)

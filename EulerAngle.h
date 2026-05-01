@@ -2,7 +2,7 @@
 #ifndef EULERANGLE
 #define EULERANGLE
 
-namespace PEngine
+namespace HonHengine
 {
     struct EulerAngles
     {

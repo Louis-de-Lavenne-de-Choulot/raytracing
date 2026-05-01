@@ -28,7 +28,7 @@
 #include "animation.h"
 #include "textureManager.h"
 
-namespace PEngine
+namespace HonHengine
 {
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -653,4 +653,4 @@ namespace PEngine
         delete sm;
     }
 
-} // namespace PEngine
+} // namespace HonHengine

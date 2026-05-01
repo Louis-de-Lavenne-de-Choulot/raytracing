@@ -1,7 +1,7 @@
 ﻿#pragma once
 #ifndef COLOR
 #define COLOR
-namespace PEngine
+namespace HonHengine
 {
     struct Color
     {

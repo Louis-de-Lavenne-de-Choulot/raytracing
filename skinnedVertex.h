@@ -49,7 +49,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace PEngine
+namespace HonHengine
 {
     struct SkinnedVertex
     {
@@ -136,6 +136,6 @@ namespace PEngine
         }
     };
 
-} // namespace PEngine
+} // namespace HonHengine
 
 #endif // SKINNEDVERTEX_H

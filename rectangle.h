@@ -7,7 +7,7 @@
 #include "triangle.h"
 #include "vrectangle.h"
 #include <array>
-namespace PEngine
+namespace HonHengine
 {
     struct Rectangle : BaseObject, VRectangle
     {

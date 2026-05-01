@@ -6,7 +6,7 @@
 #include <cmath>
 #include <numbers>
 #include <iostream>
-namespace PEngine
+namespace HonHengine
 {
     struct Quaternion
     {

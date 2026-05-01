@@ -3,7 +3,7 @@
 #include "eulerangle.h"
 #include <numbers>
 
-namespace PEngine
+namespace HonHengine
 {
     EulerAngles Quaternion::ToEulerAngle()
     {

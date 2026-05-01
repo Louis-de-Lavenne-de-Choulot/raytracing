@@ -6,7 +6,7 @@
 #include "vertice.h"
 #include "triangle.h"
 #include <array>
-namespace PEngine
+namespace HonHengine
 {
     // Flat horizontal plane facing +Y.  All four vertices share the same normal.
     struct VPlane

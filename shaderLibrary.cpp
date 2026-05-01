@@ -3,7 +3,7 @@
 #include <unordered_set>
 #include <string>
 
-namespace PEngine
+namespace HonHengine
 {
     // ─────────────────────────────────────────────────────────────────────────
     //  WORLD_VERT: Standard vertex pass-through with world positions for masking

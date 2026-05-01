@@ -17,7 +17,7 @@
 #include <cstdint>
 #include <cstring>           // std::memcpy
 
-namespace PEngine
+namespace HonHengine
 {
     // ─────────────────────────────────────────────────────────────────────────
     //  TextureBinding
@@ -106,7 +106,7 @@ namespace PEngine
     struct BaseObject
     {
         // ── Core data (legacy pipeline) ───────────────────────────────────────
-        PEngine::Transform        transform;
+        HonHengine::Transform        transform;
         Material* material = nullptr;
         std::vector<Vertice>      bVertices;
         std::vector<Triangle>     bTriangles;
@@ -133,7 +133,7 @@ namespace PEngine
 
         BaseObject(Vector3 scale, Vector3 pos, Quaternion rot, Material* mat)
         {
-            transform = PEngine::Transform(scale, pos, rot);
+            transform = HonHengine::Transform(scale, pos, rot);
             material = mat;
             type = NONE;
         }
@@ -142,6 +142,6 @@ namespace PEngine
         void setTriangles(std::vector<Triangle> triangles) { bTriangles = std::move(triangles); }
     };
 
-} // namespace PEngine
+} // namespace HonHengine
 
 #endif // BASEOBJECT

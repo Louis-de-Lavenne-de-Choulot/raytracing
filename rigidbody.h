@@ -1,5 +1,5 @@
 #pragma once
-// rigidbody.h  -  PEngine
+// rigidbody.h  -  HonHengine
 // ─────────────────────────────────────────────────────────────────────────────
 //  RigidBody
 //
@@ -41,7 +41,7 @@
 #include <cmath>
 #include <functional>
 
-namespace PEngine {
+namespace HonHengine {
 
     // ─────────────────────────────────────────────────────────────────────────
     //  AABB  (Axis-Aligned Bounding Box) - used by both RigidBody and
@@ -287,4 +287,4 @@ namespace PEngine {
         std::vector<RigidBody*> _bodies;
     };
 
-} // namespace PEngine
+} // namespace HonHengine

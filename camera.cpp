@@ -1,7 +1,7 @@
 #include "camera.h"
 #include "basetype.h"
 
-PEngine::Camera::Camera(Vector3 position, Quaternion rotation, double fov)
+HonHengine::Camera::Camera(Vector3 position, Quaternion rotation, double fov)
 {
     this->transform = Transform(Vector3(1, 1, 1), position, rotation);
     this->fov = fov;

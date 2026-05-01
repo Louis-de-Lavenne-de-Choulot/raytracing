@@ -4,7 +4,7 @@
 #include "vector3.h"
 #include "material.h"
 #include "basetype.h"
-namespace PEngine {
+namespace HonHengine {
 struct BaseLight
 {
     /* data */

@@ -13,64 +13,61 @@
       <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
       <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
     </Filter>
-    <Filter Include="object">
-      <UniqueIdentifier>{e96fb594-11ff-4db3-9051-fa12d1b2552c}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="light">
-      <UniqueIdentifier>{f71d7b57-1105-4d24-b435-4b32de76f3d0}</UniqueIdentifier>
-    </Filter>
     <Filter Include="engineBase">
       <UniqueIdentifier>{a6f074c1-9949-45ab-9913-1bec5a0a45ad}</UniqueIdentifier>
     </Filter>
     <Filter Include="examples">
       <UniqueIdentifier>{fad39dbe-7e70-4041-9da2-b4d07f9ea368}</UniqueIdentifier>
     </Filter>
-    <Filter Include="importer">
-      <UniqueIdentifier>{827c4ac5-ad05-41de-9e4a-19a05197d1ec}</UniqueIdentifier>
-    </Filter>
     <Filter Include="externals">
       <UniqueIdentifier>{4e175d0b-878b-4ed7-bfd1-5ff2f3db506d}</UniqueIdentifier>
     </Filter>
+    <Filter Include="engineBase\object">
+      <UniqueIdentifier>{e96fb594-11ff-4db3-9051-fa12d1b2552c}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="engineBase\light">
+      <UniqueIdentifier>{f71d7b57-1105-4d24-b435-4b32de76f3d0}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="engineBase\importer">
+      <UniqueIdentifier>{827c4ac5-ad05-41de-9e4a-19a05197d1ec}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="camera.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="main.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="basetype.h">
-      <Filter>object</Filter>
+      <Filter>engineBase\object</Filter>
     </ClInclude>
     <ClInclude Include="rectangle.h">
-      <Filter>object</Filter>
+      <Filter>engineBase\object</Filter>
     </ClInclude>
     <ClInclude Include="plane.h">
-      <Filter>object</Filter>
+      <Filter>engineBase\object</Filter>
     </ClInclude>
     <ClInclude Include="sphere.h">
-      <Filter>object</Filter>
+      <Filter>engineBase\object</Filter>
     </ClInclude>
     <ClInclude Include="vPlane.h">
-      <Filter>object</Filter>
+      <Filter>engineBase\object</Filter>
     </ClInclude>
     <ClInclude Include="vrectangle.h">
-      <Filter>object</Filter>
+      <Filter>engineBase\object</Filter>
     </ClInclude>
     <ClInclude Include="vsphere.h">
-      <Filter>object</Filter>
+      <Filter>engineBase\object</Filter>
     </ClInclude>
     <ClInclude Include="baseobject.h">
-      <Filter>object</Filter>
+      <Filter>engineBase\object</Filter>
     </ClInclude>
     <ClInclude Include="baselight.h">
-      <Filter>light</Filter>
+      <Filter>engineBase\light</Filter>
     </ClInclude>
     <ClInclude Include="directionallight.h">
-      <Filter>light</Filter>
+      <Filter>engineBase\light</Filter>
     </ClInclude>
     <ClInclude Include="pointlight.h">
-      <Filter>light</Filter>
+      <Filter>engineBase\light</Filter>
     </ClInclude>
     <ClInclude Include="vertice.h">
       <Filter>engineBase</Filter>
@@ -100,28 +97,10 @@
       <Filter>engineBase</Filter>
     </ClInclude>
     <ClInclude Include="Importer.h">
-      <Filter>importer</Filter>
+      <Filter>engineBase\importer</Filter>
     </ClInclude>
     <ClInclude Include="settings.h">
       <Filter>engineBase</Filter>
-    </ClInclude>
-    <ClInclude Include="verticeDTO.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="GPURenderer.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="basicmovements.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="scenegroup.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="collisiontrigger.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="rigidbody.h">
-      <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="minecraftScene.h">
       <Filter>examples</Filter>
@@ -131,9 +110,6 @@
     </ClInclude>
     <ClInclude Include="shaderLibrary.h">
       <Filter>engineBase</Filter>
-    </ClInclude>
-    <ClInclude Include="UIRenderer.h">
-      <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="stb_image.h">
       <Filter>externals</Filter>
@@ -160,24 +136,42 @@
       <Filter>engineBase</Filter>
     </ClInclude>
     <ClInclude Include="GltfImporter.h">
-      <Filter>importer</Filter>
+      <Filter>engineBase\importer</Filter>
+    </ClInclude>
+    <ClInclude Include="basicmovements.h">
+      <Filter>engineBase</Filter>
+    </ClInclude>
+    <ClInclude Include="camera.h">
+      <Filter>engineBase</Filter>
+    </ClInclude>
+    <ClInclude Include="collisiontrigger.h">
+      <Filter>engineBase</Filter>
+    </ClInclude>
+    <ClInclude Include="GPURenderer.h">
+      <Filter>engineBase</Filter>
+    </ClInclude>
+    <ClInclude Include="UIRenderer.h">
+      <Filter>engineBase</Filter>
+    </ClInclude>
+    <ClInclude Include="rigidbody.h">
+      <Filter>engineBase</Filter>
+    </ClInclude>
+    <ClInclude Include="scenegroup.h">
+      <Filter>engineBase</Filter>
+    </ClInclude>
+    <ClInclude Include="verticeDTO.h">
+      <Filter>engineBase</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="camera.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="main.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="plane.cpp">
-      <Filter>object</Filter>
+      <Filter>engineBase\object</Filter>
     </ClCompile>
     <ClCompile Include="rectangle.cpp">
-      <Filter>object</Filter>
+      <Filter>engineBase\object</Filter>
     </ClCompile>
     <ClCompile Include="sphere.cpp">
-      <Filter>object</Filter>
+      <Filter>engineBase\object</Filter>
     </ClCompile>
     <ClCompile Include="vector3.cpp">
       <Filter>engineBase</Filter>
@@ -192,7 +186,7 @@
       <Filter>engineBase</Filter>
     </ClCompile>
     <ClCompile Include="Importer.cpp">
-      <Filter>importer</Filter>
+      <Filter>engineBase\importer</Filter>
     </ClCompile>
     <ClCompile Include="minecraftScene.cpp">
       <Filter>examples</Filter>
@@ -203,20 +197,20 @@
     <ClCompile Include="shaderLibrary.cpp">
       <Filter>engineBase</Filter>
     </ClCompile>
-    <ClCompile Include="UIRenderer.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="GPURenderer.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="exampleScene.cpp">
       <Filter>examples</Filter>
     </ClCompile>
-    <ClCompile Include="exampleScene_gltf_snippet.cpp">
-      <Filter>examples</Filter>
-    </ClCompile>
     <ClCompile Include="GltfImporter.cpp">
-      <Filter>importer</Filter>
+      <Filter>engineBase\importer</Filter>
+    </ClCompile>
+    <ClCompile Include="camera.cpp">
+      <Filter>engineBase</Filter>
+    </ClCompile>
+    <ClCompile Include="GPURenderer.cpp">
+      <Filter>engineBase</Filter>
+    </ClCompile>
+    <ClCompile Include="UIRenderer.cpp">
+      <Filter>engineBase</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>

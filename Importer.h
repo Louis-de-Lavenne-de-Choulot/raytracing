@@ -45,7 +45,7 @@
 #include <cstring>
 #include <algorithm>
 
-namespace PEngine
+namespace HonHengine
 {
     // ─────────────────────────────────────────────────────────────────────────
     //  GltfImporter — internal implementation class.
@@ -260,6 +260,6 @@ namespace PEngine
         }
     };
 
-} // namespace PEngine
+} // namespace HonHengine
 
 #endif // IMPORTER_H

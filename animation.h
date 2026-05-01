@@ -3,7 +3,7 @@
 #define ANIMATION_H
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  animation.h  —  Skeletal animation system for PEngine
+//  animation.h  —  Skeletal animation system for HonHengine
 //
 //  Data model (set up once, shared across objects):
 //    Skeleton      — bone hierarchy + inverse bind poses
@@ -42,7 +42,7 @@
 #include <algorithm>
 #include <cassert>
 
-namespace PEngine
+namespace HonHengine
 {
     static constexpr int MAX_BONES            = 128;
     static constexpr int MAX_BONE_INFLUENCES  = 4;
@@ -420,6 +420,6 @@ namespace PEngine
         }
     };
 
-} // namespace PEngine
+} // namespace HonHengine
 
 #endif // ANIMATION_H

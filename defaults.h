@@ -3,7 +3,7 @@
 #include "basetype.h"
 #include "color.h"
 
-namespace PEngine {
+namespace HonHengine {
     namespace Defaults {
 
         // ── Material fallbacks ────────────────────────────────────────────────
@@ -12,4 +12,4 @@ namespace PEngine {
         inline Color Pink = Color(255, 0, 255, 255);
         inline Material* MissingMaterial = new Material(0, 0.0, Pink);
     } // namespace Defaults
-} // namespace PEngine
+} // namespace HonHengine

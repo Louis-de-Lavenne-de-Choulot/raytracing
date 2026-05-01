@@ -2,7 +2,7 @@
 #include "material.h"
 #include "basetype.h"
 
-namespace PEngine {
+namespace HonHengine {
     namespace Settings {
 		enum ShadingMode {
 			GOURAUD,

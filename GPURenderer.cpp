@@ -28,7 +28,7 @@
 #include "texture.h"
 #include "skinnedShader.h"   // SHADOW_VERT / SHADOW_FRAG
 
-namespace PEngine
+namespace HonHengine
 {
     static constexpr int   MAX_LIGHTS = 64;
     static constexpr float NEAR_PLANE = 0.05f;
@@ -66,7 +66,7 @@ namespace PEngine
         SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
 
         window = SDL_CreateWindow(
-            "PEngine - GPU Renderer",
+            "HonHengine - GPU Renderer",
             SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
             Settings::canvasWidth, Settings::canvasHeight,
             SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN);
@@ -885,4 +885,4 @@ namespace PEngine
         SDL_Quit();
     }
 
-} // namespace PEngine
+} // namespace HonHengine

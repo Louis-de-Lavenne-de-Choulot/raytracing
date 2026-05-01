@@ -2,7 +2,7 @@
 #ifndef EXAMPLESCENE
 #define EXAMPLESCENE
 
-namespace PEngine
+namespace HonHengine
 {
     struct ExampleScene
     {

@@ -18,7 +18,7 @@
 //    uAlbedo             ← slot 0, sand texture
 // ─────────────────────────────────────────────────────────────────────────────
 
-namespace PEngine
+namespace HonHengine
 {
 
     static const char* BEACH_VERT = R"GLSL(
@@ -139,6 +139,6 @@ void main()
 }
 )GLSL";
 
-} // namespace PEngine
+} // namespace HonHengine
 
 #endif // BEACHSHADER_H

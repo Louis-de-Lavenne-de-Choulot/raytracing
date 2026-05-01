@@ -7,7 +7,7 @@
 #include "triangle.h"
 #include "vplane.h"
 #include <array>
-namespace PEngine
+namespace HonHengine
 {
     struct Plane : BaseObject, VPlane
     {

@@ -2,7 +2,7 @@
 #ifndef SKINNEDSHADER_H
 #define SKINNEDSHADER_H
 
-namespace PEngine
+namespace HonHengine
 {
 
     static const char* SKINNED_VERT = R"GLSL(
@@ -21,7 +21,7 @@ out vec3 vNormal;
 out vec2 vUV;
 out vec4 vLightSpacePos;
 
-// ── Standard PEngine uniforms ────────────────────────────────────────────────
+// ── Standard HonHengine uniforms ────────────────────────────────────────────────
 uniform mat4 uModel;
 uniform mat4 uView;
 uniform mat4 uProj;
@@ -215,6 +215,6 @@ void main()
 void main() {}
 )GLSL";
 
-} // namespace PEngine
+} // namespace HonHengine
 
 #endif // SKINNEDSHADER_H

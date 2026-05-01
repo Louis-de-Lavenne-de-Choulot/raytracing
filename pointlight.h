@@ -6,7 +6,7 @@
 #include "material.h"
 #include "basetype.h"
 #include "baselight.h"
-namespace PEngine
+namespace HonHengine
 {
     struct PointLight : BaseLight
     {
