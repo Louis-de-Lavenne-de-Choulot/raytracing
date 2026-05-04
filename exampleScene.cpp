@@ -14,6 +14,7 @@
 
 #include "GPURenderer.h"
 #include "sceneManager.h"
+#include "rectangle.h"
 #include "camera.h"
 #include "importer.h"    // includes GltfImporter — use Importer::ImportFromOBJ / ImportFromGLTF
 #include "baseobject.h"
@@ -425,6 +426,8 @@ namespace HonHengine
         renderer.RegisterShader("beach", BEACH_VERT, BEACH_FRAG);
         renderer.RegisterShader("water", WATER_VERT, WATER_FRAG);
         renderer.RegisterShader("skinned", SKINNED_VERT, SKINNED_FRAG);
+
+		sm->objects->push_back(new Rectangle(Vector3(1, 5, 1), Vector3(0, 5, 0), Quaternion(), new Material(1, 1, Color(255, 25, 25, 255))));
 
         // ── Beach object ──────────────────────────────────────────────────────
         {

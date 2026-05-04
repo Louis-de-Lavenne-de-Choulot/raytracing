@@ -11,11 +11,24 @@ namespace HonHengine
         : BaseObject(scale, position, rotation, material),
         VSphere(segments, rings, material)
     {
+        std::vector<Vertice> vts(VSphere::vertices.begin(), VSphere::vertices.end());
+
+        if (material)
+        {
+            Vector3 col(
+                material->color.r / 255.0,
+                material->color.g / 255.0,
+                material->color.b / 255.0);
+
+            for (Vertice& v : vts)
+                v.vColor = col;
+        }
+
         // Assign material to every triangle.
         for (Triangle& tri : VSphere::triangles)
             tri.material = material;
 
-        this->setVertices(VSphere::vertices);
+        this->setVertices(vts);
         this->setTriangles(VSphere::triangles);
         this->type = SPHERE;
     }

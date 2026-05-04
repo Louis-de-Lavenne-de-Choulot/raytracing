@@ -12,7 +12,17 @@ namespace HonHengine
         std::vector<Vertice>  vts(this->vertices.begin(), this->vertices.end());
         std::vector<Triangle> trs(this->triangles.begin(), this->triangles.end());
 
-        // Must iterate by reference
+        if (material)
+        {
+            Vector3 col(
+                material->color.r / 255.0,
+                material->color.g / 255.0,
+                material->color.b / 255.0);
+
+            for (Vertice& v : vts)
+                v.vColor = col;
+        }
+
         for (Triangle& triangle : trs)
             triangle.material = material;
 

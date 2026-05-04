@@ -11,7 +11,7 @@ struct BaseLight
     double intensity;
     Color color;
     ObjectType type;
-
+    virtual ~BaseLight() = default;
     BaseLight() : intensity(0.0), color(), type(AMBIENT_LIGHT) {}
     BaseLight(double intens, Color col)
 		: intensity(intens), color(col), type(AMBIENT_LIGHT)

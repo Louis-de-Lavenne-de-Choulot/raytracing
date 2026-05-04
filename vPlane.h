@@ -12,10 +12,10 @@ namespace HonHengine
     struct VPlane
     {
         std::array<Vertice, 4> vertices = std::array<Vertice, 4>{
-            Vertice(Vector3(-1, -1, -1), Vector3(0, 1, 0)), // 0 LBF
-            Vertice(Vector3(1, -1, -1), Vector3(0, 1, 0)), // 1 RBF
-            Vertice(Vector3(-1, -1,  1), Vector3(0, 1, 0)), // 2 LBB
-            Vertice(Vector3(1, -1,  1), Vector3(0, 1, 0)), // 3 RBB
+            Vertice(Vector3(-1, -1, -1), Vector3(0, 1, 0), Vector3(1, 1, 1)), // 0 LBF
+            Vertice(Vector3( 1, -1, -1), Vector3(0, 1, 0), Vector3(1, 1, 1)), // 1 RBF
+            Vertice(Vector3(-1, -1,  1), Vector3(0, 1, 0), Vector3(1, 1, 1)), // 2 LBB
+            Vertice(Vector3( 1, -1,  1), Vector3(0, 1, 0), Vector3(1, 1, 1)), // 3 RBB
         };
 
         std::array<Triangle, 2> triangles = std::array<Triangle, 2>{
