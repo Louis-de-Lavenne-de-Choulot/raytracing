@@ -54,7 +54,7 @@
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
-    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
     <PlatformToolset>v143</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
@@ -260,6 +260,7 @@
     <ClCompile Include="GltfImporter.cpp" />
     <ClCompile Include="GPURenderer.cpp" />
     <ClCompile Include="Importer.cpp" />
+    <ClCompile Include="main.cpp" />
     <ClCompile Include="minecraftScene.cpp" />
     <ClCompile Include="plane.cpp" />
     <ClCompile Include="quaternion.cpp" />

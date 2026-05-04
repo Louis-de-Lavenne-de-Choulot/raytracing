@@ -212,6 +212,9 @@
     <ClCompile Include="UIRenderer.cpp">
       <Filter>engineBase</Filter>
     </ClCompile>
+    <ClCompile Include="main.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="dockerfile" />
