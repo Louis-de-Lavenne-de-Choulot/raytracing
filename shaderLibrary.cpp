@@ -173,7 +173,7 @@ void main()
         }
     }
 
-    vec3 finalColor = (acc * texAcc.rgb) + spec;
+    vec3 finalColor = (acc * texAcc.rgb * vColor) + spec;
     FragColor = vec4(finalColor, texAcc.a * uAlpha);
 }
 )GLSL";

@@ -20,7 +20,8 @@ namespace HonHengine
         VSphere(int segments = 20, int rings = 20, Material* mat = Defaults::MissingMaterial)
         {
             // Generate vertices - for a unit sphere the position vector IS the
-            // outward normal, so we pass it as both arguments.
+            // outward normal, so we pass it as both pos and norm.
+            // White vColor by default; Sphere::Sphere() will overwrite with material color.
             for (int ring = 0; ring <= rings; ring++)
             {
                 float phi = std::numbers::pi * float(ring) / float(rings);
@@ -33,7 +34,7 @@ namespace HonHengine
                     float z = std::sin(phi) * std::sin(theta);
 
                     Vector3 pos(x, y, z);
-                    vertices.push_back(Vertice(pos, pos)); // normal == position on unit sphere
+                    vertices.push_back(Vertice(pos, pos, Vector3(1, 1, 1))); // pos, norm, col
                 }
             }
 

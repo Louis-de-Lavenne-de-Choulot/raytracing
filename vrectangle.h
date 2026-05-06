@@ -17,47 +17,49 @@ namespace HonHengine
     // Vertex index layout:
     //   Front  (-Z) : 0-3    Back   (+Z) : 4-7
     //   Left   (-X) : 8-11   Right  (+X) : 12-15
-    //   Left   (-X) : 8-11   Right  (+X) : 12-15
     //   Top    (+Y) : 16-19  Bottom (-Y) : 20-23
+    //
+    // NOTE: Vertice(pos, norm, col) — 3-arg constructor must be used explicitly
+    // so the normal is not silently interpreted as vColor.
 
     struct VRectangle
     {
         std::array<Vertice, 24> vertices = std::array<Vertice, 24>{
             // ── Front face  (normal  0, 0,-1) ──────────────────────────────
-            Vertice(Vector3(-1, -1, -1), Vector3(0,  0, -1)), // 0  LBF
-            Vertice(Vector3(1, -1, -1), Vector3(0,  0, -1)), // 1  RBF
-            Vertice(Vector3(1,  1, -1), Vector3(0,  0, -1)), // 2  RTF
-            Vertice(Vector3(-1,  1, -1), Vector3(0,  0, -1)), // 3  LTF
+            Vertice(Vector3(-1, -1, -1), Vector3(0,  0, -1), Vector3(1, 1, 1)), // 0  LBF
+            Vertice(Vector3(1, -1, -1), Vector3(0,  0, -1), Vector3(1, 1, 1)), // 1  RBF
+            Vertice(Vector3(1,  1, -1), Vector3(0,  0, -1), Vector3(1, 1, 1)), // 2  RTF
+            Vertice(Vector3(-1,  1, -1), Vector3(0,  0, -1), Vector3(1, 1, 1)), // 3  LTF
 
             // ── Back face   (normal  0, 0,+1) ──────────────────────────────
-            Vertice(Vector3(-1, -1,  1), Vector3(0,  0,  1)), // 4  LBB
-            Vertice(Vector3(1, -1,  1), Vector3(0,  0,  1)), // 5  RBB
-            Vertice(Vector3(1,  1,  1), Vector3(0,  0,  1)), // 6  RTB
-            Vertice(Vector3(-1,  1,  1), Vector3(0,  0,  1)), // 7  LTB
+            Vertice(Vector3(-1, -1,  1), Vector3(0,  0,  1), Vector3(1, 1, 1)), // 4  LBB
+            Vertice(Vector3(1, -1,  1), Vector3(0,  0,  1), Vector3(1, 1, 1)), // 5  RBB
+            Vertice(Vector3(1,  1,  1), Vector3(0,  0,  1), Vector3(1, 1, 1)), // 6  RTB
+            Vertice(Vector3(-1,  1,  1), Vector3(0,  0,  1), Vector3(1, 1, 1)), // 7  LTB
 
             // ── Left face   (normal -1, 0, 0) ──────────────────────────────
-            Vertice(Vector3(-1, -1, -1), Vector3(-1,  0,  0)), // 8
-            Vertice(Vector3(-1,  1, -1), Vector3(-1,  0,  0)), // 9
-            Vertice(Vector3(-1,  1,  1), Vector3(-1,  0,  0)), // 10
-            Vertice(Vector3(-1, -1,  1), Vector3(-1,  0,  0)), // 11
+            Vertice(Vector3(-1, -1, -1), Vector3(-1,  0,  0), Vector3(1, 1, 1)), // 8
+            Vertice(Vector3(-1,  1, -1), Vector3(-1,  0,  0), Vector3(1, 1, 1)), // 9
+            Vertice(Vector3(-1,  1,  1), Vector3(-1,  0,  0), Vector3(1, 1, 1)), // 10
+            Vertice(Vector3(-1, -1,  1), Vector3(-1,  0,  0), Vector3(1, 1, 1)), // 11
 
             // ── Right face  (normal +1, 0, 0) ──────────────────────────────
-            Vertice(Vector3(1, -1, -1), Vector3(1,  0,  0)), // 12
-            Vertice(Vector3(1, -1,  1), Vector3(1,  0,  0)), // 13
-            Vertice(Vector3(1,  1,  1), Vector3(1,  0,  0)), // 14
-            Vertice(Vector3(1,  1, -1), Vector3(1,  0,  0)), // 15
+            Vertice(Vector3(1, -1, -1), Vector3(1,  0,  0), Vector3(1, 1, 1)), // 12
+            Vertice(Vector3(1, -1,  1), Vector3(1,  0,  0), Vector3(1, 1, 1)), // 13
+            Vertice(Vector3(1,  1,  1), Vector3(1,  0,  0), Vector3(1, 1, 1)), // 14
+            Vertice(Vector3(1,  1, -1), Vector3(1,  0,  0), Vector3(1, 1, 1)), // 15
 
             // ── Top face    (normal  0,+1, 0) ──────────────────────────────
-            Vertice(Vector3(-1,  1, -1), Vector3(0,  1,  0)), // 16
-            Vertice(Vector3(1,  1, -1), Vector3(0,  1,  0)), // 17
-            Vertice(Vector3(1,  1,  1), Vector3(0,  1,  0)), // 18
-            Vertice(Vector3(-1,  1,  1), Vector3(0,  1,  0)), // 19
+            Vertice(Vector3(-1,  1, -1), Vector3(0,  1,  0), Vector3(1, 1, 1)), // 16
+            Vertice(Vector3(1,  1, -1), Vector3(0,  1,  0), Vector3(1, 1, 1)), // 17
+            Vertice(Vector3(1,  1,  1), Vector3(0,  1,  0), Vector3(1, 1, 1)), // 18
+            Vertice(Vector3(-1,  1,  1), Vector3(0,  1,  0), Vector3(1, 1, 1)), // 19
 
             // ── Bottom face (normal  0,-1, 0) ──────────────────────────────
-            Vertice(Vector3(-1, -1, -1), Vector3(0, -1,  0)), // 20
-            Vertice(Vector3(-1, -1,  1), Vector3(0, -1,  0)), // 21
-            Vertice(Vector3(1, -1,  1), Vector3(0, -1,  0)), // 22
-            Vertice(Vector3(1, -1, -1), Vector3(0, -1,  0)), // 23
+            Vertice(Vector3(-1, -1, -1), Vector3(0, -1,  0), Vector3(1, 1, 1)), // 20
+            Vertice(Vector3(-1, -1,  1), Vector3(0, -1,  0), Vector3(1, 1, 1)), // 21
+            Vertice(Vector3(1, -1,  1), Vector3(0, -1,  0), Vector3(1, 1, 1)), // 22
+            Vertice(Vector3(1, -1, -1), Vector3(0, -1,  0), Vector3(1, 1, 1)), // 23
         };
 
         std::array<Triangle, 12> triangles = std::array<Triangle, 12>{
