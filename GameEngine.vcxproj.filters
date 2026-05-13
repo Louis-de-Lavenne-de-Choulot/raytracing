@@ -162,6 +162,60 @@
     <ClInclude Include="verticeDTO.h">
       <Filter>engineBase</Filter>
     </ClInclude>
+    <ClInclude Include="commandSystem.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ide_asset_browser.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ide_asset_database.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ide_camera_bookmarks.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ide_editor_settings.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ide_gizmo.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ide_global_search.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ide_icons.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ide_layout.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ide_package_manager.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ide_progress.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ide_project.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ide_selection.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ide_theme.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ide_toast.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ide_undo_history.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ide_viewport_overlays.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="imgui_impl_sdl2.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="plane.cpp">
@@ -213,6 +267,9 @@
       <Filter>engineBase</Filter>
     </ClCompile>
     <ClCompile Include="main.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="imgui_impl_sdl2.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

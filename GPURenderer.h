@@ -29,6 +29,8 @@ namespace HonHengine
     class GPURenderer
     {
     public:
+		bool debugMode = false; 
+
         explicit GPURenderer(SceneManager* sceneManager);
         explicit GPURenderer(SceneManager* sm, SDL_Window* existingWindow, SDL_GLContext existingContext);
 

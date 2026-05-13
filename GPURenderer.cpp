@@ -827,6 +827,15 @@ namespace HonHengine
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
         glViewport(0, 0, Settings::canvasWidth, Settings::canvasHeight);
 
+        // ── Debug render mode ─────────────────────────────────────────────────
+        // debugMode: 0=Shaded, 1=Wireframe, 2=Overdraw, 3=Depth, 4=Normals
+        if (debugMode == 1) {
+            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+        }
+        else {
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+        }
+
         glClearColor(0.60f, 0.70f, 0.78f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -960,6 +969,9 @@ namespace HonHengine
         {
             drawRenderComponent(obj, view, proj, camPos, uTime, dt);
         }
+
+        // Restore fill mode so ImGui and overlay draws are not affected.
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 
         if (ownContext)
         {
