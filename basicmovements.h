@@ -36,7 +36,6 @@
 //          std::cout << "Torch " << (isOn ? "ON" : "OFF") << "\n";
 //      });
 //
-//      // In your animation thread fixed-step loop:
 //      player.TickInput(FIXED_DT);
 //
 //      // In your render/event loop:

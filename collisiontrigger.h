@@ -27,7 +27,6 @@
 //          CloseDoor();
 //      });
 //
-//      // In your fixed-step loop, test against candidate objects:
 //      zone.Poll({ playerObject, guardBody, crateObject });
 //
 //  Usage (solid obstacle example):

@@ -12,7 +12,7 @@
 //  ──────────────────────────────────────────────────────────────────────────
 //    BaseObject* obj = Importer::ImportFromOBJ("assets/teapot.obj");
 //    // obj->render.shaderName is pre-set to "beach"; override if needed.
-//    // Normals are auto-generated when the OBJ has none (like Unity).
+//    // Normals are auto-generated when the OBJ has none.
 //    // Layout is always [pos(3), normal(3), uv(2)] — 32 bytes/vertex.
 //
 //  glTF 2.0 / GLB  (skinned mesh + skeleton + animations)
@@ -232,7 +232,7 @@ namespace HonHengine
         // ── OBJ (geometry only, no skeleton) ─────────────────────────────────
         //
         //  Returns a BaseObject with layout [pos(3), normal(3), uv(2)].
-        //  Normals are auto-computed when the file has none (Unity-style).
+        //  Normals are auto-computed when the file has none.
         //  Default shader is "beach" — override with obj->render.shaderName.
         //
         static BaseObject* ImportFromOBJ(const std::string& filePath);

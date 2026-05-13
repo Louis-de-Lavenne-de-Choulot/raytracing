@@ -51,6 +51,7 @@ namespace HonHengine
     // ─────────────────────────────────────────────────────────────────────────
     GPURenderer::GPURenderer(SceneManager* sm)
     {
+        ownContext = true;
         sceneManager = sm;
 
         if (SDL_Init(SDL_INIT_VIDEO) < 0)
@@ -69,7 +70,7 @@ namespace HonHengine
             "HonHengine - GPU Renderer",
             SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
             Settings::canvasWidth, Settings::canvasHeight,
-            SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN);
+            SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
 
         if (!window)
         {
@@ -96,7 +97,7 @@ namespace HonHengine
         std::cout << "[GPURenderer] OpenGL " << glGetString(GL_VERSION) << "\n";
 
         SDL_GetWindowSize(window, &Settings::canvasWidth, &Settings::canvasHeight);
-        SDL_SetRelativeMouseMode(SDL_TRUE);
+        SDL_SetRelativeMouseMode(SDL_FALSE);
         SDL_GL_SetSwapInterval(1);
 
         glEnable(GL_DEPTH_TEST);
@@ -108,7 +109,6 @@ namespace HonHengine
 
         shaderLib.build();
 
-        // Internal streaming VAO for the built-in batcher.
         ManagedVAO internalVAO = shaderLib.createVAO(
             sizeof(GPUVertex),
             {
@@ -123,10 +123,45 @@ namespace HonHengine
         uiRenderer.init(Settings::canvasWidth, Settings::canvasHeight,
             shaderLib.get(ShaderType::UI));
 
-        // ── Shadow map setup ──────────────────────────────────────────────────
         initShadowMap();
     }
 
+    GPURenderer::GPURenderer(SceneManager* sm, SDL_Window* existingWindow, SDL_GLContext existingContext)
+    {
+        ownContext = false;
+        window = existingWindow;
+        glContext = existingContext;
+        sceneManager = sm;
+
+        Settings::canvasWidth = 900;
+        Settings::canvasHeight = 600;
+        SDL_GetWindowSize(window, &Settings::canvasWidth, &Settings::canvasHeight);
+
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LESS);
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_BACK);
+        glFrontFace(GL_CW);
+        glViewport(0, 0, Settings::canvasWidth, Settings::canvasHeight);
+
+        shaderLib.build();
+
+        ManagedVAO internalVAO = shaderLib.createVAO(
+            sizeof(GPUVertex),
+            {
+                { 0, 3, VertexDataType::Float, false, offsetof(GPUVertex, px) },
+                { 1, 3, VertexDataType::Float, false, offsetof(GPUVertex, nx) },
+                { 2, 3, VertexDataType::Float, false, offsetof(GPUVertex, r)  },
+                { 3, 2, VertexDataType::Float, false, offsetof(GPUVertex, u)  },
+            });
+        vao = internalVAO.vao;
+        vbo = internalVAO.vbo;
+
+        uiRenderer.init(Settings::canvasWidth, Settings::canvasHeight,
+            shaderLib.get(ShaderType::UI));
+
+        initShadowMap();
+    }
     // ─────────────────────────────────────────────────────────────────────────
     //  initShadowMap
     //  Creates the depth-only FBO + texture and compiles the depth shader.
@@ -178,36 +213,32 @@ namespace HonHengine
     // ─────────────────────────────────────────────────────────────────────────
     glm::mat4 GPURenderer::buildLightSpaceMatrix() const
     {
-        // Re-use the same sun direction logic as uploadSunUniforms.
-        glm::vec3 sunDir = glm::normalize(glm::vec3(0.5f, 0.8f, 0.3f));
-
         for (BaseLight* bl : *sceneManager->lights)
         {
             if (bl && bl->type == DIRECTIONAL_LIGHT)
             {
                 DirectionalLight* dl = static_cast<DirectionalLight*>(bl);
-                Vector3 d = dl->direction.normalize();
-                sunDir = glm::normalize(glm::vec3(
+                Vector3 d = dl->transform.forward().normalize();
+                glm::vec3 sunDir = glm::normalize(glm::vec3(
                     static_cast<float>(-d.x),
                     static_cast<float>(-d.y),
                     static_cast<float>(-d.z)));
-                break;
+
+                const float dist = 200.0f;
+                glm::vec3 lightPos = sunDir * dist;
+                glm::mat4 lightView = glm::lookAt(lightPos, glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+                glm::mat4 lightProj = glm::ortho(
+                    -SHADOW_EXTENT, SHADOW_EXTENT,
+                    -SHADOW_EXTENT, SHADOW_EXTENT,
+                    0.1f, dist * 2.0f);
+
+                return lightProj * lightView;
             }
         }
 
-        // Position the light camera far enough above the scene.
-        const float dist = 200.0f;
-        glm::vec3 lightPos = sunDir * dist;
-
-        glm::mat4 lightView = glm::lookAt(lightPos, glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-        glm::mat4 lightProj = glm::ortho(
-            -SHADOW_EXTENT, SHADOW_EXTENT,
-            -SHADOW_EXTENT, SHADOW_EXTENT,
-            0.1f, dist * 2.0f);
-
-        return lightProj * lightView;
+        // No directional light — return a zero matrix as a sentinel.
+        return glm::mat4(0.0f);
     }
-
     // ─────────────────────────────────────────────────────────────────────────
     //  renderShadowPass
     //  Renders all visible geometry into the shadow-map FBO using the
@@ -487,7 +518,7 @@ namespace HonHengine
             if (bl->type == POINT_LIGHT)
             {
                 PointLight* pl = static_cast<PointLight*>(bl);
-                Vector3 rotatedPos = pl->rotation.RotateVector3(&pl->position);
+                Vector3 rotatedPos = pl->transform.rotation.RotateVector3(&pl->transform.position);
                 glUniform3f(loc("uLightPos"),
                     static_cast<float>(rotatedPos.x),
                     static_cast<float>(rotatedPos.y),
@@ -496,11 +527,17 @@ namespace HonHengine
             else if (bl->type == DIRECTIONAL_LIGHT)
             {
                 DirectionalLight* dl = static_cast<DirectionalLight*>(bl);
-                Vector3 dir = dl->direction.normalize();
+                Vector3 dir = dl->transform.forward();
+                dir = dir.normalize();
                 glUniform3f(loc("uLightDir"),
                     static_cast<float>(dir.x),
                     static_cast<float>(dir.y),
                     static_cast<float>(dir.z));
+            }
+            else // AMBIENT_LIGHT — no positional data needed, zero out to prevent stale reads
+            {
+                glUniform3f(loc("uLightPos"), 0.0f, 0.0f, 0.0f);
+                glUniform3f(loc("uLightDir"), 0.0f, 0.0f, 0.0f);
             }
         }
     }
@@ -510,32 +547,42 @@ namespace HonHengine
     // ─────────────────────────────────────────────────────────────────────────
     void GPURenderer::uploadSunUniforms(GLuint program) const
     {
-        glm::vec3 sunDir = glm::normalize(glm::vec3(0.5f, 0.8f, 0.3f));
-        glm::vec3 sunColor = glm::vec3(1.0f, 0.96f, 0.82f);
-        float     sunInt = 1.1f;
+        glm::vec3 sunDir = glm::vec3(0.0f);
+        glm::vec3 sunColor = glm::vec3(0.0f);
+        float     sunInt = 0.0f;
+        glm::vec3 ambientColor = glm::vec3(0.0f);
+        float     ambientInt = 0.0f;
 
         for (BaseLight* bl : *sceneManager->lights)
         {
-            if (bl && bl->type == DIRECTIONAL_LIGHT)
+            if (!bl) continue;
+
+            if (bl->type == DIRECTIONAL_LIGHT)
             {
+                std::cout << "direc light !?" << std::endl;
                 DirectionalLight* dl = static_cast<DirectionalLight*>(bl);
-                Vector3 d = dl->direction.normalize();
+                Vector3 d = dl->transform.forward();
                 sunDir = glm::normalize(glm::vec3(
                     static_cast<float>(-d.x),
                     static_cast<float>(-d.y),
                     static_cast<float>(-d.z)));
-                sunColor = glm::vec3(
-                    bl->color.r / 255.0f,
-                    bl->color.g / 255.0f,
-                    bl->color.b / 255.0f);
+                sunColor = glm::vec3(bl->color.r / 255.0f, bl->color.g / 255.0f, bl->color.b / 255.0f);
                 sunInt = static_cast<float>(bl->intensity);
-                break;
+            }
+            else if (bl->type == AMBIENT_LIGHT)
+            {
+                ambientColor += glm::vec3(bl->color.r / 255.0f, bl->color.g / 255.0f, bl->color.b / 255.0f);
+                ambientInt += static_cast<float>(bl->intensity);
             }
         }
 
         glUniform3fv(glGetUniformLocation(program, "uSunDir"), 1, glm::value_ptr(sunDir));
         glUniform3fv(glGetUniformLocation(program, "uSunColor"), 1, glm::value_ptr(sunColor));
         glUniform1f(glGetUniformLocation(program, "uSunIntensity"), sunInt);
+
+        // Ambient uniforms are always uploaded (they can be zero)
+        glUniform3fv(glGetUniformLocation(program, "uAmbientColor"), 1, glm::value_ptr(ambientColor));
+        glUniform1f(glGetUniformLocation(program, "uAmbientIntensity"), ambientInt);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -698,12 +745,63 @@ namespace HonHengine
         if (blend) glDisable(GL_BLEND);
     }
 
+    void GPURenderer::CreateFrameBuffer(GLuint& fboOut, GLuint& texOut, int width, int height)
+    {
+        // Generate color texture for rendering[cite: 1].
+        glGenTextures(1, &texOut);
+        glBindTexture(GL_TEXTURE_2D, texOut);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glBindTexture(GL_TEXTURE_2D, 0);
+
+        // Create Framebuffer and attach texture[cite: 1].
+        glGenFramebuffers(1, &fboOut);
+        glBindFramebuffer(GL_FRAMEBUFFER, fboOut);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texOut, 0);
+
+        // Add Renderbuffer for depth/stencil to allow depth testing in the FBO[cite: 1].
+        GLuint rbo;
+        glGenRenderbuffers(1, &rbo);
+        glBindRenderbuffer(GL_RENDERBUFFER, rbo);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, width, height);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rbo);
+
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+            std::cerr << "[GPURenderer] Custom FBO incomplete!\n";
+
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     //  Render  — main per-frame draw call
     // ─────────────────────────────────────────────────────────────────────────
-    void GPURenderer::Render(float dt)
+    void GPURenderer::Render(float dt, GLuint fbo)
     {
-        // ── Partition objects ─────────────────────────────────────────────────
+        SDL_Window* prevWin = nullptr;
+        SDL_GLContext prevCtx = nullptr;
+
+        if (ownContext)
+        {
+            prevWin = SDL_GL_GetCurrentWindow();
+            prevCtx = SDL_GL_GetCurrentContext();
+            SDL_GL_MakeCurrent(window, glContext);
+        }
+
+        if (ownContext)
+        {
+            if (fbo == 0) {
+                SDL_ShowWindow(window);
+            }
+            else {
+                SDL_HideWindow(window);
+            }
+        }
+
+        glCullFace(GL_BACK);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, Settings::canvasWidth, Settings::canvasHeight);
+
         std::vector<BaseObject*> renderComps, opaqueObjs, transObjs;
 
         for (BaseObject* obj : *sceneManager->objects)
@@ -723,36 +821,44 @@ namespace HonHengine
             }
         }
 
-        // ── 0. Shadow pass ────────────────────────────────────────────────────
-        //  Compute light-space matrix once per frame; re-used by all shaders.
         lightSpaceMatrix = buildLightSpaceMatrix();
         renderShadowPass(renderComps, opaqueObjs);
 
-        // ── Clear main framebuffer ────────────────────────────────────────────
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glViewport(0, 0, Settings::canvasWidth, Settings::canvasHeight);
+
         glClearColor(0.60f, 0.70f, 0.78f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         glm::mat4 view = buildViewMatrix();
         glm::mat4 proj = buildProjectionMatrix();
         glm::vec3 camPos = toGLM(sceneManager->currentCamera->transform.position);
-        float     uTime = SDL_GetTicks() / 1000.0f;
+        float uTime = SDL_GetTicks() / 1000.0f;
 
-        // ── 1. Built-in opaque / transparent pass ─────────────────────────────
         {
-            auto buildVerts = [&](BaseObject* obj) -> std::vector<GPUVertex>
+            auto buildVerts = [&](BaseObject* obj)->std::vector<GPUVertex>
                 {
                     std::vector<GPUVertex> out;
-                    Vector3    sc = obj->transform.scale;
-                    Vector3    pos = obj->transform.position;
+                    Vector3 sc = obj->transform.scale;
+                    Vector3 pos = obj->transform.position;
                     Quaternion rot = obj->transform.rotation;
 
                     std::vector<Vector3> wPos, wNorm;
                     for (const Vertice& v : obj->bVertices) {
-                        Vector3 vp(v.position.x * sc.x,
-                            v.position.y * sc.y,
-                            v.position.z * sc.z);
+                        Vector3 vp(v.position.x * sc.x, v.position.y * sc.y, v.position.z * sc.z);
                         wPos.push_back(rot.RotateVector3(&vp) + pos);
                         wNorm.push_back(rot.RotateVector3(&v.normal).normalize());
+                    }
+
+                    // Get the material color for this object
+                    Color matColor = (obj->material) ? obj->material->color : Color(255, 255, 255, 255);
+                    bool hasVertexColor = false;
+                    // Check if any vertex has a non-default color
+                    for (const Vertice& v : obj->bVertices) {
+                        if (v.vColor.x != 0 || v.vColor.y != 0 || v.vColor.z != 0) {
+                            hasVertexColor = true;
+                            break;
+                        }
                     }
 
                     out.reserve(obj->bTriangles.size() * 3);
@@ -767,9 +873,19 @@ namespace HonHengine
                             gv.nx = static_cast<float>(wNorm[k].x);
                             gv.ny = static_cast<float>(wNorm[k].y);
                             gv.nz = static_cast<float>(wNorm[k].z);
-                            gv.r = static_cast<float>(obj->bVertices[k].vColor.x);
-                            gv.g = static_cast<float>(obj->bVertices[k].vColor.y);
-                            gv.b = static_cast<float>(obj->bVertices[k].vColor.z);
+
+                            // Use vertex color if set, otherwise use material color
+                            if (hasVertexColor) {
+                                gv.r = static_cast<float>(obj->bVertices[k].vColor.x);
+                                gv.g = static_cast<float>(obj->bVertices[k].vColor.y);
+                                gv.b = static_cast<float>(obj->bVertices[k].vColor.z);
+                            }
+                            else {
+                                gv.r = matColor.r / 255.0f;
+                                gv.g = matColor.g / 255.0f;
+                                gv.b = matColor.b / 255.0f;
+                            }
+
                             gv.u = tri.uv[j][0];
                             gv.v = tri.uv[j][1];
                             out.push_back(gv);
@@ -777,7 +893,6 @@ namespace HonHengine
                     }
                     return out;
                 };
-
             auto sortObjs = [](BaseObject* a, BaseObject* b) {
                 GLuint pA = (a->material) ? a->material->customShaderProgram : 0;
                 GLuint pB = (b->material) ? b->material->customShaderProgram : 0;
@@ -787,65 +902,53 @@ namespace HonHengine
             std::sort(opaqueObjs.begin(), opaqueObjs.end(), sortObjs);
 
             auto renderGroup = [&](const std::vector<BaseObject*>& group,
-                GLuint defaultProgram,
-                bool depthWrite, bool blend)
+                GLuint defaultProgram, bool depthWrite, bool blend)
                 {
                     if (group.empty()) return;
-
-                    GLuint          currentProgram = 0;
+                    GLuint currentProgram = 0;
                     const Material* lastMat = reinterpret_cast<const Material*>(-1);
                     std::vector<GPUVertex> batch;
 
-                    for (BaseObject* obj : group)
-                    {
+                    for (BaseObject* obj : group) {
                         const Material* mat = obj->material;
-                        GLuint desired = (mat && mat->customShaderProgram != 0)
-                            ? mat->customShaderProgram
-                            : defaultProgram;
+                        GLuint desired = (mat && mat->customShaderProgram != 0) ? mat->customShaderProgram : defaultProgram;
 
-                        if (desired != currentProgram || mat != lastMat)
-                        {
-                            if (!batch.empty()) {
-                                drawPass(currentProgram, batch, depthWrite, blend);
-                                batch.clear();
-                            }
-
-                            if (desired != currentProgram)
-                            {
+                        if (desired != currentProgram || mat != lastMat) {
+                            if (!batch.empty()) { drawPass(currentProgram, batch, depthWrite, blend); batch.clear(); }
+                            if (desired != currentProgram) {
                                 currentProgram = desired;
                                 glUseProgram(currentProgram);
-                                glUniformMatrix4fv(glGetUniformLocation(currentProgram, "uView"),
-                                    1, GL_FALSE, glm::value_ptr(view));
-                                glUniformMatrix4fv(glGetUniformLocation(currentProgram, "uProj"),
-                                    1, GL_FALSE, glm::value_ptr(proj));
-                                glUniform3fv(glGetUniformLocation(currentProgram, "uCamPos"),
-                                    1, glm::value_ptr(camPos));
+                                glUniformMatrix4fv(glGetUniformLocation(currentProgram, "uView"), 1, GL_FALSE, glm::value_ptr(view));
+                                glUniformMatrix4fv(glGetUniformLocation(currentProgram, "uProj"), 1, GL_FALSE, glm::value_ptr(proj));
+                                glUniform3fv(glGetUniformLocation(currentProgram, "uCamPos"), 1, glm::value_ptr(camPos));
                                 glUniform1f(glGetUniformLocation(currentProgram, "uTime"), uTime);
                                 uploadLights(currentProgram);
-
-                                // ── Shadow uniforms for built-in shaders ──────
-                                // The WORLD_FRAG shader doesn't consume these,
-                                // but the uploads are harmless and future custom
-                                // materials bound here will benefit.
-                                glUniformMatrix4fv(
-                                    glGetUniformLocation(currentProgram, "uLightSpaceMatrix"),
-                                    1, GL_FALSE, glm::value_ptr(lightSpaceMatrix));
+                                glUniformMatrix4fv(glGetUniformLocation(currentProgram, "uLightSpaceMatrix"), 1, GL_FALSE, glm::value_ptr(lightSpaceMatrix));
                                 glUniform1i(glGetUniformLocation(currentProgram, "uShadowMap"), 8);
                                 glActiveTexture(GL_TEXTURE8);
                                 glBindTexture(GL_TEXTURE_2D, shadowMap);
                                 glActiveTexture(GL_TEXTURE0);
-                            }
 
+                                GLint alphaLoc = glGetUniformLocation(currentProgram, "uAlpha");
+                                if (alphaLoc != -1)
+                                    glUniform1f(alphaLoc, 1.0f);
+                            }
                             if (mat != lastMat) {
                                 uploadTextureLayersToShader(currentProgram, mat);
+
+                                GLint alphaLoc = glGetUniformLocation(currentProgram, "uAlpha");
+                                if (alphaLoc != -1) {
+                                    float alpha = mat ? (mat->color.a / 255.0f) : 1.0f;
+                                    glUniform1f(alphaLoc, alpha);
+                                }
+
                                 lastMat = mat;
+
                             }
                         }
-
                         auto objVerts = buildVerts(obj);
                         batch.insert(batch.end(), objVerts.begin(), objVerts.end());
                     }
-
                     if (!batch.empty()) drawPass(currentProgram, batch, depthWrite, blend);
                 };
 
@@ -853,17 +956,25 @@ namespace HonHengine
             renderGroup(transObjs, shaderLib.get(ShaderType::Transparent), false, true);
         }
 
-        // ── 2. RenderComponent (custom shader) pass ───────────────────────────
         for (BaseObject* obj : renderComps)
         {
             drawRenderComponent(obj, view, proj, camPos, uTime, dt);
+        }
+
+        if (ownContext)
+        {
+            SDL_GL_MakeCurrent(prevWin, prevCtx);
         }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
     void GPURenderer::Present()
     {
-        SDL_GL_SwapWindow(window);
+        Uint32 flags = SDL_GetWindowFlags(window);
+        if (flags & SDL_WINDOW_SHOWN)
+        {
+            SDL_GL_SwapWindow(window);
+        }
     }
 
     void GPURenderer::Get_MouseState(int* x, int* y)
@@ -880,9 +991,12 @@ namespace HonHengine
         if (shadowFBO) { glDeleteFramebuffers(1, &shadowFBO);  shadowFBO = 0; }
         if (shadowMap) { glDeleteTextures(1, &shadowMap);       shadowMap = 0; }
 
-        SDL_GL_DeleteContext(glContext);
-        SDL_DestroyWindow(window);
-        SDL_Quit();
+        if (ownContext)
+        {
+            SDL_GL_DeleteContext(glContext);
+            SDL_DestroyWindow(window);
+            SDL_Quit();
+        }
     }
 
 } // namespace HonHengine

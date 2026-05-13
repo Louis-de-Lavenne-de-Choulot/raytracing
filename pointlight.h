@@ -11,13 +11,12 @@ namespace HonHengine
     struct PointLight : BaseLight
     {
         /* data */
-        Vector3 position;
-        Quaternion rotation;
+		Transform transform;
 
         PointLight(double intens, Color col, Vector3 pos, Quaternion rot = Quaternion()) : BaseLight(intens, col)
         {
-            position = pos;
-            rotation = rot;
+            transform.position = pos;
+            transform.rotation = rot;
             type = POINT_LIGHT;
         }
     };

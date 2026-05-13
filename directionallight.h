@@ -10,14 +10,15 @@ namespace HonHengine
     struct DirectionalLight : BaseLight
     {
         /* data */
-        Vector3 direction;
+		Transform transform = Transform();
 
-		DirectionalLight() : BaseLight(), direction() {
+		DirectionalLight() : BaseLight() {
 			type = DIRECTIONAL_LIGHT;
 		}
-        DirectionalLight(double intens, Color col, Vector3 dir) : BaseLight(intens, col)
+        DirectionalLight(double intens, Color col, Vector3 pos = Vector3(), Quaternion rot = Quaternion()) : BaseLight(intens, col)
         {
-            direction = dir;
+			transform.position = pos;
+			transform.rotation = rot;
             type = DIRECTIONAL_LIGHT;
         }
     };
