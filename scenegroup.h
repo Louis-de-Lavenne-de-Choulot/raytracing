@@ -1,7 +1,7 @@
 #pragma once
 // scenegroup.h  -  HonHengine
 // ─────────────────────────────────────────────────────────────────────────────
-//  SceneGroup  -  Unity-style "folder" / parent object
+//  SceneGroup  - "folder" / parent object
 //
 //  A SceneGroup owns a transform (position, rotation, scale) and holds
 //  references to any number of BaseObject* children and nested SceneGroup*
@@ -10,7 +10,7 @@
 //
 //  Analogy
 //  ───────
-//    Unity:     Create Empty → name it "Guard" → drag children under it
+//    Create Empty → name it "Guard" → drag children under it
 //    HonHengine:   SceneGroup* guard = new SceneGroup("Guard", pos, rot, scale);
 //               guard->Add(botBody);
 //               guard->Add(botHead);

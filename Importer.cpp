@@ -30,7 +30,7 @@ namespace HonHengine {
     };
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  Flat-normal generation — mirrors Unity's RecalculateNormals().
+    //  Flat-normal generation
     //  Accumulates the cross-product of each triangle on its three vertices,
     //  then normalises.  Works even with shared vertices (gives smooth shading
     //  across flat OBJs).
@@ -77,7 +77,7 @@ namespace HonHengine {
     //  shader without manually tweaking the layout per object.
     //
     //  If the OBJ has no `vn` lines, normals are computed from triangle
-    //  cross-products (equivalent to Unity's RecalculateNormals).
+    //  cross-products.
     //  If the OBJ has no `vt` lines, UVs default to (0, 0).
     // ─────────────────────────────────────────────────────────────────────────
     BaseObject* Importer::ImportFromOBJ(const std::string& filePath)
@@ -202,7 +202,7 @@ namespace HonHengine {
         // ── Generate normals if the OBJ had none ──────────────────────────
         if (!hasNormals)
         {
-            std::cout << "[OBJ] No normals found — computing from geometry (like Unity's RecalculateNormals).\n";
+            std::cout << "[OBJ] No normals found — computing from geometry.\n";
             RecalculateNormals(verts, indices);
         }
 

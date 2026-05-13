@@ -15,7 +15,7 @@ namespace HonHengine
     {
         std::vector<Vertice>  vertices;
         std::vector<Triangle> triangles;
-        Vector3* dir = new Vector3(0, 0, 1); // TODO
+        Vector3* dir = new Vector3(0, 0, 1);
 
         VSphere(int segments = 20, int rings = 20, Material* mat = Defaults::MissingMaterial)
         {

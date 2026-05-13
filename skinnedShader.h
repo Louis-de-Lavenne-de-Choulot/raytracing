@@ -86,6 +86,8 @@ out vec4 FragColor;
 uniform vec3  uSunDir;
 uniform vec3  uSunColor;
 uniform float uSunIntensity;
+uniform vec3  uAmbientColor;
+uniform float uAmbientIntensity;
 
 // ── Shadow ────────────────────────────────────────────────────────────────────
 uniform sampler2DShadow uShadowMap;  
@@ -141,23 +143,23 @@ void main()
 
     if (albedo.a < 0.01) discard;
 
-    // ── Hemisphere ambient ────────────────────────────────────────────────────
-    vec3 ambient = hemisphereAmbient(N);
+    // Hemisphere ambient + any scene ambient lights (uniform, normal-independent)
 
-    // ── Directional sun ───────────────────────────────────────────────────────
+    float hasAmbient = clamp(uAmbientIntensity, 0.0, 1.0);
+    vec3 ambient = mix(hemisphereAmbient(N), vec3(0.0), hasAmbient)
+             + uAmbientColor * uAmbientIntensity;
+
+    // Directional sun (only contributes if uSunIntensity > 0 and uSunDir != vec3(0))
     float wrap    = max((dot(N, uSunDir) + 0.2) / 1.2, 0.0);
     vec3  diffuse = uSunColor * uSunIntensity * wrap;
 
-    // ── Specular ──────────────────────────────────────────────────────────────
     vec3  viewDir  = normalize(-vWorldPos);
     vec3  halfVec  = normalize(uSunDir + viewDir);
     float spec     = pow(max(dot(N, halfVec), 0.0), 32.0) * 0.3;
     vec3  specular = uSunColor * uSunIntensity * spec;
 
-    // ── Shadow ────────────────────────────────────────────────────────────────
     float shadow = sampleShadow(vLightSpacePos);
 
-    // Blend: ambient is unaffected; diffuse+specular are attenuated by shadow.
     vec3 finalColor = (ambient + shadow * (diffuse + specular)) * albedo.rgb;
     FragColor = vec4(finalColor, albedo.a);
 }

@@ -67,6 +67,8 @@ uniform sampler2DShadow uShadowMap;  // slot 1 — depth comparison texture
 uniform vec3  uSunDir;
 uniform vec3  uSunColor;
 uniform float uSunIntensity;
+uniform vec3  uAmbientColor;
+uniform float uAmbientIntensity;
 
 // ── Misc ──────────────────────────────────────────────────────────────────────
 uniform float uTime;
@@ -117,9 +119,10 @@ void main()
     vec3 N      = normalize(vNormal);
     vec4 albedo = texture(uAlbedo, vUV);
 
-    // ── Hemisphere ambient (never shadowed) ───────────────────────────────────
-    vec3 ambient = hemisphereAmbient(N);
-
+    // ── Hemisphere ambient (never shadowed) ──────────────────────────────────
+    float hasAmbient = clamp(uAmbientIntensity, 0.0, 1.0);
+    vec3 ambient = mix(hemisphereAmbient(N), vec3(0.0), hasAmbient)
+             + uAmbientColor * uAmbientIntensity;
     // ── Directional sun ───────────────────────────────────────────────────────
     float wrap    = max((dot(N, uSunDir) + 0.25) / 1.25, 0.0);
     vec3  diffuse = uSunColor * uSunIntensity * wrap;

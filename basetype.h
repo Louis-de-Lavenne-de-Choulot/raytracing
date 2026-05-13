@@ -17,7 +17,9 @@ namespace HonHengine
         CUBE,
         CYLINDER,
         CONE,
-        TEAPOT
+        TEAPOT,
+        OBJ_MESH,
+        GLTF_MESH
     };
 };
 #endif

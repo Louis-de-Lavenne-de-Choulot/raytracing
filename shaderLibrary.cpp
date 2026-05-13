@@ -60,32 +60,31 @@ uniform vec3  uLightDir[MAX_LIGHTS];
 // --- Texture Layer Uniforms ---
 uniform int       uLayerCount;
 uniform sampler2D uTexLayer[MAX_TEX_LAYERS];
-uniform vec4      uLayerTiling[MAX_TEX_LAYERS];   // (tilingU, tilingV, offsetU, offsetV)
-uniform int       uLayerBlendMode[MAX_TEX_LAYERS]; // 0=Mix, 1=Multiply, 2=Add, 3=Overlay
+uniform vec4      uLayerTiling[MAX_TEX_LAYERS];
+uniform int       uLayerBlendMode[MAX_TEX_LAYERS];
 uniform float     uLayerWeight[MAX_TEX_LAYERS];
-uniform int       uLayerMaskType[MAX_TEX_LAYERS];  // 0=None, 1=Height, 2=Slope, 3=VtxCol
+uniform int       uLayerMaskType[MAX_TEX_LAYERS];
 uniform float     uLayerMaskMin[MAX_TEX_LAYERS];
 uniform float     uLayerMaskMax[MAX_TEX_LAYERS];
-uniform int       uLayerMaskChannel[MAX_TEX_LAYERS]; // 0=R, 1=G, 2=B, 3=A
+uniform int       uLayerMaskChannel[MAX_TEX_LAYERS];
 uniform int       uLayerMaskInvert[MAX_TEX_LAYERS];
 
 uniform float     uAlpha;
 
-// Helper: Calculate the mask weight for a specific layer
 float getLayerMask(int i, vec3 N)
 {
     float mask = 1.0;
-    
-    if (uLayerMaskType[i] == 1) // HeightBased
+
+    if (uLayerMaskType[i] == 1)
     {
         mask = clamp((vWorldPos.y - uLayerMaskMin[i]) / (uLayerMaskMax[i] - uLayerMaskMin[i]), 0.0, 1.0);
     }
-    else if (uLayerMaskType[i] == 2) // SlopeBased
+    else if (uLayerMaskType[i] == 2)
     {
         float slope = clamp(dot(N, vec3(0.0, 1.0, 0.0)), 0.0, 1.0);
         mask = clamp((slope - uLayerMaskMin[i]) / (uLayerMaskMax[i] - uLayerMaskMin[i]), 0.0, 1.0);
     }
-    else if (uLayerMaskType[i] == 3) // VertexColor
+    else if (uLayerMaskType[i] == 3)
     {
         mask = (uLayerMaskChannel[i] == 0) ? vColor.r :
                (uLayerMaskChannel[i] == 1) ? vColor.g :
@@ -95,18 +94,17 @@ float getLayerMask(int i, vec3 N)
     return (uLayerMaskInvert[i] == 1) ? (1.0 - mask) : mask;
 }
 
-// Helper: Composite a layer onto the base color
 vec3 blendLayers(vec3 base, vec3 layer, float weight, int mode)
 {
-    if (mode == 1) return base * mix(vec3(1.0), layer, weight); // Multiply
-    if (mode == 2) return base + (layer * weight);              // Add
-    if (mode == 3) // Overlay
+    if (mode == 1) return base * mix(vec3(1.0), layer, weight);
+    if (mode == 2) return base + (layer * weight);
+    if (mode == 3)
     {
         vec3 check = step(vec3(0.5), base);
         vec3 result = mix(2.0 * base * layer, 1.0 - 2.0 * (1.0 - base) * (1.0 - layer), check);
         return mix(base, result, weight);
     }
-    return mix(base, layer, weight); // Mix/Standard
+    return mix(base, layer, weight);
 }
 
 vec3 hemisphereAmbient(vec3 N)
@@ -120,28 +118,25 @@ vec3 hemisphereAmbient(vec3 N)
 void main()
 {
     vec3 N = normalize(vNormal);
-    
+
     // 1. Process Texture Layers
     vec4 texAcc = vec4(1.0);
     if (uLayerCount > 0)
     {
-        // Sample Base Layer (Layer 0)
         vec2 uv0 = vUV * uLayerTiling[0].xy + uLayerTiling[0].zw;
         texAcc = texture(uTexLayer[0], uv0);
-        
-        // Blend subsequent layers
+
         for (int i = 1; i < uLayerCount; ++i)
         {
             vec2 uv = vUV * uLayerTiling[i].xy + uLayerTiling[i].zw;
             vec4 layerSample = texture(uTexLayer[i], uv);
             float weight = uLayerWeight[i] * getLayerMask(i, N);
-            
             texAcc.rgb = blendLayers(texAcc.rgb, layerSample.rgb, weight * layerSample.a, uLayerBlendMode[i]);
         }
     }
 
-    // 2. Lighting Calculation
-    vec3 acc = hemisphereAmbient(N);
+    // 2. Lighting — fall back to hemisphere ambient only if no lights are defined
+    vec3 acc  = (uLightCount == 0) ? hemisphereAmbient(N) : vec3(0.0);
     vec3 spec = vec3(0.0);
 
     for (int i = 0; i < uLightCount; ++i)
@@ -149,27 +144,27 @@ void main()
         vec3  lc     = uLightColor[i];
         float intens = uLightIntensity[i];
 
-        if (uLightType[i] == 0) // Ambient
+        if (uLightType[i] == 1) // Ambient — uniform, direction-independent
         {
-            acc += lc * intens * (N.y * 0.3 + 0.7);
-        }
-        else if (uLightType[i] == 1) // Point
-        {
-            vec3 L = normalize(uLightPos[i] - vWorldPos);
-            float wrap = max((dot(N, L) + 0.3) / 1.3, 0.0);
-            acc += lc * intens * wrap;
-            
-            vec3 H = normalize(L + normalize(-vWorldPos));
-            spec += lc * intens * pow(max(dot(N, H), 0.0), 32.0) * 0.25;
+            acc += lc * intens;
         }
         else if (uLightType[i] == 2) // Directional
         {
             vec3 L = normalize(-uLightDir[i]);
             float wrap = max((dot(N, L) + 0.25) / 1.25, 0.0);
             acc += lc * intens * wrap;
-            
+
             vec3 H = normalize(L + normalize(vec3(6.0, 4.0, 6.0) - vWorldPos));
             spec += lc * intens * pow(max(dot(N, H), 0.0), 48.0) * 0.35;
+        }
+        else if (uLightType[i] == 3) // Point
+        {
+            vec3 L = normalize(uLightPos[i] - vWorldPos);
+            float wrap = max((dot(N, L) + 0.3) / 1.3, 0.0);
+            acc += lc * intens * wrap;
+
+            vec3 H = normalize(L + normalize(-vWorldPos));
+            spec += lc * intens * pow(max(dot(N, H), 0.0), 32.0) * 0.25;
         }
     }
 

@@ -30,6 +30,7 @@ namespace HonHengine
     {
     public:
         explicit GPURenderer(SceneManager* sceneManager);
+        explicit GPURenderer(SceneManager* sm, SDL_Window* existingWindow, SDL_GLContext existingContext);
 
         // ── Scene setup (call before the loop) ───────────────────────────────
         // Register a named shader so objects can reference it by name.
@@ -39,7 +40,7 @@ namespace HonHengine
             const char* fragSrc);
 
         // ── Per-frame API (the only calls a scene loop needs) ─────────────────
-        void Render(float dt = 0.0f);  // clear + draw all scene objects; dt drives animators
+        void Render(float dt = 0.0f, GLuint fbo = 0);  // clear + draw all scene objects; dt drives animators
         void Present();   // SDL_GL_SwapWindow
 
         // ── Input ─────────────────────────────────────────────────────────────
@@ -59,6 +60,7 @@ namespace HonHengine
         UIRenderer& getUI() { return uiRenderer; }
 
     private:
+        bool ownContext;
         // ── Internal helpers ──────────────────────────────────────────────────
         void uploadLights(GLuint program)                              const;
         void uploadSunUniforms(GLuint program)                         const;
@@ -78,6 +80,8 @@ namespace HonHengine
             std::vector<GPUVertex>& verts,
             bool depthWrite,
             bool blend) const;
+
+        void CreateFrameBuffer(GLuint& fboOut, GLuint& texOut, int width, int height);
 
         void      initShadowMap();
         glm::mat4 buildLightSpaceMatrix() const;

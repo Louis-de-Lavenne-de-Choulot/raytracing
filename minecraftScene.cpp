@@ -920,7 +920,7 @@ namespace HonHengine
 
                             pos.y = playerWorldY + EYE_HEIGHT;
                             camera->transform.position = pos;
-                            handLight->position = pos;
+                            handLight->transform.position = pos;
 
                             int pcx = WorldToChunk(pos.x);
                             int pcz = WorldToChunk(pos.z);

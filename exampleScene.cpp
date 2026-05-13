@@ -411,7 +411,7 @@ namespace HonHengine
         sm->currentCamera = camera;
 
         DirectionalLight* sun = new DirectionalLight();
-        sun->direction = Vector3(-0.5, -0.8, -0.3);
+        sun->transform.rotation = Quaternion::LookRotation(Vector3(-0.5, -0.8, -0.3));
         sun->color = Color(255, 245, 209, 255);
         sun->intensity = 1.1;
         sm->lights->push_back(sun);
@@ -427,7 +427,7 @@ namespace HonHengine
         renderer.RegisterShader("water", WATER_VERT, WATER_FRAG);
         renderer.RegisterShader("skinned", SKINNED_VERT, SKINNED_FRAG);
 
-		sm->objects->push_back(new Rectangle(Vector3(1, 5, 1), Vector3(0, 5, 0), Quaternion(), new Material(1, 1, Color(255, 25, 25, 255))));
+		sm->objects->push_back(new Rectangle(Vector3(1, 5, 1), Vector3(10, 5, 15), Quaternion(), new Material(1, 1, Color(255, 25, 25, 255))));
 
         // ── Beach object ──────────────────────────────────────────────────────
         {
@@ -534,6 +534,8 @@ namespace HonHengine
         teapot->render.textures = { { "uAlbedo", "teapot", 0 } };
         teapot->transform.scale = Vector3(0.1, 0.1, 0.1);
         sm->objects->push_back(teapot);
+
+		camera->transform.LookAt(teapot->transform);
 
         // AI controllers — one per fox, lives as long as the scene does
         std::vector<FoxAI> foxAIs(FOX_COUNT);
@@ -642,7 +644,7 @@ namespace HonHengine
             for (FoxAI& ai : foxAIs)
                 ai.Update(dt);
 
-            renderer.Render(dt);
+            renderer.Render(dt, 0);
             renderer.Present();
         }
 

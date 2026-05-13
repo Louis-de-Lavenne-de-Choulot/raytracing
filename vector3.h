@@ -1,6 +1,9 @@
 #pragma once
 #ifndef VECTOR3
 #define VECTOR3
+
+#include <glm/glm.hpp>
+
 namespace HonHengine
 {
         struct Vector3
@@ -29,6 +32,8 @@ namespace HonHengine
                             x * other.y - y * other.x
                         );
                     }
+
+                glm::vec3 ToGLM() const { return glm::vec3((float)x, (float)y, (float)z); }
 
                 Vector3 operator+(const Vector3 *vec) const;
 
