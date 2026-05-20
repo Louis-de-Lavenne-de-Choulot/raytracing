@@ -25,6 +25,8 @@
 #include <optional>
 #include <cstring>
 #include <cstdio>
+#include <shared_mutex>
+#include <cctype>
 
 #include <glad/glad.h>
 #include <glm/glm.hpp>
@@ -55,6 +57,7 @@
 #include "animation.h"
 #include "material.h"
 #include "skinnedShader.h"
+#include "script_manager.h"
 
 // ── Project & Asset Management ────────────────────────────────────────────────
 #include "ide_asset_database.h"
@@ -79,10 +82,180 @@ using namespace HonHengine;
 
 namespace fs = std::filesystem;
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  Hierarchy drag & drop — lets users drag objects/lights from the Hierarchy
+//  panel and drop them onto the Viewport to reposition them.
+// ─────────────────────────────────────────────────────────────────────────────
+static constexpr const char* kHierarchyDragPayload = "HONHON_HIERARCHY_ITEM";
+
+struct HierarchyDragPayload {
+    char name[128] = {};  // scene object / light name
+    bool isLight = false; // true = BaseLight, false = BaseObject
+};
+
+
+struct IDEObject {
+    std::string name; float px = 0, py = 0, pz = 0; float sx = 1, sy = 1, sz = 1; float rw = 1, rx = 0, ry = 0, rz = 0; bool visible = true; bool locked = false; std::string shader; std::string tag; int cr = 255, cg = 255, cb = 255, ca = 255;
+
+    BaseObject toBaseObject() const {
+        BaseObject obj;
+        obj.transform.position = Vector3(px, py, pz);
+        obj.transform.scale = Vector3(sx, sy, sz);
+        obj.transform.rotation = Quaternion(rw, rx, ry, rz);
+        obj.visible = visible;
+        if (!shader.empty()) obj.render.shaderName = shader;
+        if (!tag.empty()) obj.tag = tag;
+        obj.material = new Material(0, 0, Color((double)cr, (double)cg, (double)cb, (double)ca));
+        return obj;
+    }
+};
+struct IDELight {
+    std::string name; std::string lightType = "point"; float intensity = 1.f; int r = 255, g = 245, b = 209; float px = 0, py = 0, pz = 0; float rotx = 0, roty = 0, rotz = 0;
+
+    BaseLight* toBaseLight() const {
+        BaseLight* lt = nullptr;
+        if (lightType == "directional") {
+            auto* dl = new DirectionalLight();
+            dl->transform.rotation = Quaternion::FromEuler(rotx, roty, rotz);
+            lt = dl;
+        }
+        else {
+            auto* pl = new PointLight();
+            pl->transform.position = Vector3(px, py, pz);
+            lt = pl;
+        }
+        lt->intensity = intensity;
+        lt->color = Color((double)r, (double)g, (double)b);
+        return lt;
+    }
+};
+
+
+// =============================================================================
+//  Name Validation & Auto-Sanitization (creates valid names automatically)
+// =============================================================================
+namespace NameValidator {
+    // Reserved names that cannot be used
+    static const std::unordered_set<std::string> ReservedNames = {
+        "scene", "camera", "light", "object", "root", "none", "null", "undefined",
+        "main", "editor", "game", "world", "level", "player", "system"
+    };
+
+    // Check if a name is valid (for internal use)
+    static bool IsValidInternal(const std::string& n) {
+        if (n.empty()) return false;
+        if (!std::isalpha(static_cast<unsigned char>(n[0])) && n[0] != '_') return false;
+        for (char c : n) {
+            if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_' && c != '-')
+                return false;
+        }
+        std::string lower = n;
+        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+        if (ReservedNames.count(lower)) return false;
+        return true;
+    }
+
+    // Sanitize a name (always returns a valid name)
+    std::string Sanitize(const std::string& n) {
+        if (n.empty()) return "Object";
+        std::string result;
+        result.reserve(n.size());
+        // First character: must be letter or underscore
+        if (n.size() > 0) {
+            if (std::isalpha(static_cast<unsigned char>(n[0])) || n[0] == '_')
+                result += n[0];
+            else
+                result += '_';
+        }
+        // Remaining characters: only alnum, _, -
+        for (size_t i = 1; i < n.size(); ++i) {
+            char c = n[i];
+            if (std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-')
+                result += c;
+            else if (c == ' ' || c == '\t')
+                result += '_';
+            // Skip other invalid chars (don't add anything)
+        }
+        if (result.empty()) result = "Object";
+
+        // Check against reserved names
+        std::string lowerResult = result;
+        std::transform(lowerResult.begin(), lowerResult.end(), lowerResult.begin(), ::tolower);
+        if (ReservedNames.count(lowerResult))
+            result = "_" + result;
+
+        return result;
+    }
+
+    // Generate a unique name (automatically handles duplicates)
+    std::string MakeUnique(const std::string& base,
+        const std::vector<IDEObject>& objects,
+        const std::vector<IDELight>& lights) {
+        std::string candidate = Sanitize(base);
+        if (candidate.empty()) candidate = "Object";
+
+        // Check if name exists in either vector
+        auto nameExists = [&](const std::string& name) -> bool {
+            for (const auto& obj : objects) {
+                if (obj.name == name) return true;
+            }
+            for (const auto& lt : lights) {
+                if (lt.name == name) return true;
+            }
+            return false;
+            };
+
+        if (!nameExists(candidate)) return candidate;
+
+        int counter = 1;
+        while (true) {
+            std::string attempt = candidate + "_" + std::to_string(counter);
+            if (!nameExists(attempt)) return attempt;
+            ++counter;
+        }
+    }
+
+    std::string MakeUnique(const std::string& base,
+        const std::unordered_map<std::string, BaseObject*>& objects,
+        const std::unordered_map<std::string, BaseLight*>& lights) {
+        std::string candidate = Sanitize(base);
+        if (candidate.empty()) candidate = "Object";
+
+        // Check if name exists in either map
+        auto nameExists = [&](const std::string& name) -> bool {
+            return objects.find(name) != objects.end() ||
+                lights.find(name) != lights.end();
+            };
+
+        if (!nameExists(candidate)) return candidate;
+
+        int counter = 1;
+        while (true) {
+            std::string attempt = candidate + "_" + std::to_string(counter);
+            if (!nameExists(attempt)) return attempt;
+            ++counter;
+        }
+    }
+
+    // Get final name (sanitized + unique) - one call does it all
+    std::string GetFinalName(const std::string& requested,
+        const std::unordered_map<std::string, BaseObject*>& objects,
+        const std::unordered_map<std::string, BaseLight*>& lights) {
+        return MakeUnique(Sanitize(requested), objects, lights);
+    }
+
+    // Get final name (sanitized + unique) - one call does it all
+    std::string GetFinalName(const std::string& requested,
+        const std::vector<IDEObject>& objects,
+        const std::vector<IDELight>& lights) {
+        return MakeUnique(Sanitize(requested), objects, lights);
+    }
+}
+
 // =============================================================================
 //  Mutex global protégeant les listes d'objets et de lumières
 // =============================================================================
-std::mutex g_sceneMutex;
+std::shared_mutex g_sceneMutex;
 
 struct DeferredTask {
     std::string name;        // for the response
@@ -187,7 +360,7 @@ static std::unordered_map<std::string, BaseLight*>  g_namedLights;
 struct CmdContext {
     SceneManager* sm = nullptr;
     GPURenderer* renderer = nullptr;
-    std::mutex* sceneMutex = &g_sceneMutex;
+    std::shared_mutex* sceneMutex = &g_sceneMutex;
 };
 
 struct CommandRegistry {
@@ -224,7 +397,8 @@ void CommandRegistry::PrintHelp(std::ostream& out) const {
     out << "\"}\n";
 }
 
-static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer) {
+static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer,
+    AssetDatabase* assetDb, SceneManager* sceneMgr) {
     // help
     reg.Register("help", "help", "List all commands.",
         [&reg](CmdContext&, const std::vector<std::string>&, std::ostream& out) { reg.PrintHelp(out); });
@@ -237,7 +411,7 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer) {
     // list (lecture seule mais verrou quand même)
     reg.Register("list", "list", "List all named objects and lights.",
         [](CmdContext& ctx, const std::vector<std::string>&, std::ostream& out) {
-            std::lock_guard<std::mutex> lock(*ctx.sceneMutex);
+            std::shared_lock<std::shared_mutex> lock(*ctx.sceneMutex);
             std::ostringstream d; d << std::fixed << std::setprecision(4);
             d << "\"objects\":[";
             bool first = true;
@@ -286,7 +460,7 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer) {
     reg.Register("inspect", "inspect <name>", "Return transform and material.",
         [](CmdContext& ctx, const std::vector<std::string>& args, std::ostream& out) {
             if (args.empty()) { out << MakeResponse(false, "inspect", "Usage: inspect <name>") << "\n"; return; }
-            std::lock_guard<std::mutex> lock(*ctx.sceneMutex);
+            std::shared_lock<std::shared_mutex> lock(*ctx.sceneMutex);
             auto it = g_namedObjects.find(args[0]);
             if (it != g_namedObjects.end()) {
                 BaseObject* obj = it->second;
@@ -344,6 +518,13 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer) {
     reg.Register("plane", "plane <name> <x> <y> <z> [width] [height] [color]", "Spawn a plane primitive.",
         [](CmdContext& ctx, const std::vector<std::string>& args, std::ostream& out) {
             if (args.size() < 4) { out << MakeResponse(false, "plane", "Usage: plane <name> <x> <y> <z> [width=5] [height=5] [color]") << "\n"; return; }
+
+            std::string finalName = NameValidator::GetFinalName(args[0], g_namedObjects, g_namedLights);
+            // If name was changed, log it
+            if (finalName != args[0]) {
+                out << MakeResponse(true, "plane", "Name '" + args[0] + "' changed to '" + finalName + "'") << "\n";
+            }
+
             double x, y, z, width = 5.0, height = 5.0;
             if (!ParseDouble(args[1], x) || !ParseDouble(args[2], y) || !ParseDouble(args[3], z)) {
                 out << MakeResponse(false, "plane", "Bad coords") << "\n"; return;
@@ -351,21 +532,30 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer) {
             if (args.size() >= 5) ParseDouble(args[4], width);
             if (args.size() >= 6) ParseDouble(args[5], height);
             Color col = args.size() >= 7 ? NameToColor(args[6]) : colWhite;
-            std::lock_guard<std::mutex> lock(*ctx.sceneMutex);
+            std::unique_lock<std::shared_mutex> lock(*ctx.sceneMutex);
             // Use Plane class
             BaseObject* obj = new HonHengine::Plane(Vector3(width, 1.0, height), Vector3(x, y, z), Quaternion(),
                 new Material(0, 0, col, colBlack));
             ctx.sm->objects->push_back(obj);
-            g_namedObjects[args[0]] = obj;
+
+            g_namedObjects[finalName] = obj;
+
             std::ostringstream d; d << std::fixed << std::setprecision(4);
             d << JVec3("pos", x, y, z) << ",\"width\":" << width << ",\"height\":" << height;
-            out << MakeResponse(true, "plane", "'" + args[0] + "' spawned", d.str()) << "\n";
+            out << MakeResponse(true, "plane", "'" + finalName + "' spawned", d.str()) << "\n";
         });
     // addlight (avec verrou)
     reg.Register("addlight", "addlight <name> <intensity> <r> <g> <b> [type]",
         "Add a light.",
         [](CmdContext& ctx, const std::vector<std::string>& args, std::ostream& out) {
             if (args.size() < 5) { out << MakeResponse(false, "addlight", "Usage: ...") << "\n"; return; }
+
+            std::string finalName = NameValidator::GetFinalName(args[0], g_namedObjects, g_namedLights);
+            // If name was changed, log it
+            if (finalName != args[0]) {
+                out << MakeResponse(true, "plane", "Name '" + args[0] + "' changed to '" + finalName + "'") << "\n";
+            }
+
             double intensity; int r, g, b;
             if (!ParseDouble(args[1], intensity) || !ParseInt(args[2], r) || !ParseInt(args[3], g) || !ParseInt(args[4], b)) {
                 out << MakeResponse(false, "addlight", "Bad values") << "\n"; return;
@@ -389,18 +579,19 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer) {
                 lightType = "point"; // enforce canonical name
                 light = new PointLight(intensity, col, Vector3(0, 5, 0));
             }
-            std::lock_guard<std::mutex> lock(*ctx.sceneMutex);
+            std::unique_lock<std::shared_mutex> lock(*ctx.sceneMutex);
             ctx.sm->lights->push_back(light);
-            g_namedLights[args[0]] = light;
+            g_namedLights[finalName] = light;
+
             std::ostringstream d; d << std::fixed << std::setprecision(4);
             d << "\"intensity\":" << intensity << ",\"color\":{\"r\":" << r << ",\"g\":" << g << ",\"b\":" << b << "},\"lightType\":" << JStr(lightType);
-            out << MakeResponse(true, "addlight", "'" + args[0] + "' added", d.str()) << "\n";
+            out << MakeResponse(true, "addlight", "'" + finalName + "' added", d.str()) << "\n";
         });
     // removelight
     reg.Register("removelight", "removelight <name>", "Remove a light.",
         [](CmdContext& ctx, const std::vector<std::string>& args, std::ostream& out) {
             if (args.empty()) { out << MakeResponse(false, "removelight", "Usage: removelight <name>") << "\n"; return; }
-            std::lock_guard<std::mutex> lock(*ctx.sceneMutex);
+            std::unique_lock<std::shared_mutex> lock(*ctx.sceneMutex);
             auto it = g_namedLights.find(args[0]);
             if (it == g_namedLights.end()) { out << MakeResponse(false, "removelight", "Unknown light") << "\n"; return; }
             auto& lights = *ctx.sm->lights;
@@ -413,7 +604,7 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer) {
     reg.Register("delete", "delete <name>", "Delete an object.",
         [](CmdContext& ctx, const std::vector<std::string>& args, std::ostream& out) {
             if (args.empty()) { out << MakeResponse(false, "delete", "Usage: delete <name>") << "\n"; return; }
-            std::lock_guard<std::mutex> lock(*ctx.sceneMutex);
+            std::unique_lock<std::shared_mutex> lock(*ctx.sceneMutex);
             auto it = g_namedObjects.find(args[0]);
             if (it == g_namedObjects.end()) { out << MakeResponse(false, "delete", "Unknown object") << "\n"; return; }
             auto& objs = *ctx.sm->objects;
@@ -426,7 +617,7 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer) {
     reg.Register("move", "move <name> <x> <y> <z>", "Move object.",
         [](CmdContext& ctx, const std::vector<std::string>& args, std::ostream& out) {
             if (args.size() < 4) { out << MakeResponse(false, "move", "Usage: move <name> <x> <y> <z>") << "\n"; return; }
-            std::lock_guard<std::mutex> lock(*ctx.sceneMutex);
+            std::unique_lock<std::shared_mutex> lock(*ctx.sceneMutex);
             double x, y, z; if (!ParseDouble(args[1], x) || !ParseDouble(args[2], y) || !ParseDouble(args[3], z)) {
                 out << MakeResponse(false, "move", "Bad coords") << "\n"; return;
             }
@@ -454,7 +645,7 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer) {
     reg.Register("scale", "scale <name> <sx> <sy> <sz>", "Scale object.",
         [](CmdContext& ctx, const std::vector<std::string>& args, std::ostream& out) {
             if (args.size() < 4) { out << MakeResponse(false, "scale", "Usage: scale <name> <sx> <sy> <sz>") << "\n"; return; }
-            std::lock_guard<std::mutex> lock(*ctx.sceneMutex);
+            std::unique_lock<std::shared_mutex> lock(*ctx.sceneMutex);
             auto it = g_namedObjects.find(args[0]);
             if (it == g_namedObjects.end()) { out << MakeResponse(false, "scale", "Unknown object") << "\n"; return; }
             double sx, sy, sz; if (!ParseDouble(args[1], sx) || !ParseDouble(args[2], sy) || !ParseDouble(args[3], sz)) {
@@ -469,7 +660,7 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer) {
     reg.Register("rotate", "rotate <name> <pitch> <yaw> <roll>", "Rotate object or light.",
         [](CmdContext& ctx, const std::vector<std::string>& args, std::ostream& out) {
             if (args.size() < 4) { out << MakeResponse(false, "rotate", "Usage: rotate <name> <pitch> <yaw> <roll>") << "\n"; return; }
-            std::lock_guard<std::mutex> lock(*ctx.sceneMutex);
+            std::unique_lock<std::shared_mutex> lock(*ctx.sceneMutex);
             double p, y, r; if (!ParseDouble(args[1], p) || !ParseDouble(args[2], y) || !ParseDouble(args[3], r)) {
                 out << MakeResponse(false, "rotate", "Bad angles") << "\n"; return;
             }
@@ -496,7 +687,8 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer) {
                 out << MakeResponse(false, "color", "Usage: color <name> <r> <g> <b> [a]") << "\n";
                 return;
             }
-            std::lock_guard<std::mutex> lock(*ctx.sceneMutex);
+
+            std::unique_lock<std::shared_mutex> lock(*ctx.sceneMutex);
             auto it = g_namedObjects.find(args[0]);
             if (it == g_namedObjects.end()) {
                 out << MakeResponse(false, "color", "Unknown object") << "\n";
@@ -509,16 +701,18 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer) {
             }
             if (args.size() >= 5) ParseInt(args[4], a);
 
-            // ⚠️ CRITICAL: S'assurer que le matériau existe
-            if (!it->second->material) {
-                it->second->material = new Material(0, 0, colWhite, colBlack);
+            BaseObject* obj = it->second;
+            if (!obj->material) {
+                obj->material = new Material(0, 0, colWhite, colBlack);
             }
-            it->second->material->color = Color{
+
+            // Use setter that marks dirty
+            obj->material->setColor(Color{
                 (double)std::clamp(r, 0, 255),
                 (double)std::clamp(g, 0, 255),
                 (double)std::clamp(b, 0, 255),
                 (double)std::clamp(a, 0, 255)
-            };
+                });
 
             out << MakeResponse(true, "color", "Color set on '" + args[0] + "'") << "\n";
         });
@@ -528,7 +722,7 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer) {
                 out << MakeResponse(false, "visible", "Usage: visible <name> <true/false>") << "\n";
                 return;
             }
-            std::lock_guard<std::mutex> lock(*ctx.sceneMutex);
+            std::unique_lock<std::shared_mutex> lock(*ctx.sceneMutex);
             auto it = g_namedObjects.find(args[0]);
             if (it == g_namedObjects.end()) {
                 out << MakeResponse(false, "visible", "Unknown object") << "\n";
@@ -542,13 +736,13 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer) {
     reg.Register("setshader", "setshader <name> <shaderName>", "Assign shader.",
         [](CmdContext& ctx, const std::vector<std::string>& args, std::ostream& out) {
             if (args.size() < 2) { out << MakeResponse(false, "setshader", "Usage: setshader <name> <shaderName>") << "\n"; return; }
-            std::lock_guard<std::mutex> lock(*ctx.sceneMutex);
+            std::unique_lock<std::shared_mutex> lock(*ctx.sceneMutex);
             auto it = g_namedObjects.find(args[0]);
             if (it == g_namedObjects.end()) { out << MakeResponse(false, "setshader", "Unknown object") << "\n"; return; }
             it->second->render.shaderName = args[1];
             out << MakeResponse(true, "setshader", "Shader '" + args[1] + "' assigned") << "\n";
         });
-    // registershader (pas de verrou nécessaire car modifie uniquement le renderer)
+    // registershader
     reg.Register("registershader", "registershader <name> <vertFile> <fragFile>", "Compile and register shader.",
         [renderer](CmdContext&, const std::vector<std::string>& args, std::ostream& out) {
             if (args.size() < 3) { out << MakeResponse(false, "registershader", "Usage: registershader <name> <vert> <frag>") << "\n"; return; }
@@ -566,7 +760,14 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer) {
     reg.Register("clone", "clone <srcName> <newName>", "Duplicate an object.",
         [](CmdContext& ctx, const std::vector<std::string>& args, std::ostream& out) {
             if (args.size() < 2) { out << MakeResponse(false, "clone", "Usage: clone <src> <new>") << "\n"; return; }
-            std::lock_guard<std::mutex> lock(*ctx.sceneMutex);
+
+            std::string finalName = NameValidator::GetFinalName(args[1], g_namedObjects, g_namedLights);
+            // If name was changed, log it
+            if (finalName != args[1]) {
+                out << MakeResponse(true, "plane", "Name '" + args[1] + "' changed to '" + finalName + "'") << "\n";
+            }
+
+            std::unique_lock<std::shared_mutex> lock(*ctx.sceneMutex);
             auto it = g_namedObjects.find(args[0]);
             if (it == g_namedObjects.end()) { out << MakeResponse(false, "clone", "Unknown source") << "\n"; return; }
             if (g_namedObjects.count(args[1])) { out << MakeResponse(false, "clone", "Name already exists") << "\n"; return; }
@@ -575,31 +776,40 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer) {
             copy->transform.position.x += 0.5;
             if (src->material) copy->material = new Material(*src->material);
             ctx.sm->objects->push_back(copy);
-            g_namedObjects[args[1]] = copy;
-            out << MakeResponse(true, "clone", "'" + args[0] + "' cloned as '" + args[1] + "'") << "\n";
+
+            g_namedObjects[finalName] = copy;
+
+            out << MakeResponse(true, "clone", "'" + finalName + "' cloned as '" + args[1] + "'") << "\n";
         });
     // rename
     reg.Register("rename", "rename <oldName> <newName>", "Rename object/light.",
         [](CmdContext& ctx, const std::vector<std::string>& args, std::ostream& out) {
             if (args.size() < 2) { out << MakeResponse(false, "rename", "Usage: rename <old> <new>") << "\n"; return; }
-            std::lock_guard<std::mutex> lock(*ctx.sceneMutex);
-            const std::string& oldN = args[0], newN = args[1];
+            std::unique_lock<std::shared_mutex> lock(*ctx.sceneMutex);
+            const std::string& oldN = args[0], rawName = args[1];
+
+            std::string finalName = NameValidator::GetFinalName(rawName, g_namedObjects, g_namedLights);
+            // If name was changed, log it
+            if (finalName != rawName) {
+                out << MakeResponse(true, "plane", "Name '" + rawName + "' changed to '" + finalName + "'") << "\n";
+            }
+
             auto objIt = g_namedObjects.find(oldN);
             if (objIt != g_namedObjects.end()) {
-                if (g_namedObjects.count(newN)) { out << MakeResponse(false, "rename", "Name already in use") << "\n"; return; }
+                if (g_namedObjects.count(finalName)) { out << MakeResponse(false, "rename", "Name already in use") << "\n"; return; }
                 BaseObject* obj = objIt->second;
                 g_namedObjects.erase(objIt);
-                g_namedObjects[newN] = obj;
-                out << MakeResponse(true, "rename", "'" + oldN + "' -> '" + newN + "'") << "\n";
+                g_namedObjects[finalName] = obj;
+                out << MakeResponse(true, "rename", "'" + oldN + "' -> '" + finalName + "'") << "\n";
                 return;
             }
             auto ltIt = g_namedLights.find(oldN);
             if (ltIt != g_namedLights.end()) {
-                if (g_namedLights.count(newN)) { out << MakeResponse(false, "rename", "Name already in use") << "\n"; return; }
+                if (g_namedLights.count(finalName)) { out << MakeResponse(false, "rename", "Name already in use") << "\n"; return; }
                 BaseLight* lt = ltIt->second;
                 g_namedLights.erase(ltIt);
-                g_namedLights[newN] = lt;
-                out << MakeResponse(true, "rename", "'" + oldN + "' -> '" + newN + "'") << "\n";
+                g_namedLights[finalName] = lt;
+                out << MakeResponse(true, "rename", "'" + oldN + "' -> '" + finalName + "'") << "\n";
                 return;
             }
             out << MakeResponse(false, "rename", "Unknown '" + oldN + "'") << "\n";
@@ -607,7 +817,7 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer) {
     // clearscene
     reg.Register("clearscene", "clearscene", "Remove all objects and lights.",
         [](CmdContext& ctx, const std::vector<std::string>&, std::ostream& out) {
-            std::lock_guard<std::mutex> lock(*ctx.sceneMutex);
+            std::unique_lock<std::shared_mutex> lock(*ctx.sceneMutex);
             for (auto& [name, obj] : g_namedObjects) {
                 auto& objs = *ctx.sm->objects;
                 objs.erase(std::remove(objs.begin(), objs.end(), obj), objs.end());
@@ -637,6 +847,13 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer) {
                 out << MakeResponse(false, "obj", "Usage: obj <name> <path> [x] [y] [z]") << "\n";
                 return;
             }
+
+            std::string finalName = NameValidator::GetFinalName(args[0], g_namedObjects, g_namedLights);
+            // If name was changed, log it
+            if (finalName != args[0]) {
+                out << MakeResponse(true, "plane", "Name '" + args[0] + "' changed to '" + finalName + "'") << "\n";
+            }
+
             double x = 0, y = 0, z = 0;
             if (args.size() >= 5) { ParseDouble(args[2], x); ParseDouble(args[3], y); ParseDouble(args[4], z); }
             // Strip surrounding quotes if present
@@ -657,10 +874,12 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer) {
                 return;
             }
             obj->transform.position = Vector3(x, y, z);
-            std::lock_guard<std::mutex> lock(*ctx.sceneMutex);
+            std::unique_lock<std::shared_mutex> lock(*ctx.sceneMutex);
             ctx.sm->objects->push_back(obj);
-            g_namedObjects[args[0]] = obj;
-            out << MakeResponse(true, "obj", "'" + args[0] + "' imported from " + path) << "\n";
+
+            g_namedObjects[finalName] = obj;
+
+            out << MakeResponse(true, "obj", "'" + finalName + "' imported from " + path) << "\n";
         });
 
     // gltf — FIX 1 : on diffère l'import sur le thread principal
@@ -671,18 +890,24 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer) {
                 out << MakeResponse(false, "gltf", "Usage: gltf <name> <path> [x] [y] [z]") << "\n";
                 return;
             }
+
+            std::string finalName = NameValidator::GetFinalName(args[0], g_namedObjects, g_namedLights);
+            // If name was changed, log it
+            if (finalName != args[0]) {
+                out << MakeResponse(true, "plane", "Name '" + args[0] + "' changed to '" + finalName + "'") << "\n";
+            }
+
             double x = 0, y = 0, z = 0;
             if (args.size() >= 5) { ParseDouble(args[2], x); ParseDouble(args[3], y); ParseDouble(args[4], z); }
             std::string path = args[1];
             if (!path.empty() && path.front() == '"') path = path.substr(1);
             if (!path.empty() && path.back() == '"') path.pop_back();
 
-            // FIX 1 : au lieu de faire l'import ici (mauvais contexte GL), on le met en file
             {
                 std::lock_guard<std::mutex> lk(g_deferredTasksMutex);
-                g_deferredGLTFTasks.push_back({ args[0], path, x, y, z });
+                g_deferredGLTFTasks.push_back({ finalName, path, x, y, z });
             }
-            out << MakeResponse(true, "gltf", "'" + args[0] + "' queued for import") << "\n";
+            out << MakeResponse(true, "gltf", "'" + finalName + "' queued for import") << "\n";
         });
 
     // sphere — spawn a UV sphere approximated with a scaled cube (replace with real sphere mesh if available)
@@ -694,12 +919,20 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer) {
                 out << MakeResponse(false, "sphere", "Usage: sphere <name> <x> <y> <z> [radius=0.5] [rings=20] [segments=20] [color]") << "\n";
                 return;
             }
+
+            std::string finalName = NameValidator::GetFinalName(args[0], g_namedObjects, g_namedLights);
+            // If name was changed, log it
+            if (finalName != args[0]) {
+                out << MakeResponse(true, "plane", "Name '" + args[0] + "' changed to '" + finalName + "'") << "\n";
+            }
+
             double x, y, z, radius = 0.5;
             int rings = 20, segments = 20;
             if (!ParseDouble(args[1], x) || !ParseDouble(args[2], y) || !ParseDouble(args[3], z)) {
                 out << MakeResponse(false, "sphere", "Bad coords") << "\n";
                 return;
             }
+
             if (args.size() >= 5) ParseDouble(args[4], radius);
             if (args.size() >= 6) ParseInt(args[5], rings);
             if (args.size() >= 7) ParseInt(args[6], segments);
@@ -709,7 +942,7 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer) {
             rings = std::clamp(rings, 3, 100);
             segments = std::clamp(segments, 3, 100);
 
-            std::lock_guard<std::mutex> lock(*ctx.sceneMutex);
+            std::unique_lock<std::shared_mutex> lock(*ctx.sceneMutex);
             // Use the proper Sphere class
             BaseObject* obj = new HonHengine::Sphere(Vector3(radius, radius, radius),
                 Vector3(x, y, z),
@@ -717,14 +950,15 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer) {
                 new Material(0, 0, col, colBlack),
                 segments, rings);
             ctx.sm->objects->push_back(obj);
-            g_namedObjects[args[0]] = obj;
+
+            g_namedObjects[finalName] = obj;
 
             std::ostringstream d;
             d << std::fixed << std::setprecision(4);
             d << JVec3("pos", x, y, z) << ",\"radius\":" << radius
                 << ",\"rings\":" << rings << ",\"segments\":" << segments
                 << ",\"color\":" << JStr(args.size() >= 8 ? args[7] : "white");
-            out << MakeResponse(true, "sphere", "'" + args[0] + "' spawned", d.str()) << "\n";
+            out << MakeResponse(true, "sphere", "'" + finalName + "' spawned", d.str()) << "\n";
         });
 
     // rect — spawn a flat rectangle (thin slab)
@@ -732,6 +966,13 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer) {
         "Spawn a flat rectangle.",
         [](CmdContext& ctx, const std::vector<std::string>& args, std::ostream& out) {
             if (args.size() < 4) { out << MakeResponse(false, "rect", "Usage: rect <name> <x> <y> <z> [w=5] [h=5] [color]") << "\n"; return; }
+
+            std::string finalName = NameValidator::GetFinalName(args[0], g_namedObjects, g_namedLights);
+            // If name was changed, log it
+            if (finalName != args[0]) {
+                out << MakeResponse(true, "plane", "Name '" + args[0] + "' changed to '" + finalName + "'") << "\n";
+            }
+
             double x, y, z, w = 5.0, h = 5.0;
             if (!ParseDouble(args[1], x) || !ParseDouble(args[2], y) || !ParseDouble(args[3], z)) {
                 out << MakeResponse(false, "rect", "Bad coords") << "\n"; return;
@@ -739,14 +980,104 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer) {
             if (args.size() >= 5) ParseDouble(args[4], w);
             if (args.size() >= 6) ParseDouble(args[5], h);
             Color col = args.size() >= 7 ? NameToColor(args[6]) : colWhite;
-            std::lock_guard<std::mutex> lock(*ctx.sceneMutex);
-            BaseObject* obj = new HonHengine::Rectangle(Vector3(w * 0.5, 0.025, h * 0.5), Vector3(x, y, z), Quaternion(),
+            std::unique_lock<std::shared_mutex> lock(*ctx.sceneMutex);
+            BaseObject* obj = new HonHengine::Rectangle(Vector3(w * 0.5, w * 0.5, h * 0.5), Vector3(x, y, z), Quaternion(),
                 new Material(0, 0, col, colBlack));
             ctx.sm->objects->push_back(obj);
-            g_namedObjects[args[0]] = obj;
+            g_namedObjects[finalName] = obj;
             std::ostringstream d; d << std::fixed << std::setprecision(4);
             d << JVec3("pos", x, y, z) << ",\"w\":" << w << ",\"h\":" << h << ",\"color\":" << JStr(args.size() >= 7 ? args[6] : "white");
-            out << MakeResponse(true, "rect", "'" + args[0] + "' spawned", d.str()) << "\n";
+            out << MakeResponse(true, "rect", "'" + finalName + "' spawned", d.str()) << "\n";
+        });
+
+    // ── attachscript <objectName> <scriptGUID> ────────────────────────────────
+    // Resolves the GUID to a source path via the captured AssetDatabase,
+    // creates a ScriptComponent, and pushes it onto the target object's scripts
+    // vector.  Thread-safe via g_sceneMutex.
+    reg.Register("attachscript",
+        "attachscript <objectName> <scriptGUID>",
+        "Attach a script asset (by GUID) to a named scene object.",
+        [assetDb, sceneMgr](CmdContext& ctx, const std::vector<std::string>& args, std::ostream& out) {
+            if (args.size() < 2) {
+                out << MakeResponse(false, "attachscript",
+                    "Usage: attachscript <objectName> <scriptGUID>") << "\n";
+                return;
+            }
+            const std::string& objName = args[0];
+            const std::string& guid = args[1];
+
+            // Resolve GUID → source path via the captured AssetDatabase
+            std::string srcPath;
+            if (assetDb) {
+                AssetRecord* rec = assetDb->FindByGUID(guid);
+                if (rec) srcPath = rec->path;
+            }
+            if (srcPath.empty()) srcPath = guid;  // fallback: use the GUID string as path
+
+            std::unique_lock<std::shared_mutex> lock(*ctx.sceneMutex);
+            auto it = g_namedObjects.find(objName);
+            if (it == g_namedObjects.end()) {
+                out << MakeResponse(false, "attachscript",
+                    "Unknown object '" + objName + "'") << "\n";
+                return;
+            }
+            BaseObject* obj = it->second;
+
+            ScriptComponent newComp;
+            newComp.scriptGUID = guid;
+            newComp.compiledPath = "";
+
+            ScriptManager* sm = sceneMgr ? sceneMgr->scriptManager.get() : nullptr;
+            if (sm && sm->LoadScript(guid, srcPath, newComp)) {
+                obj->scripts.push_back(newComp);
+                out << MakeResponse(true, "attachscript",
+                    "Script '" + guid + "' attached to '" + objName + "'") << "\n";
+            }
+            else {
+                // ScriptManager unavailable or load failed — record the component
+                // so the Inspector can still display and manage it.
+                obj->scripts.push_back(newComp);
+                out << MakeResponse(true, "attachscript",
+                    "Script component recorded for '" + objName +
+                    "' (runtime load skipped)") << "\n";
+            }
+        });
+
+    // ── setmaterial <objectName> <materialPath> ───────────────────────────────
+    // Replaces the object's material.  For .honmat files a placeholder white
+    // material is created (a full material asset pipeline can extend this).
+    // For any other path the same default is used.  Thread-safe.
+    reg.Register("setmaterial",
+        "setmaterial <objectName> <materialPath>",
+        "Assign a material asset to a named scene object.",
+        [](CmdContext& ctx, const std::vector<std::string>& args, std::ostream& out) {
+            if (args.size() < 2) {
+                out << MakeResponse(false, "setmaterial",
+                    "Usage: setmaterial <objectName> <materialPath>") << "\n";
+                return;
+            }
+            const std::string& objName = args[0];
+            const std::string& matPath = args[1];
+
+            std::unique_lock<std::shared_mutex> lock(*ctx.sceneMutex);
+            auto it = g_namedObjects.find(objName);
+            if (it == g_namedObjects.end()) {
+                out << MakeResponse(false, "setmaterial",
+                    "Unknown object '" + objName + "'") << "\n";
+                return;
+            }
+            BaseObject* obj = it->second;
+
+            // Delete the old material to avoid a leak
+            delete obj->material;
+            // Create a fresh default white material.  If a full .honmat loader
+            // is added later, insert it here based on the file extension.
+            obj->material = new Material(0, 0,
+                Color(255.0, 255.0, 255.0, 255.0),
+                Color(0.0, 0.0, 0.0, 255.0));
+
+            out << MakeResponse(true, "setmaterial",
+                "Material '" + matPath + "' assigned to '" + objName + "'") << "\n";
         });
 }
 
@@ -791,7 +1122,7 @@ struct SceneFBO {
         glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
         glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, depth);
         if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) std::cerr << "FBO incomplete!\n";
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     }
     void resize(int nw, int nh) {
         if (nw == w && nh == h) return;
@@ -803,10 +1134,6 @@ struct SceneFBO {
     void unbind() { glBindFramebuffer(GL_FRAMEBUFFER, 0); }
     void destroy() { if (fbo) glDeleteFramebuffers(1, &fbo); if (color) glDeleteTextures(1, &color); if (depth) glDeleteRenderbuffers(1, &depth); }
 };
-
-struct IDEObject { std::string name; float px = 0, py = 0, pz = 0; float sx = 1, sy = 1, sz = 1; float rw = 1, rx = 0, ry = 0, rz = 0; bool visible = true; bool locked = false; std::string shader; std::string tag; int cr = 255, cg = 255, cb = 255, ca = 255; };
-struct IDELight { std::string name; std::string lightType = "point"; float intensity = 1.f; int r = 255, g = 245, b = 209; float px = 0, py = 0, pz = 0; float rotx = 0, roty = 0, rotz = 0; };
-
 
 static void ShipGame(const std::string& projectDir,
     const std::string& outDir,
@@ -916,6 +1243,9 @@ struct HierarchyNode {
 struct IDEState {
     std::vector<IDEObject> objects;
     std::vector<IDELight> lights;
+    // Non-owning pointer to the ScriptManager that lives in sm->scriptManager.
+    // Ownership was moved there so GPURenderer::UpdateGameLogic can drive updates.
+    ScriptManager* scriptManager = nullptr;
     float editorFov = 60.f; // editor viewport camera FOV
 
     // MODIFIED: sélection multiple au lieu de selectedObject
@@ -951,6 +1281,7 @@ struct IDEState {
     float newObjHalf = 0.5f;
     int newObjColor = 0;
     bool showAddLight = false;
+    float newLightPos[3] = {};
     char newLightName[64] = "light1";
     float newLightIntensity = 1.f;
     float newLightColor[3] = { 1.f,0.96f,0.82f };
@@ -1061,6 +1392,16 @@ struct IDEState {
 
     // NEW: Box selection
     BoxSelectionState boxSelect;
+
+    // ── Import Settings Overlay ───────────────────────────────────────────────
+    // Floating temporary panel shown above the Inspector when an asset is
+    // dropped onto the viewport (or focused in the browser).
+    bool  showImportOverlay = false;
+    std::string importOverlayGUID;          // which asset's settings to show
+    bool  importOverlayHasImportBtn = false;// whether to show the "Import" button
+    std::function<void()> importOverlayOnImport; // callback for Import button
+    ImVec2 importOverlayAnchorPos = {};    // Inspector window top-left (updated each frame)
+    ImVec2 importOverlayAnchorSize = {};    // Inspector window size     (updated each frame)
 };
 
 // =============================================================================
@@ -1756,6 +2097,20 @@ static void DrawHierarchyNodes(std::vector<HierarchyNode>& nodes, IDEState& ide,
 
         ImGui::TreeNodeEx(("##hnode_" + node.name).c_str(), flags);
         bool rowClicked = ImGui::IsItemClicked(ImGuiMouseButton_Left) && !locked;
+
+        // ── Drag source: drag this node to the Viewport to reposition it ────
+        if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_None)) {
+            HierarchyDragPayload hdp{};
+            strncpy_s(hdp.name, sizeof(hdp.name),
+                node.name.c_str(), sizeof(hdp.name) - 1);
+            hdp.isLight = isLight;
+            ImGui::SetDragDropPayload(kHierarchyDragPayload, &hdp, sizeof(hdp));
+            ImGui::TextUnformatted(isLight ? "Move Light" : "Move Object");
+            ImGui::SameLine();
+            ImGui::TextUnformatted(node.name.c_str());
+            ImGui::EndDragDropSource();
+        }
+
         ImGui::SameLine();
         ImGui::TextUnformatted(label.c_str());
         bool textClicked = ImGui::IsItemClicked(ImGuiMouseButton_Left) && !locked;
@@ -1771,6 +2126,58 @@ static void DrawHierarchyNodes(std::vector<HierarchyNode>& nodes, IDEState& ide,
                 ide.selection.SetSingle(node.name);
             }
             ide.bus.send("inspect " + ide.selection.Primary());
+        }
+
+        // ── Drop target: accept asset payloads to attach scripts/materials ──
+        if (ImGui::BeginDragDropTarget()) {
+            if (const ImGuiPayload* assetPayload =
+                ImGui::AcceptDragDropPayload(kAssetDragPayload)) {
+                auto* ap = (AssetDragPayload*)assetPayload->Data;
+                AssetRecord* rec = ide.assetDb.FindByGUID(std::string(ap->guidStr));
+                if (rec) {
+                    if (rec->type == AssetType::Script && !isLight) {
+                        // Attach script to the BaseObject
+                        BaseObject* baseObj = nullptr;
+                        {
+                            std::shared_lock<std::shared_mutex> lock(g_sceneMutex);
+                            auto oit = g_namedObjects.find(node.name);
+                            if (oit != g_namedObjects.end()) baseObj = oit->second;
+                        }
+                        if (baseObj) {
+                            ScriptComponent newComp;
+                            newComp.scriptGUID = ap->guidStr;
+                            if (ide.scriptManager &&
+                                ide.scriptManager->LoadScript(ap->guidStr, rec->path, newComp)) {
+                                baseObj->scripts.push_back(newComp);
+                                ide.log.push(ConsoleLog::REPLY_OK,
+                                    "[Hierarchy] Script '" + rec->displayName
+                                    + "' attached to '" + node.name + "'");
+                            }
+                            else {
+                                ide.log.push(ConsoleLog::REPLY_ERR,
+                                    "[Hierarchy] Failed to attach script " + rec->displayName);
+                            }
+                            ide.sceneDirty = true;
+                        }
+                    }
+                    else if (rec->type == AssetType::Material) {
+                        char cmd[512];
+                        std::snprintf(cmd, sizeof(cmd), "setmaterial %s %s",
+                            node.name.c_str(), rec->path.c_str());
+                        ide.bus.send(cmd);
+                        ide.sceneDirty = true;
+                    }
+                    else if (rec->type == AssetType::Model ||
+                        rec->type == AssetType::Prefab) {
+                        // Open import overlay for 3D assets
+                        ide.importOverlayGUID = ap->guidStr;
+                        ide.showImportOverlay = true;
+                        ide.importOverlayHasImportBtn = false;
+                        ide.importOverlayOnImport = nullptr;
+                    }
+                }
+            }
+            ImGui::EndDragDropTarget();
         }
 
         // Context menu (identique, mais agit sur la sélection)
@@ -2287,6 +2694,114 @@ static void DrawHierarchyPanel(IDEState& ide)
     ImGui::PopStyleColor();
 }
 
+static void DrawScriptsInspector(IDEState& ide, const std::string& target, BaseObject* obj) {
+    if (!obj) return;
+
+    ImGui::SeparatorText("Scripts");
+
+    // Drop a script asset directly onto this section
+    if (ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kAssetDragPayload)) {
+            auto* ap = (AssetDragPayload*)payload->Data;
+            if (ap->type == AssetType::Script) {
+                AssetRecord* rec = ide.assetDb.FindByGUID(std::string(ap->guidStr));
+                if (rec) {
+                    ScriptComponent newComp;
+                    newComp.scriptGUID = ap->guidStr;
+                    if (ide.scriptManager && ide.scriptManager->LoadScript(ap->guidStr, rec->path, newComp))
+                        obj->scripts.push_back(newComp);
+                    else
+                        ide.log.push(ConsoleLog::REPLY_ERR,
+                            "[Inspector] Failed to attach script " + rec->displayName);
+                }
+            }
+        }
+        ImGui::EndDragDropTarget();
+    }
+
+    // Add Script button
+    if (ImGui::Button("+ Add Script", { -1, 0 })) {
+        ImGui::OpenPopup("AddScriptPopup");
+    }
+    if (ImGui::BeginPopup("AddScriptPopup")) {
+        // Show all script assets from the database
+        for (auto& [guid, rec] : ide.assetDb.records) {
+            if (rec.type == AssetType::Script) {
+                if (ImGui::MenuItem(rec.displayName.c_str())) {
+                    // Attach this script
+                    ScriptComponent newComp;
+                    newComp.scriptGUID = guid;
+                    newComp.compiledPath = ""; // will be set by LoadScript
+                    if (ide.scriptManager->LoadScript(guid, rec.path, newComp)) {
+                        obj->scripts.push_back(newComp);
+                        // Set game object pointer on the script instance
+                        // We need a wrapper – for simplicity we store the BaseObject pointer.
+                        // Extend IScript with SetGameObject or add a member.
+                    }
+                    else {
+                        ide.log.push(ConsoleLog::REPLY_ERR,
+                            "Failed to load script " + rec.displayName);
+                    }
+                }
+            }
+        }
+        ImGui::EndPopup();
+    }
+
+    // List attached scripts
+    for (size_t i = 0; i < obj->scripts.size(); ++i) {
+        auto& comp = obj->scripts[i];
+        // Get asset record for display name
+        AssetRecord* rec = ide.assetDb.FindByGUID(comp.scriptGUID);
+        std::string name = rec ? rec->displayName : comp.scriptGUID;
+
+        ImGui::PushID(i);
+        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4{ 0.2f, 0.3f, 0.4f, 1.0f });
+        if (ImGui::CollapsingHeader(name.c_str())) {
+            ImGui::PopStyleColor();
+            // Exposed variables editing
+            for (auto& var : comp.exposedVars) {
+                ImGui::PushID(&var);
+                switch (var.type) {
+                case ScriptVarType::Int:
+                    if (ImGui::DragInt(var.name.c_str(), &var.value.i, 0.1f))
+                        var.dirty = true;
+                    break;
+                case ScriptVarType::Float:
+                    if (ImGui::DragFloat(var.name.c_str(), &var.value.f, 0.01f))
+                        var.dirty = true;
+                    break;
+                case ScriptVarType::Bool:
+                    if (ImGui::Checkbox(var.name.c_str(), &var.value.b))
+                        var.dirty = true;
+                    break;
+                case ScriptVarType::String: {
+                    char buf[256];
+                    strncpy_s(buf, sizeof(buf), var.value.s ? var.value.s : "", _TRUNCATE);
+                    if (ImGui::InputText(var.name.c_str(), buf, sizeof(buf))) {
+                        delete[] var.value.s;
+                        var.value.s = new char[strlen(buf) + 1];
+                        strcpy_s(var.value.s, strlen(buf) + 1, buf);
+                        var.dirty = true;
+                    }
+                    break;
+                }
+                }
+                ImGui::PopID();
+            }
+            if (ImGui::Button("Remove Script")) {
+                ide.scriptManager->UnloadScript(comp);
+                obj->scripts.erase(obj->scripts.begin() + i);
+                i--;
+            }
+        }
+        else {
+            ImGui::PopStyleColor();
+        }
+        ImGui::PopID();
+    }
+}
+
 static void DrawInspectorPanel(IDEState& ide)
 {
     ImGui::BeginChild("##insp", { 0,0 }, false);
@@ -2313,13 +2828,42 @@ static void DrawInspectorPanel(IDEState& ide)
         {
             IM_ASSERT(payload->DataSize == sizeof(AssetDragPayload));
             const AssetDragPayload& drop = *static_cast<const AssetDragPayload*>(payload->Data);
-            ide.assetBrowser.focusedGUID = drop.guidStr;
-            ide.assetBrowser.selectedGUIDs = { std::string(drop.guidStr) };
-            if (drop.type == AssetType::Model && inspectionTarget.empty()) {
-                std::string path(drop.path);
-                ide.log.push(ConsoleLog::INFO,
-                    "[Inspector] Asset '" + fs::path(path).filename().string()
-                    + "' dropped — open Asset Browser to adjust import settings.");
+            std::string guidStr(drop.guidStr);
+            std::string path(drop.path);
+
+            if (drop.type == AssetType::Script && !inspectionTarget.empty())
+            {
+                // Drop a script directly onto a scene object in the Inspector header
+                BaseObject* baseObj = nullptr;
+                {
+                    std::shared_lock<std::shared_mutex> lock(g_sceneMutex);
+                    auto it = g_namedObjects.find(inspectionTarget);
+                    if (it != g_namedObjects.end()) baseObj = it->second;
+                }
+                if (baseObj)
+                {
+                    AssetRecord* rec = ide.assetDb.FindByGUID(guidStr);
+                    if (rec)
+                    {
+                        ScriptComponent newComp;
+                        newComp.scriptGUID = guidStr;
+                        if (ide.scriptManager && ide.scriptManager->LoadScript(guidStr, rec->path, newComp))
+                            baseObj->scripts.push_back(newComp);
+                        else
+                            ide.log.push(ConsoleLog::REPLY_ERR,
+                                "[Inspector] Failed to attach script " + rec->displayName);
+                    }
+                }
+            }
+            else
+            {
+                // For any other asset type, open the import overlay
+                ide.assetBrowser.focusedGUID = guidStr;
+                ide.assetBrowser.selectedGUIDs = { guidStr };
+                ide.importOverlayGUID = guidStr;
+                ide.showImportOverlay = true;
+                ide.importOverlayHasImportBtn = false;
+                ide.importOverlayOnImport = nullptr;
             }
         }
         ImGui::EndDragDropTarget();
@@ -2409,6 +2953,21 @@ static void DrawInspectorPanel(IDEState& ide)
     if (!isLight && pObj) {
         DrawRendererInspector(ide, inspectionTarget, pObj);
     }
+
+    // Scripts component
+    if (!isLight && pObj) {
+        BaseObject* baseObj = nullptr;
+        std::shared_lock<std::shared_mutex> lock(g_sceneMutex);
+        auto it = g_namedObjects.find(inspectionTarget);
+        if (it != g_namedObjects.end()) baseObj = it->second;
+        lock.unlock();
+        DrawScriptsInspector(ide, inspectionTarget, baseObj);
+    }
+
+    // ── Asset Import Settings ─────────────────────────────────────────────────
+    // Import settings are now shown in the floating ImportSettingsOverlay panel
+    // above the Inspector (triggered by asset focus / drag-drop).
+    // The overlay is drawn in MainScene_Run after all panels.
 
     ImGui::EndChild();
 }
@@ -2534,16 +3093,11 @@ static void UpdateEditorCamera(IDEState& ide, float dt, int vw, int vh,
 
     // --- ZOOM : Molette de souris (SLOWER) ---
     float wheel = io.MouseWheel;
-    if (wheel != 0.0f) {
-        if (ide.viewportOrtho) {
-            ide.orthoSize = (std::max)(0.5f, ide.orthoSize - wheel * 1.0f);
-        }
-        else {
-            // Slower zoom - use exponential scale for better control
-            float zoomSpeed = 2.0f;  // Reduced from 5.0f
-            float newFov = ide.editorFov - wheel * zoomSpeed;
-            ide.editorFov = std::clamp(newFov, 10.0f, 120.0f);
-        }
+    if (wheel != 0.0f && mouseInViewport) {
+        // Move camera along its forward direction
+        float speed = 2.0f;  // adjust to taste
+        Vector3 forward = cam->transform.forward();
+        cam->transform.position = cam->transform.position + forward * (wheel * speed);
     }
 
     // --- Gestion des états de souris ---
@@ -2562,7 +3116,7 @@ static void UpdateEditorCamera(IDEState& ide, float dt, int vw, int vh,
     if (rightMouseDown) {
         if (wasRightDragging) {
             mouseDelta.x = currentMousePos.x - lastMousePos.x;
-            mouseDelta.y = currentMousePos.y - lastMousePos.y;
+            mouseDelta.y = (currentMousePos.y - lastMousePos.y) * -1;
         }
         lastMousePos = currentMousePos;
         wasRightDragging = true;
@@ -2584,106 +3138,89 @@ static void UpdateEditorCamera(IDEState& ide, float dt, int vw, int vh,
         wasMiddleDragging = false;
     }
 
-    // --- ORBITE : Clic droit ---
+    // --- ROTATION : Clic droit (rotation autour de la caméra, pas du pivot) ---
     if (rightMouseDown && !io.KeyAlt && (mouseDelta.x != 0 || mouseDelta.y != 0)) {
         // Accelerative rotation: slow for small movements, faster for quick flicks.
-        // Scale by |delta|^1.6 so tiny nudges stay precise and fast swipes orbit quickly.
+        // ~0.17°/px at 1 px, scales to ~4° at 20 px;
         auto accel = [](float raw) -> float {
             float sign = raw < 0.f ? -1.f : 1.f;
             float mag = std::abs(raw);
-            return sign * 0.0004f * std::pow(mag, 1.6f);
+            return sign * 0.003f * std::pow(mag, 1.1f);
             };
         float deltaX = accel(mouseDelta.x);
         float deltaY = accel(mouseDelta.y);
 
-        // Calculer la position de la caméra par rapport au pivot
-        glm::vec3 camPos = cam->transform.position.ToGLM();
-        glm::vec3 dir = camPos - pivotPoint;
-        float distance = glm::length(dir);
+        // Rotation around camera's own position (not around a pivot)
+        // Get current camera forward direction
+        glm::vec3 forward = cam->transform.forward().ToGLM();
+        glm::vec3 right = cam->transform.right().ToGLM();
+        glm::vec3 up = cam->transform.up().ToGLM();
 
-        if (distance > 0.01f) {
-            // Rotation horizontale (autour de l'axe Y global)
-            // When the camera is below the pivot (dir.y > 0 means cam is above pivot,
-            // dir points from pivot TO cam), the yaw axis stays consistent.
-            // cross(dir, axisY) flips sign when dir.y approaches +/-distance (poles),
-            // so we derive the right axis BEFORE applying yaw, using the current dir.
-            glm::vec3 axisY(0.0f, 1.0f, 0.0f);
-            glm::quat rotY = glm::angleAxis(-deltaX, axisY);
-            dir = rotY * dir;
+        // Horizontal rotation (yaw) around world Y axis
+        glm::vec3 axisY(0.0f, 1.0f, 0.0f);
+        glm::quat rotY = glm::angleAxis(-deltaX, axisY);
+        forward = rotY * forward;
+        right = rotY * right;
+        up = glm::normalize(glm::cross(right, forward));
 
-            // Compute right AFTER yaw so the pitch axis is perpendicular to the
-            // already-yawed dir — prevents roll bleed on diagonal mouse movement.
-            glm::vec3 right = glm::normalize(glm::cross(axisY, dir));
-            glm::quat rotX = glm::angleAxis(-deltaY, right);
-            dir = rotX * dir;
+        // Vertical rotation (pitch) around camera's right axis
+        glm::quat rotX = glm::angleAxis(-deltaY, right);
+        forward = rotX * forward;
+        up = rotX * up;
 
-            // Limiter l'angle vertical pour éviter le flip
-            glm::vec3 dirNorm = glm::normalize(dir);
-            float pitch = glm::asin(glm::clamp(dirNorm.y, -1.f, 1.f));
-            const float maxPitch = glm::radians(80.0f);
-            if (std::abs(pitch) > maxPitch) {
-                float sign = pitch > 0.f ? 1.f : -1.f;
-                dir.y = glm::sin(sign * maxPitch) * distance;
-                float targetHoriz = glm::cos(maxPitch) * distance;
-                float horizMag = glm::sqrt(dirNorm.x * dirNorm.x + dirNorm.z * dirNorm.z);
-                if (horizMag > 0.001f) {
-                    dir.x = (dirNorm.x / horizMag) * targetHoriz;
-                    dir.z = (dirNorm.z / horizMag) * targetHoriz;
-                }
-                else {
-                    dir.x = targetHoriz;
-                    dir.z = 0;
-                }
+        // Normalize to prevent drift
+        forward = glm::normalize(forward);
+
+        // Limiter l'angle vertical pour éviter le flip
+        float pitch = glm::asin(glm::clamp(forward.y, -1.f, 1.f));
+        const float maxPitch = glm::radians(89.0f);
+        if (std::abs(pitch) > maxPitch) {
+            float sign = forward.y > 0.f ? 1.f : -1.f;
+            forward.y = glm::sin(sign * maxPitch);
+            float horizMag = glm::sqrt(forward.x * forward.x + forward.z * forward.z);
+            float targetHoriz = glm::cos(sign * maxPitch);
+            if (horizMag > 0.001f) {
+                forward.x = (forward.x / horizMag) * targetHoriz;
+                forward.z = (forward.z / horizMag) * targetHoriz;
             }
-
-            // Appliquer la nouvelle position
-            cam->transform.position = Vector3(pivotPoint.x + dir.x,
-                pivotPoint.y + dir.y,
-                pivotPoint.z + dir.z);
-
-            // Faire regarder la caméra vers le pivot
-            cam->transform.rotation = Quaternion::LookRotation(
-                Vector3(pivotPoint.x - cam->transform.position.x,
-                    pivotPoint.y - cam->transform.position.y,
-                    pivotPoint.z - cam->transform.position.z));
+            else {
+                forward.x = targetHoriz;
+                forward.z = 0;
+            }
+            forward = glm::normalize(forward);
         }
+
+        // Update camera rotation to look in the new forward direction
+        cam->transform.rotation = Quaternion::LookRotation(
+            Vector3(forward.x, forward.y, forward.z));
     }
 
-    // --- PAN : Clic milieu ---
     else if (middleMouseDown && (mouseDelta.x != 0 || mouseDelta.y != 0)) {
-        // Get current camera position and view direction
         glm::vec3 camPos = cam->transform.position.ToGLM();
         glm::vec3 forward = cam->transform.forward().ToGLM();
         glm::vec3 right = cam->transform.right().ToGLM();
         glm::vec3 up = cam->transform.up().ToGLM();
 
-        // Calculate pan speed based on distance to pivot and screen size
         float distanceToPivot = glm::distance(camPos, pivotPoint);
-
-        // Adaptive pan speed - slower when far, faster when close
         float panSpeed;
         if (ide.viewportOrtho) {
             panSpeed = ide.orthoSize * 0.002f;
         }
         else {
-            // Use distance-based scaling with minimum and maximum limits
             panSpeed = std::clamp(distanceToPivot * 0.002f, 0.5f, 2.0f);
         }
 
-        // Apply pan (move camera and pivot together for consistent behavior)
+        // INVERTED: horizontal follows mouse, vertical is flipped
         float deltaX = -mouseDelta.x * panSpeed;
-        float deltaY = mouseDelta.y * panSpeed;
+        float deltaY = -mouseDelta.y * panSpeed;
 
         glm::vec3 panDelta = right * deltaX + up * deltaY;
 
-        // Move both camera and pivot
         cam->transform.position = Vector3(
             camPos.x + panDelta.x,
             camPos.y + panDelta.y,
             camPos.z + panDelta.z
         );
-
-        // Also move the pivot point so orbit stays consistent
         pivotPoint += panDelta;
     }
 }
@@ -2820,6 +3357,7 @@ static void HandleShortcuts(IDEState& ide, bool& quitRequested)
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_P)) {
         ide.playing = !ide.playing;
         SDL_SetRelativeMouseMode(ide.playing ? SDL_TRUE : SDL_FALSE);
+        ide.renderer->SetPlayMode(ide.playing);
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_F11)) {
@@ -2837,6 +3375,7 @@ static void HandleShortcuts(IDEState& ide, bool& quitRequested)
         else if (ide.playing) {
             ide.playing = false;
             SDL_SetRelativeMouseMode(SDL_FALSE);
+            ide.renderer->SetPlayMode(false);
         }
         else if (!ide.selection.Empty()) {
             ide.selection.Clear();
@@ -3009,6 +3548,40 @@ static void DrawSelectionToast(IDEState& ide, const ImVec2& imagePos, const ImVe
         IM_COL32(40, 45, 60, 200), 4.0f);
     dl->AddText(ImVec2(toastPos.x + 6, toastPos.y + 3),
         IM_COL32(220, 220, 240, 255), selText.c_str());
+}
+
+
+static glm::vec3 GetCameraSpawnPos(IDEState& ide, float dist = 6.f)
+{
+    if (!ide.sm || !ide.sm->currentCamera) return glm::vec3(0.f);
+    Camera* cam = ide.sm->currentCamera;
+    glm::vec3 pos = cam->transform.position.ToGLM();
+    glm::vec3 fwd = glm::normalize(cam->transform.forward().ToGLM());
+    return pos + fwd * dist;
+}
+
+
+static void DrawCameraPositionOverlay(IDEState& ide, const ImVec2& imagePos, const ImVec2& imageSize)
+{
+    Camera* cam = ide.sm ? ide.sm->currentCamera : nullptr;
+    if (!cam) return;
+
+    glm::vec3 p = cam->transform.position.ToGLM();
+    char buf[80];
+    std::snprintf(buf, sizeof(buf), "  CAM  X %.2f  Y %.2f  Z %.2f  ", p.x, p.y, p.z);
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 textSize = ImGui::CalcTextSize(buf);
+    float padX = 10.f, padY = 10.f;
+    ImVec2 boxMin = ImVec2(imagePos.x + imageSize.x - textSize.x - padX * 2.f,
+        imagePos.y + imageSize.y - textSize.y - padY * 2.f);
+    ImVec2 boxMax = ImVec2(imagePos.x + imageSize.x - padX,
+        imagePos.y + imageSize.y - padY);
+
+    dl->AddRectFilled(boxMin, boxMax, IM_COL32(20, 22, 32, 210), 5.f);
+    dl->AddRect(boxMin, boxMax, IM_COL32(70, 80, 110, 180), 5.f, 0, 1.f);
+    dl->AddText(ImVec2(boxMin.x + padX, boxMin.y + padY * 0.5f),
+        IM_COL32(140, 200, 255, 255), buf);
 }
 
 static void DrawViewportPanel(IDEState& ide, float dt)
@@ -3266,6 +3839,155 @@ static void DrawViewportPanel(IDEState& ide, float dt)
         }
     }
 
+    // ── Viewport drop targets ─────────────────────────────────────────────────
+    // Must be called on the Image item that was just rendered so that ImGui
+    // correctly reports the correct drop region.
+    if (ImGui::BeginDragDropTarget()) {
+        // ── 1. Hierarchy item → move object/light to world position ──────────
+        if (const ImGuiPayload* payload =
+            ImGui::AcceptDragDropPayload(kHierarchyDragPayload)) {
+            auto* hp = (HierarchyDragPayload*)payload->Data;
+            Camera* cam = ide.sm->currentCamera;
+            glm::mat4 view = cam->transform.GetViewMatrix();
+            glm::mat4 proj;
+            if (ide.viewportOrtho) {
+                float aspect = (float)vw / (float)vh;
+                proj = glm::ortho(-ide.orthoSize * aspect, ide.orthoSize * aspect,
+                    -ide.orthoSize, ide.orthoSize, 0.1f, 1000.f);
+            }
+            else {
+                proj = glm::perspective(glm::radians(ide.editorFov),
+                    (float)vw / (float)vh, 0.1f, 1000.f);
+            }
+
+            // Build a ray from the camera through the pixel under the mouse.
+            // NDC coords: x in [-1,1] left→right, y in [-1,1] bottom→top.
+            ImVec2 mousePos = ImGui::GetMousePos();
+            float ndcX = (mousePos.x - imagePos.x) / imageSize.x * 2.f - 1.f;
+            float ndcY = 1.f - (mousePos.y - imagePos.y) / imageSize.y * 2.f;
+
+            // Unproject two NDC points (near/far) into world space.
+            glm::mat4 invVP = glm::inverse(proj * view);
+            auto unproject = [&](float nx, float ny, float nz) {
+                glm::vec4 clip(nx, ny, nz, 1.f);
+                glm::vec4 world = invVP * clip;
+                if (std::abs(world.w) > 1e-7f) world /= world.w;
+                return glm::vec3(world);
+                };
+            glm::vec3 rayNear = unproject(ndcX, ndcY, -1.f);
+            glm::vec3 rayFar = unproject(ndcX, ndcY, 1.f);
+            glm::vec3 rayDir = glm::normalize(rayFar - rayNear);
+            glm::vec3 rayOrig = cam->transform.position.ToGLM();
+
+            // Intersect with horizontal ground plane Y = 0.
+            // ray(t) = rayOrig + t * rayDir  →  y=0  →  t = -rayOrig.y / rayDir.y
+            if (std::abs(rayDir.y) > 1e-5f) {
+                float t = -rayOrig.y / rayDir.y;
+                if (t > 0.f) {
+                    glm::vec3 hit = rayOrig + rayDir * t;
+                    char cmd[256];
+                    std::snprintf(cmd, sizeof(cmd), "move %s %.3f %.3f %.3f",
+                        hp->name, hit.x, hit.y, hit.z);
+                    ide.bus.send(cmd);
+                    ide.sceneDirty = true;
+                    RefreshSceneList(ide);
+                }
+            }
+        }
+
+        // ── 2. Asset payload → instantiate or show import overlay ────────────
+        if (const ImGuiPayload* p =
+            ImGui::AcceptDragDropPayload(kAssetDragPayload)) {
+            auto* ap = (AssetDragPayload*)p->Data;
+            std::string path(ap->path);
+            std::string ext = fs::path(path).extension().string();
+            std::string stem = fs::path(path).stem().string();
+
+            // Generate unique name
+            std::string objName = stem;
+            {
+                int n = 1;
+                while (g_namedObjects.count(objName) || g_namedLights.count(objName))
+                    objName = stem + "_" + std::to_string(n++);
+            }
+
+            glm::vec3 dropPos = GetCameraSpawnPos(ide);
+            char posBuf[64];
+            std::snprintf(posBuf, sizeof(posBuf), "%.3f %.3f %.3f",
+                dropPos.x, dropPos.y, dropPos.z);
+
+            if (ap->type == AssetType::Prefab || ext == ".honprefab") {
+                // Prefab: add to scene immediately
+                std::string cmd = "gltf " + objName + " \"" + path + "\" " + posBuf;
+                ide.log.push(ConsoleLog::CMD, "> " + cmd);
+                ide.bus.send(cmd);
+                ide.pendingSelection = objName;
+                ide.sceneDirty = true;
+                if (!ide.assetDb.FindByPath(path))
+                    ide.assetDb.Register(path);
+                ide.assetBrowser.hasPendingDrop = true;
+                ide.assetBrowser.pendingDrop = *ap;
+                RefreshSceneList(ide);
+            }
+            else if (ap->type == AssetType::Model ||
+                ext == ".obj" || ext == ".gltf" || ext == ".glb" ||
+                ext == ".fbx" || ext == ".dae")
+            {
+                // 3-D model: open the Import Settings overlay with an Import button
+                AssetRecord* rec = ide.assetDb.FindByPath(path);
+                if (!rec) rec = &ide.assetDb.Register(path);
+
+                ide.importOverlayGUID = rec->guid.ToString();
+                ide.showImportOverlay = true;
+                ide.importOverlayHasImportBtn = true;
+
+                // Capture everything needed for the deferred import
+                std::string capturedCmd_base = ext == ".obj"
+                    ? "obj " + objName + " \"" + path + "\" " + posBuf
+                    : "gltf " + objName + " \"" + path + "\" " + posBuf;
+                std::string capturedName = objName;
+                std::string capturedPath = path;
+                AssetDragPayload capturedPayload = *ap;
+
+                ide.importOverlayOnImport = [&ide, capturedCmd_base, capturedName,
+                    capturedPath, capturedPayload]() mutable
+                    {
+                        AssetRecord* r = ide.assetDb.FindByPath(capturedPath);
+                        float scale = (r && r->type == AssetType::Model)
+                            ? r->modelSettings.importScale : 1.0f;
+
+                        ide.log.push(ConsoleLog::CMD, "> " + capturedCmd_base);
+                        ide.bus.send(capturedCmd_base);
+                        if (scale != 1.0f) {
+                            char sb[128];
+                            std::snprintf(sb, sizeof(sb), "scale %s %.4f %.4f %.4f",
+                                capturedName.c_str(), scale, scale, scale);
+                            ide.bus.send(sb);
+                        }
+                        ide.pendingSelection = capturedName;
+                        ide.sceneDirty = true;
+                        if (!r) r = &ide.assetDb.Register(capturedPath);
+                        ide.assetBrowser.hasPendingDrop = true;
+                        ide.assetBrowser.pendingDrop = capturedPayload;
+                        RefreshSceneList(ide);
+                    };
+            }
+            else if (ap->type == AssetType::Scene || ext == ".honscene") {
+                ide.bus.send("clearscene");
+                ide.bus.send("loadscene " + path);
+                ide.sceneDirty = false;
+                RefreshSceneList(ide);
+            }
+            // Other types: just focus in the browser for now
+            else {
+                ide.assetBrowser.focusedGUID = std::string(ap->guidStr);
+                ide.assetBrowser.selectedGUIDs = { std::string(ap->guidStr) };
+            }
+        }
+
+        ImGui::EndDragDropTarget();
+    }
+
     // Toolbar overlay
     DrawViewportToolbar(ide, imagePos, imageSize);
 
@@ -3277,6 +3999,11 @@ static void DrawViewportPanel(IDEState& ide, float dt)
     // Selected object info toast
     if (!ide.selection.Empty() && !ide.playing) {
         DrawSelectionToast(ide, imagePos, imageSize);
+    }
+
+    // Camera position overlay (always visible in edit mode)
+    if (!ide.playing) {
+        DrawCameraPositionOverlay(ide, imagePos, imageSize);
     }
 
     // Update editor camera (orbite, pan, zoom)
@@ -3297,7 +4024,7 @@ static void DrawViewportPanel(IDEState& ide, float dt)
 
 static void DrawConsolePanel(IDEState& ide)
 {
-    ImGui::BeginChild("##console_log", { 0,-35 }, false, ImGuiWindowFlags_HorizontalScrollbar);
+    ImGui::BeginChild("##console_log", { 0,-70 }, false, ImGuiWindowFlags_HorizontalScrollbar);
     {
         std::lock_guard<std::mutex> lk(ide.log.mtx);
         for (auto& e : ide.log.entries)
@@ -3314,7 +4041,6 @@ static void DrawConsolePanel(IDEState& ide)
         if (ide.log.autoScroll && ImGui::GetScrollY() >= ImGui::GetScrollMaxY())
             ImGui::SetScrollHereY(1.0f);
 
-        // --- Console context menu ---
         if (ImGui::BeginPopupContextWindow("ConsoleContext")) {
             if (ImGui::MenuItem("Clear Console")) {
                 std::lock_guard<std::mutex> lk(ide.log.mtx);
@@ -3328,19 +4054,74 @@ static void DrawConsolePanel(IDEState& ide)
     }
     ImGui::EndChild();
 
-    ImGui::SetNextItemWidth(-80.f);
-    bool enter = ImGui::InputText("##cmdinput", ide.cmdInput, sizeof(ide.cmdInput),
-        ImGuiInputTextFlags_EnterReturnsTrue);
+    // Multi-line input area (3 lines tall)
+    ImGui::PushItemWidth(-80.f);
+    bool enter = ImGui::InputTextMultiline("##cmdinput", ide.cmdInput, sizeof(ide.cmdInput),
+        ImVec2(-1, 60),
+        ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CtrlEnterForNewLine);
+    ImGui::PopItemWidth();
     ImGui::SameLine();
-    bool send = ImGui::Button("Send");
+
+    // Send button
+    bool send = ImGui::Button("Send", ImVec2(60, 60));
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Execute all commands in the input box\nPress Enter to execute");
+    }
+
+    // Process commands when Enter is pressed (without Ctrl) or Send button clicked
     if (enter || send) {
-        if (ide.cmdInput[0] != '\0') {
-            ide.log.push(ConsoleLog::CMD, std::string("> ") + ide.cmdInput);
-            ide.bus.send(ide.cmdInput);
+        std::string input(ide.cmdInput);
+        if (!input.empty()) {
+            // Split by newline and process each command
+            std::vector<std::string> commands;
+            std::stringstream ss(input);
+            std::string line;
+            while (std::getline(ss, line, '\n')) {
+                // Trim whitespace
+                line.erase(0, line.find_first_not_of(" \t\r\n"));
+                line.erase(line.find_last_not_of(" \t\r\n") + 1);
+                if (!line.empty()) {
+                    commands.push_back(line);
+                }
+            }
+
+            // Execute all commands
+            for (const auto& cmd : commands) {
+                ide.log.push(ConsoleLog::CMD, std::string("> ") + cmd);
+                ide.bus.send(cmd);
+            }
+
+            // Clear input after execution
             ide.cmdInput[0] = '\0';
         }
         ImGui::SetKeyboardFocusHere(-1);
     }
+
+    // Help button
+    ImGui::SameLine();
+    if (ImGui::Button("?", ImVec2(30, 60))) {
+        ide.bus.send("help");
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Show command list");
+    }
+
+    // Clear console button
+    ImGui::SameLine();
+    if (ImGui::Button("Clear", ImVec2(50, 60))) {
+        std::lock_guard<std::mutex> lk(ide.log.mtx);
+        ide.log.entries.clear();
+        ide.logReadIdx = 0;
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Clear console output");
+    }
+
+    // Additional hint text below buttons
+    ImGui::SameLine();
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4{ 0.6f, 0.6f, 0.7f, 1.0f });
+    ImGui::TextDisabled("  (Ctrl+Enter = new line)");
+    ImGui::PopStyleColor();
 }
 
 // =============================================================================
@@ -3349,7 +4130,12 @@ static void DrawConsolePanel(IDEState& ide)
 static void DrawModals(IDEState& ide)
 {
     // Add Object modal
-    if (ide.showAddObject) { ImGui::OpenPopup("Add Object"); ide.showAddObject = false; }
+    if (ide.showAddObject) {
+        ImGui::OpenPopup("Add Object");
+        ide.showAddObject = false;
+        glm::vec3 sp = GetCameraSpawnPos(ide);
+        ide.newObjPos[0] = sp.x; ide.newObjPos[1] = sp.y; ide.newObjPos[2] = sp.z;
+    }
     if (ImGui::BeginPopupModal("Add Object", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
     {
         static const char* kTypes[] = { "Plane", "OBJ mesh", "glTF / GLB", "Rectangle", "Sphere" };
@@ -3371,7 +4157,7 @@ static void DrawModals(IDEState& ide)
 
         if (ImGui::Button("Add", { 120,0 })) {
             char buf[512];
-            std::string nm(ide.newObjName);
+            std::string nm = NameValidator::GetFinalName(ide.newObjName, ide.objects, ide.lights);
             float* p = ide.newObjPos;
             switch (ide.newObjType) {
             case CUBE:
@@ -3415,7 +4201,13 @@ static void DrawModals(IDEState& ide)
     }
 
     // Add Light modal
-    if (ide.showAddLight) { ImGui::OpenPopup("Add Light"); ide.showAddLight = false; }
+
+    if (ide.showAddLight) {
+        ImGui::OpenPopup("Add Light");
+        ide.showAddLight = false;
+        glm::vec3 sp = GetCameraSpawnPos(ide);
+        ide.newLightPos[0] = sp.x; ide.newLightPos[1] = sp.y; ide.newLightPos[2] = sp.z;
+    }
     if (ImGui::BeginPopupModal("Add Light", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
     {
         ImGui::InputText("Name", ide.newLightName, sizeof(ide.newLightName));
@@ -3454,8 +4246,12 @@ static void DrawModals(IDEState& ide)
     }
 
     // Add Camera modal
-    if (ide.showAddCamera) { ImGui::OpenPopup("Add Camera"); ide.showAddCamera = false; }
-    if (ImGui::BeginPopupModal("Add Camera", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    if (ide.showAddCamera) {
+        ImGui::OpenPopup("Add Camera");
+        ide.showAddCamera = false;
+        glm::vec3 sp = GetCameraSpawnPos(ide);
+        ide.newCameraPos[0] = sp.x; ide.newCameraPos[1] = sp.y; ide.newCameraPos[2] = sp.z;
+    }    if (ImGui::BeginPopupModal("Add Camera", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
     {
         ImGui::InputText("Name", ide.newCameraName, sizeof(ide.newCameraName));
         ImGui::DragFloat3("Position", ide.newCameraPos, 0.1f);
@@ -3824,6 +4620,13 @@ static void DrawMenuBar(IDEState& ide, bool& quitRequested)
         if (!ide.playing && ide.sm->currentCamera) {
             ide.sm->currentCamera->transform.position = Vector3(0, 5, 15);
         }
+        // Delegate Start()/OnDestroy() calls and play-state tracking to the
+        // renderer so all game-logic lifecycle is in one place.
+        ide.renderer->SetPlayMode(ide.playing);
+        if (ide.playing)
+            ide.log.push(ConsoleLog::REPLY_OK, "Play mode started");
+        else
+            ide.log.push(ConsoleLog::REPLY_OK, "Play mode stopped");
     }
     ImGui::PopStyleColor();
     ImGui::SameLine();
@@ -4034,6 +4837,11 @@ void MainScene_Run() {
     ide.bookmarks.InitFromCurrent(camera, false, 60.f, 10.f);
     ide.window = win;
 
+    sm->scriptManager = std::make_unique<ScriptManager>(sm);
+
+    ScriptManager::SetToolchainPath("./tools/mingw64");
+    ide.scriptManager = sm->scriptManager.get();
+
     ImGuizmo::SetRect(0, 0, (float)Settings::canvasWidth, (float)Settings::canvasHeight);
 
     // Load editor settings
@@ -4089,7 +4897,7 @@ void MainScene_Run() {
     }
 
     CommandRegistry reg;
-    BuildCommands(reg, &renderer);
+    BuildCommands(reg, &renderer, &ide.assetDb, sm);
     CmdContext cmdCtx{ sm, &renderer, &g_sceneMutex };
     std::atomic<bool> running{ true };
     std::thread shellThr(ShellThread, &ide.bus, &reg, &cmdCtx, &running, &ide.log);
@@ -4127,7 +4935,7 @@ void MainScene_Run() {
                 }
                 obj->transform.position = Vector3(task.x, task.y, task.z);
                 {
-                    std::lock_guard<std::mutex> lock(g_sceneMutex);
+                    std::unique_lock<std::shared_mutex> lock(g_sceneMutex);
                     ide.sm->objects->push_back(obj);
                     g_namedObjects[task.name] = obj;
                 }
@@ -4230,6 +5038,9 @@ void MainScene_Run() {
         DrawHierarchyPanel(ide);
         ImGui::End();
         ImGui::Begin("Inspector");
+        // Record Inspector window pos/size so the overlay can anchor above it
+        ide.importOverlayAnchorPos = ImGui::GetWindowPos();
+        ide.importOverlayAnchorSize = ImGui::GetWindowSize();
         DrawInspectorPanel(ide);
         ImGui::End();
         ImGui::Begin("Console");
@@ -4259,10 +5070,13 @@ void MainScene_Run() {
                     importScale = rec->modelSettings.importScale;
 
                 std::string cmd;
+                glm::vec3 dropPos = GetCameraSpawnPos(ide);
+                char posBuf[64];
+                std::snprintf(posBuf, sizeof(posBuf), "%.3f %.3f %.3f", dropPos.x, dropPos.y, dropPos.z);
                 if (ext == ".obj")
-                    cmd = "obj " + objName + " \"" + path + "\" 0 0 0";
+                    cmd = "obj " + objName + " \"" + path + "\" " + posBuf;
                 else if (ext == ".gltf" || ext == ".glb")
-                    cmd = "gltf " + objName + " \"" + path + "\" 0 0 0";
+                    cmd = "gltf " + objName + " \"" + path + "\" " + posBuf;
                 else if (ext == ".honscene") {
                     ide.bus.send("clearscene");
                     ide.bus.send("loadscene " + path);
@@ -4293,6 +5107,35 @@ void MainScene_Run() {
                 }
             });
         ImGui::End();
+
+        // ── Open import overlay whenever the browser focuses a new asset ──────
+        if (!ide.assetBrowser.focusedGUID.empty() &&
+            ide.assetBrowser.focusedGUID != ide.importOverlayGUID)
+        {
+            AssetRecord* focusedRec = ide.assetDb.FindByGUID(ide.assetBrowser.focusedGUID);
+            if (focusedRec) {
+                ide.importOverlayGUID = ide.assetBrowser.focusedGUID;
+                ide.showImportOverlay = true;
+                ide.importOverlayHasImportBtn = false;
+                ide.importOverlayOnImport = nullptr;
+            }
+        }
+
+        // ── Draw the floating Import Settings Overlay ─────────────────────────
+        {
+            AssetRecord* ovRec = ide.importOverlayGUID.empty()
+                ? nullptr
+                : ide.assetDb.FindByGUID(ide.importOverlayGUID);
+            std::function<void()> importCb = ide.importOverlayHasImportBtn
+                ? ide.importOverlayOnImport
+                : std::function<void()>(nullptr);
+            DrawImportSettingsOverlay(
+                ovRec,
+                ide.showImportOverlay,
+                ide.importOverlayAnchorPos,
+                ide.importOverlayAnchorSize,
+                importCb);
+        }
 
         // ── Project / Package manager windows (floating, non-docked) ─────────
         DrawProjectSettingsWindow(ide.projectUI, ide.project);
@@ -4332,7 +5175,7 @@ void MainScene_Run() {
         ImGui::Render();
         glViewport(0, 0, ideW, ideH);
         glClearColor(0.07f, 0.075f, 0.08f, 1.f);
-        glClear(GL_COLOR_BUFFER_BIT);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
             SDL_Window* bkWin = SDL_GL_GetCurrentWindow();
@@ -4411,22 +5254,30 @@ void MainScene_Run() {
                         }
                         else if (mtime != it->second) {
                             it->second = mtime;
-                            // File changed — recompile
-                            std::string compileCmd = rec.scriptSettings.compileCommand;
-                            if (compileCmd.empty())
-                                compileCmd = "g++ -std=c++17 -c \"" + rec.path + "\" 2>&1";
-                            ide.log.push(ConsoleLog::INFO,
-                                "[Script] File changed, recompiling: " + rec.path);
-                            ConsoleLog* logPtr = &ide.log;
-                            std::string cmdCopy = compileCmd;
-                            std::string pathCopy = rec.path;
-                            std::thread([cmdCopy, pathCopy, logPtr] {
-                                int ret = std::system(cmdCopy.c_str());
-                                logPtr->push(
-                                    ret == 0 ? ConsoleLog::REPLY_OK : ConsoleLog::REPLY_ERR,
-                                    "[Script] " + pathCopy
-                                    + (ret == 0 ? " compiled OK" : " compile FAILED"));
-                                }).detach();
+                            // File changed — hot reload via ScriptManager
+                            if (ide.scriptManager) {
+                                ide.scriptManager->HotReloadScript(gstr);
+                                ide.log.push(ConsoleLog::INFO,
+                                    "[Script] Hot reload triggered for: " + rec.path);
+                            }
+                            else {
+                                // Fallback: plain recompile
+                                std::string compileCmd = rec.scriptSettings.compileCommand;
+                                if (compileCmd.empty())
+                                    compileCmd = "g++ -std=c++17 -c \"" + rec.path + "\" 2>&1";
+                                ide.log.push(ConsoleLog::INFO,
+                                    "[Script] File changed, recompiling: " + rec.path);
+                                ConsoleLog* logPtr = &ide.log;
+                                std::string cmdCopy = compileCmd;
+                                std::string pathCopy = rec.path;
+                                std::thread([cmdCopy, pathCopy, logPtr] {
+                                    int ret = std::system(cmdCopy.c_str());
+                                    logPtr->push(
+                                        ret == 0 ? ConsoleLog::REPLY_OK : ConsoleLog::REPLY_ERR,
+                                        "[Script] " + pathCopy
+                                        + (ret == 0 ? " compiled OK" : " compile FAILED"));
+                                    }).detach();
+                            }
                         }
                     }
                     catch (...) {}

@@ -9,10 +9,6 @@
       <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
       <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
     </Filter>
-    <Filter Include="Resource Files">
-      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
-      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
-    </Filter>
     <Filter Include="engineBase">
       <UniqueIdentifier>{a6f074c1-9949-45ab-9913-1bec5a0a45ad}</UniqueIdentifier>
     </Filter>
@@ -216,6 +212,18 @@
     <ClInclude Include="imgui_impl_sdl2.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="renderComponent.h">
+      <Filter>engineBase</Filter>
+    </ClInclude>
+    <ClInclude Include="IScript.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="script_component.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="script_manager.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="plane.cpp">
@@ -272,6 +280,9 @@
     <ClCompile Include="imgui_impl_sdl2.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="script_manager.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="dockerfile" />
@@ -280,16 +291,5 @@
   </ItemGroup>
   <ItemGroup>
     <CopyFileToFolders Include="..\SDL2-devel-2.32.10-VC\SDL2-2.32.10\lib\x64\SDL2.dll" />
-    <CopyFileToFolders Include="assets\sand.png">
-      <Filter>Resource Files</Filter>
-    </CopyFileToFolders>
-    <CopyFileToFolders Include="assets\Fox.glb">
-      <Filter>Resource Files</Filter>
-    </CopyFileToFolders>
-  </ItemGroup>
-  <ItemGroup>
-    <Image Include="assets\sand.jpg">
-      <Filter>Resource Files</Filter>
-    </Image>
   </ItemGroup>
 </Project>

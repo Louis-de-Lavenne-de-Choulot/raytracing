@@ -570,15 +570,13 @@ inline void DrawAssetBrowserContent(
     }
     ImGui::Separator();
 
-    // ── Main content area (left: file view, right: import settings) ──────────
-    float settingsW = (ab.showImportSettings && ab.selectedGUIDs.size() == 1) ? 220.f : 0.f;
-
+    // ── Main content area (file listing only – import settings moved to Inspector) ──
     const ImGuiStyle& style = ImGui::GetStyle();
-    float statusBarH = ImGui::GetTextLineHeightWithSpacing()  // one text line
-        + style.ItemSpacing.y + 1.f;             // separator
+    float statusBarH = ImGui::GetTextLineHeightWithSpacing()
+        + style.ItemSpacing.y + 1.f;
     float contentH = ImGui::GetContentRegionAvail().y - statusBarH;
 
-    ImGui::BeginChild("##ab_files", { -settingsW, contentH }, false,
+    ImGui::BeginChild("##ab_files", { 0.f, contentH }, false,
         ImGuiWindowFlags_HorizontalScrollbar);
 
     // Drop target for entire file area
@@ -796,32 +794,6 @@ inline void DrawAssetBrowserContent(
     }
 
     ImGui::EndChild();  // ab_files
-
-    // ── Right panel: import settings ─────────────────────────────────────────
-    if (settingsW > 0.f) {
-        ImGui::SameLine(0, 4.f);
-        ImGui::BeginChild("##ab_import", { settingsW, contentH }, true);
-        if (!ab.focusedGUID.empty()) {
-            auto* rec = db.FindByGUID(ab.focusedGUID);
-            if (rec) {
-                ImGui::TextUnformatted(rec->displayName.c_str());
-                ImGui::TextDisabled("%s  %s", AssetTypeName(rec->type),
-                    FormatBytes(rec->fileSize).c_str());
-                ImGui::TextDisabled("%.18s…", ab.focusedGUID.c_str());
-                ImGui::Spacing();
-                bool changed = DrawImportSettingsPanel(*rec);
-                if (changed) rec->needsReimport = true;
-                ImGui::Spacing();
-                if (rec->needsReimport) {
-                    ImGui::PushStyleColor(ImGuiCol_Button, { 0.6f, 0.35f, 0.05f, 1.f });
-                    if (ImGui::Button("Apply & Reimport", { -1, 0 }))
-                        rec->needsReimport = false;  // caller would actually reimport
-                    ImGui::PopStyleColor();
-                }
-            }
-        }
-        ImGui::EndChild();
-    }
 
     // ── Status bar ───────────────────────────────────────────────────────────
     ImGui::Separator();

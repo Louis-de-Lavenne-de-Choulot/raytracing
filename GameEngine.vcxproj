@@ -239,6 +239,7 @@
     <ClInclude Include="ide_undo_history.h" />
     <ClInclude Include="ide_viewport_overlays.h" />
     <ClInclude Include="imgui_impl_sdl2.h" />
+    <ClInclude Include="IScript.h" />
     <ClInclude Include="main.h" />
     <ClInclude Include="material.h" />
     <ClInclude Include="Importer.h" />
@@ -248,6 +249,9 @@
     <ClInclude Include="quaternion.h" />
     <ClInclude Include="rectangle.h" />
     <ClInclude Include="GPURenderer.h" />
+    <ClInclude Include="renderComponent.h" />
+    <ClInclude Include="script_component.h" />
+    <ClInclude Include="script_manager.h" />
     <ClInclude Include="skinnedShader.h" />
     <ClInclude Include="skinnedVertex.h" />
     <ClInclude Include="stb_image.h" />
@@ -284,6 +288,7 @@
     <ClCompile Include="plane.cpp" />
     <ClCompile Include="quaternion.cpp" />
     <ClCompile Include="rectangle.cpp" />
+    <ClCompile Include="script_manager.cpp" />
     <ClCompile Include="UIRenderer.cpp" />
     <ClCompile Include="shaderLibrary.cpp" />
     <ClCompile Include="sphere.cpp" />
@@ -294,18 +299,9 @@
     <CopyFileToFolders Include="..\SDL2-devel-2.32.10-VC\SDL2-2.32.10\lib\x64\SDL2.dll">
       <FileType>Document</FileType>
     </CopyFileToFolders>
-    <CopyFileToFolders Include="assets\Fox.glb">
-      <FileType>Document</FileType>
-    </CopyFileToFolders>
     <None Include="dockerfile" />
     <None Include="makefile" />
     <None Include="README.md" />
-  </ItemGroup>
-  <ItemGroup>
-    <CopyFileToFolders Include="assets\sand.png" />
-  </ItemGroup>
-  <ItemGroup>
-    <Image Include="assets\sand.jpg" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
