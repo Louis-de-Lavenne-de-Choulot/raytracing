@@ -1,32 +1,38 @@
-# Compiler and flags
-CXX = x86_64-w64-mingw32-g++
-CXXFLAGS = -std=c++20 -O3 -I./sdl2/include -L./sdl2/lib -lmingw32 -lSDL2main -lSDL2 -static-libgcc -static-libstdc++ -Wall -Werror
-SDL3_CXXFLAGS = -std=c++20 -O3 -I./sdl3/x86_64-w64-mingw32/include -L./sdl3/x86_64-w64-mingw32/lib -lmingw32 -lSDL2main -lSDL2 -static-libgcc -static-libstdc++ -Wall -Werror
-SOURCES = $(wildcard *.cpp)  # All .cpp files in the current directory
-EXECUTABLE = sdl_raytracing.exe
+CXX = C:/Users/LDL/Downloads/raytracing/tools/mingw64/bin/g++.exe
+AR = C:/Users/LDL/Downloads/raytracing/tools/mingw64/bin/ar.exe
 
-# Default target
-all: $(EXECUTABLE)
+# Add SDL2 include path
+SDL2_PATH = C:/Users/LDL/Downloads/raytracing/tools/sdl2/x64
+SDL2_INCLUDE = $(SDL2_PATH)/include
+SDL2_LIB = $(SDL2_PATH)/lib
 
-# Link the executable
-$(EXECUTABLE): $(SOURCES)
-	make clean
-	$(CXX) $(SOURCES) -o $@ $(CXXFLAGS)
-	mkdir -p bin
-	mv $(EXECUTABLE) bin/$(EXECUTABLE)
-	cp sdl2/bin/SDL2.dll bin/SDL2.dll
+CXXFLAGS = -std=c++20 \
+    -I. \
+    -I./include \
+    -I./vcpkg/installed/x64-windows/include \
+    -I"$(SDL2_INCLUDE)"
 
-sdl3: $(SOURCES)
-	make clean
-	$(CXX) $(SOURCES) -o $@ $(SDL3_CXXFLAGS)
-	mkdir -p bin
-	mv $(EXECUTABLE) bin/$(EXECUTABLE)
-	cp sdl3/x86_64-w64-mingw32/bin/SDL3.dll bin/SDL3.dll
+SOURCES = $(wildcard *.cpp)
+# Exclude main.cpp and any other files you don't want in the library
+SOURCES := $(filter-out main.cpp, $(SOURCES))
+OBJECTS = $(SOURCES:.cpp=.o)
+TARGET = tools/honhengine/GameEngine.a
 
-test:
-	make all
-	make clean
+all: $(TARGET)
 
-# Clean up build artifacts
+$(TARGET): $(OBJECTS)
+	$(AR) rcs $@ $^
+	del $(OBJECTS)
+	@echo.
+	@echo ========================================
+	@echo Library created: $(TARGET)
+	@echo ========================================
+
+%.o: %.cpp
+	$(CXX) -c $(CXXFLAGS) $< -o $@
+
 clean:
-	rm -rf bin
+	del *.o
+	del $(TARGET)
+
+.PHONY: all clean
