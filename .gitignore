@@ -41,3 +41,6 @@ sdl2/*
 # GameEngine.vcxproj.user
 /x64
 # GameEngine.sln
+/tools
+/assets
+*.ini

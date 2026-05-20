@@ -20,9 +20,24 @@ namespace HonHengine
             this->z = z;
         }
 
-        // this implementation assumes normalized quaternion
         // converts to Euler angles in 3-2-1 sequence
         EulerAngles ToEulerAngle();
+
+		static Quaternion FromEuler(double roll, double pitch, double yaw)
+		{
+			double cy = cos(yaw * 0.5);
+			double sy = sin(yaw * 0.5);
+			double cp = cos(pitch * 0.5);
+			double sp = sin(pitch * 0.5);
+			double cr = cos(roll * 0.5);
+			double sr = sin(roll * 0.5);
+			return Quaternion(
+				cr * cp * cy + sr * sp * sy,
+				sr * cp * cy - cr * sp * sy,
+				cr * sp * cy + sr * cp * sy,
+				cr * cp * sy - sr * sp * cy
+			);
+		}
 
         // Multiply two quaternions
         Quaternion operator*(const Quaternion &q) const

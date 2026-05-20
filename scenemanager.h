@@ -6,6 +6,7 @@
 #include "baselight.h"
 #include <vector>
 #include "settings.h"
+#include "script_manager.h"
 namespace HonHengine
 {
     struct SceneManager
@@ -17,7 +18,13 @@ namespace HonHengine
         std::vector<Camera *> *cameras = new std::vector<Camera *>();
         std::vector<BaseObject *> *objects = new std::vector<BaseObject *>();
         std::vector<BaseLight *> *lights = new std::vector<BaseLight *>();
-
+		std::unique_ptr<ScriptManager> scriptManager = nullptr;
+		~SceneManager()
+		{
+			delete cameras;
+			delete objects;
+			delete lights;
+		}
     };
 };
 #endif

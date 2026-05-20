@@ -38,7 +38,7 @@ namespace HonHengine
                 }
             }
 
-            // Generate triangles (unchanged)
+            // Generate triangles with consistent CLOCKWISE winding
             for (int ring = 0; ring < rings; ring++)
             {
                 int ringStart = ring * (segments + 1);
@@ -48,19 +48,21 @@ namespace HonHengine
                 {
                     if (ring != 0)
                     {
+                        // CW winding when viewed from outside
                         triangles.push_back(Triangle(
-                            ringStart + segment,
-                            ringStart + segment + 1,
-                            nextRingStart + segment,
+                            ringStart + segment,           // bottom-left
+                            nextRingStart + segment,       // top-left
+                            ringStart + segment + 1,       // bottom-right
                             mat));
                     }
 
                     if (ring != rings - 1)
                     {
+                        // CW winding when viewed from outside
                         triangles.push_back(Triangle(
-                            nextRingStart + segment,
-                            ringStart + segment + 1,
-                            nextRingStart + segment + 1,
+                            nextRingStart + segment,       // top-left
+                            nextRingStart + segment + 1,   // top-right
+                            ringStart + segment + 1,       // bottom-right
                             mat));
                     }
                 }
