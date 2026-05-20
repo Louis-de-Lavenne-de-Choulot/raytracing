@@ -20,6 +20,7 @@ namespace HonHengine
         double reflectivity = 0.0;
         Color  color;
         Color  outlineColor{ 0, 0, 0, 255 };
+        bool dirty = false;
 
         GLuint customShaderProgram = 0; 
         bool isTransparent = false;
@@ -51,6 +52,16 @@ namespace HonHengine
         {
             static const std::string empty;
             return textureLayers.empty() ? empty : textureLayers[0].texture.name;
+        }
+
+        void setColor(const Color& newColor) {
+            color = newColor;
+            dirty = true;
+        }
+
+        void setOutlineColor(const Color& newColor) {
+            outlineColor = newColor;
+            dirty = true;
         }
     };
 }

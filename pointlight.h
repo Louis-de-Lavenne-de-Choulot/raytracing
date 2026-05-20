@@ -13,6 +13,8 @@ namespace HonHengine
         /* data */
 		Transform transform;
 
+		PointLight() : BaseLight(), transform() { type = POINT_LIGHT; }
+
         PointLight(double intens, Color col, Vector3 pos, Quaternion rot = Quaternion()) : BaseLight(intens, col)
         {
             transform.position = pos;

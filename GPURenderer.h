@@ -29,7 +29,7 @@ namespace HonHengine
     class GPURenderer
     {
     public:
-		bool debugMode = false; 
+        bool debugMode = false;
 
         explicit GPURenderer(SceneManager* sceneManager);
         explicit GPURenderer(SceneManager* sm, SDL_Window* existingWindow, SDL_GLContext existingContext);
@@ -44,6 +44,13 @@ namespace HonHengine
         // ── Per-frame API (the only calls a scene loop needs) ─────────────────
         void Render(float dt = 0.0f, GLuint fbo = 0);  // clear + draw all scene objects; dt drives animators
         void Present();   // SDL_GL_SwapWindow
+
+        // ── Play mode ─────────────────────────────────────────────────────────
+        // SetPlayMode(true)  → calls Start()     on all script instances.
+        // SetPlayMode(false) → calls OnDestroy() on all script instances.
+        // UpdateGameLogic(dt) is driven automatically from inside Render().
+        void SetPlayMode(bool playing);
+        bool IsPlaying() const { return m_playing; }
 
         // ── Input ─────────────────────────────────────────────────────────────
         void Get_MouseState(int* x, int* y);
@@ -69,6 +76,10 @@ namespace HonHengine
         void uploadTextureLayersToShader(GLuint program,
             const Material* mat)          const;
 
+        // Advance scripts, animations, and any other per-frame game logic.
+        // Called unconditionally from Render(); no-ops when m_playing is false.
+        void UpdateGameLogic(float dt);
+
         // Draw one RenderComponent object (lazy VAO upload on first call).
         void drawRenderComponent(BaseObject* obj,
             const glm::mat4& view,
@@ -92,6 +103,8 @@ namespace HonHengine
 
         // ── Members ───────────────────────────────────────────────────────────
         SceneManager* sceneManager = nullptr;
+
+        bool m_playing = false;   // true while the scene is in play mode
 
         SDL_Window* window = nullptr;
         SDL_GLContext glContext = nullptr;

@@ -10,7 +10,7 @@ namespace HonHengine
         double b;
         double a;
         Color() = default;
-        Color(double valr, double valg, double valb, double vala);
+        Color(double valr, double valg, double valb, double vala = 1);
 
         Color operator+(const Color &c);
         Color operator+(const double val);

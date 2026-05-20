@@ -27,6 +27,8 @@
 #include "settings.h"
 #include "texture.h"
 #include "skinnedShader.h"   // SHADOW_VERT / SHADOW_FRAG
+#include "script_manager.h"  // ScriptManager — needed by SetPlayMode / UpdateGameLogic
+#include <unordered_set>
 
 namespace HonHengine
 {
@@ -413,7 +415,7 @@ namespace HonHengine
         }
 
         int layerCount = static_cast<int>(
-            std::min(static_cast<int>(mat->textureLayers.size()), MAX_TEX_LAYERS));
+            (std::min)(static_cast<int>(mat->textureLayers.size()), MAX_TEX_LAYERS));
 
         glUniform1i(glGetUniformLocation(program, "uLayerCount"), layerCount);
 
@@ -632,8 +634,10 @@ namespace HonHengine
         model = glm::scale(model, toGLM(obj->transform.scale));
 
         // ── Render state ──────────────────────────────────────────────────────
-        glDepthMask(rc.depthWrite ? GL_TRUE : GL_FALSE);
 
+        glEnable(GL_DEPTH_TEST);          // <-- add this
+        glDepthFunc(GL_LESS);             // <-- add this
+        glDepthMask(rc.depthWrite ? GL_TRUE : GL_FALSE);
         if (rc.blend) {
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -721,6 +725,8 @@ namespace HonHengine
         bool blend) const
     {
         if (verts.empty()) return;
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LESS);
 
         glDepthMask(depthWrite ? GL_TRUE : GL_FALSE);
 
@@ -774,6 +780,55 @@ namespace HonHengine
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    //  SetPlayMode
+    //  Transitions the renderer into or out of play mode.
+    //  Entering  → calls Start()     on every attached script instance.
+    //  Exiting   → calls OnDestroy() on every attached script instance.
+    // ─────────────────────────────────────────────────────────────────────────
+    void GPURenderer::SetPlayMode(bool playing)
+    {
+        if (m_playing == playing) return;
+        m_playing = playing;
+
+        if (playing)
+        {
+            for (BaseObject* obj : *sceneManager->objects)
+            {
+                for (auto& comp : obj->scripts)
+                {
+                    if (comp.instance) comp.instance->Start();
+                }
+            }
+        }
+        else
+        {
+            for (BaseObject* obj : *sceneManager->objects)
+            {
+                for (auto& comp : obj->scripts)
+                {
+                    if (comp.instance) comp.instance->OnDestroy();
+                }
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  UpdateGameLogic
+    //  Called every frame from Render().  No-ops when not in play mode.
+    // ─────────────────────────────────────────────────────────────────────────
+    void GPURenderer::UpdateGameLogic(float dt)
+    {
+        if (!m_playing) return;
+
+        auto& sm = sceneManager->scriptManager;
+
+        if (sm != nullptr)
+        {
+            sm->Update(dt);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     //  Render  — main per-frame draw call
     // ─────────────────────────────────────────────────────────────────────────
     void GPURenderer::Render(float dt, GLuint fbo)
@@ -821,8 +876,38 @@ namespace HonHengine
             }
         }
 
+        std::unordered_set<Material*> processedMaterials;
+
+        for (BaseObject* obj : renderComps)
+        {
+            if (obj && obj->material && obj->material->dirty &&
+                obj->render.isValid() && obj->render.useMaterialColor)
+            {
+                // Update the vertex colours in the GPU buffer
+                obj->render.updateVertexColors(obj->material->color);
+
+                // Track which materials we've cleared
+                processedMaterials.insert(obj->material);
+            }
+        }
+
+        // Clear dirty flags for all processed materials
+        for (Material* mat : processedMaterials)
+        {
+            mat->dirty = false;
+        }
+
         lightSpaceMatrix = buildLightSpaceMatrix();
         renderShadowPass(renderComps, opaqueObjs);
+
+        // ── Game-logic update (scripts, etc.) ─────────────────────────────────
+        // Runs after shadow-pass matrix is built so scripts can read/write
+        // transforms that will be reflected in the very next colour draw.
+        UpdateGameLogic(dt);
+
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LESS);
+        glDepthMask(GL_TRUE);
 
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
         glViewport(0, 0, Settings::canvasWidth, Settings::canvasHeight);
@@ -902,6 +987,7 @@ namespace HonHengine
                     }
                     return out;
                 };
+
             auto sortObjs = [](BaseObject* a, BaseObject* b) {
                 GLuint pA = (a->material) ? a->material->customShaderProgram : 0;
                 GLuint pB = (b->material) ? b->material->customShaderProgram : 0;
@@ -952,7 +1038,6 @@ namespace HonHengine
                                 }
 
                                 lastMat = mat;
-
                             }
                         }
                         auto objVerts = buildVerts(obj);

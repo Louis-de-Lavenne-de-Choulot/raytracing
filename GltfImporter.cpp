@@ -315,7 +315,7 @@ namespace HonHengine
                         uint32_t jIdx = 0;
                         if (avJoints.compType == 5121) jIdx = *(pj + k);
                         else if (avJoints.compType == 5123) { uint16_t v; std::memcpy(&v, pj + k * 2, 2); jIdx = v; }
-                        sv.boneIdx[k] = (uint8_t)std::min(jIdx, (uint32_t)MAX_BONES - 1);
+                        sv.boneIdx[k] = (uint8_t)(std::min)(jIdx, (uint32_t)MAX_BONES - 1);
                         sv.boneWgt[k] = _readFloat(pw + k * compTypeSize(avWgts.compType), avWgts.compType);
                     }
                     sv.normaliseWeights();
