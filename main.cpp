@@ -4840,6 +4840,7 @@ void MainScene_Run() {
     sm->scriptManager = std::make_unique<ScriptManager>(sm);
 
     ScriptManager::SetToolchainPath("./tools/mingw64");
+    ScriptManager::SetEngineLibraryPath("./tools/honhengine/GameEngine.lib");
     ide.scriptManager = sm->scriptManager.get();
 
     ImGuizmo::SetRect(0, 0, (float)Settings::canvasWidth, (float)Settings::canvasHeight);
@@ -5264,7 +5265,7 @@ void MainScene_Run() {
                                 // Fallback: plain recompile
                                 std::string compileCmd = rec.scriptSettings.compileCommand;
                                 if (compileCmd.empty())
-                                    compileCmd = "g++ -std=c++17 -c \"" + rec.path + "\" 2>&1";
+                                    compileCmd = "g++ -std=c++20 -c \"" + rec.path + "\" 2>&1";
                                 ide.log.push(ConsoleLog::INFO,
                                     "[Script] File changed, recompiling: " + rec.path);
                                 ConsoleLog* logPtr = &ide.log;

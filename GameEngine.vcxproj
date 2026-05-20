@@ -219,7 +219,7 @@
     <ClInclude Include="color.h" />
     <ClInclude Include="commandSystem.h" />
     <ClInclude Include="directionallight.h" />
-    <ClInclude Include="EulerAngle.h" />
+    <ClInclude Include="eulerangle.h" />
     <ClInclude Include="exampleScene.h" />
     <ClInclude Include="GltfImporter.h" />
     <ClInclude Include="ide_asset_browser.h" />
