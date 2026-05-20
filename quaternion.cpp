@@ -1,6 +1,6 @@
 #include "quaternion.h"
 #include <cmath>
-#include "eulerangle.h"
+#include "eulerAngle.h"
 #include <numbers>
 
 namespace HonHengine
