@@ -612,7 +612,7 @@ inline void DrawAssetBrowserContent(
     if (ab.viewMode == AssetBrowserState::Grid) {
         float cellW = ab.iconSize + 8.f;
         float availX = ImGui::GetContentRegionAvail().x;
-        int   cols = (std::max)(1, (int)(availX / cellW));
+        int   cols = (((std::max)))(1, (int)(availX / cellW));
 
         int col = 0;
         for (auto& entry : ab.dirEntries) {

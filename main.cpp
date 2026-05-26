@@ -58,6 +58,10 @@
 #include "material.h"
 #include "skinnedShader.h"
 #include "script_manager.h"
+#include "gizmo.h"
+#include "commandBus.h"
+#include "rigidbody.h"
+#include "collisiontrigger.h"
 
 // ── Project & Asset Management ────────────────────────────────────────────────
 #include "ide_asset_database.h"
@@ -73,9 +77,9 @@
 #include "ide_project.h"
 #include "ide_icons.h"
 #include "ide_selection.h"
-#include "ide_gizmo.h"
 #include "ide_viewport_overlays.h"
 #include "ide_camera_bookmarks.h"
+#include "ide_ship.h"
 
 
 using namespace HonHengine;
@@ -267,6 +271,22 @@ static std::vector<DeferredTask> g_deferredGLTFTasks;
 struct ConsoleLog;
 static std::mutex g_deferredTasksMutex;
 static ConsoleLog* g_deferredLog = nullptr;
+
+struct DeferredHDRTask {
+    std::string path;
+};
+
+static std::vector<DeferredHDRTask> g_deferredHDRTasks;
+static std::mutex g_deferredHDRMutex;
+
+struct DeferredShaderTask {
+    std::string name;
+    std::string vertSrc;
+    std::string fragSrc;
+};
+
+static std::vector<DeferredShaderTask> g_deferredShaderTasks;
+static std::mutex g_deferredShaderMutex;
 
 // =============================================================================
 //  Fonctions JSON utilitaires (inchangées)
@@ -753,8 +773,27 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer,
             std::string vert = readFile(args[1]), frag = readFile(args[2]);
             if (vert.empty()) { out << MakeResponse(false, "registershader", "Cannot read vert: " + args[1]) << "\n"; return; }
             if (frag.empty()) { out << MakeResponse(false, "registershader", "Cannot read frag: " + args[2]) << "\n"; return; }
-            renderer->RegisterShader(args[0], vert.c_str(), frag.c_str());
-            out << MakeResponse(true, "registershader", "Shader '" + args[0] + "' registered", "\"name\":" + JStr(args[0])) << "\n";
+            {
+                std::lock_guard<std::mutex> lock(g_deferredShaderMutex);
+                g_deferredShaderTasks.push_back({ args[0], std::move(vert), std::move(frag) });
+            }
+            out << MakeResponse(true, "registershader", "Shader '" + args[0] + "' queued for registration") << "\n";
+        });
+    reg.Register("loadhdrskybox", "loadhdrskybox <path>", "Load HDR equirectangular image as skybox.",
+        [](CmdContext& ctx, const std::vector<std::string>& args, std::ostream& out) {
+            if (args.empty()) {
+                out << MakeResponse(false, "loadhdrskybox", "Usage: loadhdrskybox <path>") << "\n";
+                return;
+            }
+            std::string path = args[0];
+            if (path.front() == '"') path = path.substr(1);
+            if (path.back() == '"') path.pop_back();
+
+            {
+                std::lock_guard<std::mutex> lock(g_deferredHDRMutex);
+                g_deferredHDRTasks.push_back({ path });
+            }
+            out << MakeResponse(true, "loadhdrskybox", "HDR skybox queued for loading: " + path) << "\n";
         });
     // clone
     reg.Register("clone", "clone <srcName> <newName>", "Duplicate an object.",
@@ -1090,20 +1129,18 @@ struct ConsoleLog {
     std::deque<Entry> entries;
     std::mutex mtx;
     bool autoScroll = true;
-    void push(Kind k, const std::string& t) { std::lock_guard<std::mutex> lk(mtx); entries.push_back({ k,t }); if (entries.size() > 2000) entries.pop_front(); }
-};
+    std::string selectedText;
 
-struct CommandBus {
-    std::queue<std::string> pending;
-    std::mutex mtx;
-    std::condition_variable cv;
-    std::atomic<bool> alive{ true };
-    void send(const std::string& cmd) { std::lock_guard<std::mutex> lk(mtx); pending.push(cmd); cv.notify_one(); }
-    bool pop(std::string& out) {
-        std::unique_lock<std::mutex> lk(mtx);
-        cv.wait_for(lk, std::chrono::milliseconds(10), [this] {return !pending.empty() || !alive; });
-        if (pending.empty()) return false;
-        out = pending.front(); pending.pop(); return true;
+    void push(Kind k, const std::string& t) {
+        std::lock_guard<std::mutex> lk(mtx);
+        entries.push_back({ k,t });
+        if (entries.size() > 5000) entries.pop_front();
+    }
+
+    void clear() {
+        std::lock_guard<std::mutex> lk(mtx);
+        entries.clear();
+        selectedText.clear();
     }
 };
 
@@ -1135,96 +1172,29 @@ struct SceneFBO {
     void destroy() { if (fbo) glDeleteFramebuffers(1, &fbo); if (color) glDeleteTextures(1, &color); if (depth) glDeleteRenderbuffers(1, &depth); }
 };
 
-static void ShipGame(const std::string& projectDir,
-    const std::string& outDir,
-    ConsoleLog& log)
+// Real shipping pipeline — compile all scripts + game_entry into one executable.
+// (ide_ship.h included at top of file)
+
+// Thin bridge: IDEState -> ShipConfig, runs ShipBuilder on a background thread.
+static void RunShipBuild(const HonHengine::ShipConfig& cfg, ConsoleLog& log)
 {
-    log.push(ConsoleLog::INFO, "[Ship] Starting build packaging...");
+    using namespace HonHengine;
+    ShipBuilder builder;
+    std::atomic<bool> cancel{ false };
 
-    fs::path src(projectDir);
-    fs::path dst(outDir);
+    ShipResult result = builder.Build(cfg,
+        [&log](float /*progress*/, const std::string& msg, bool isError) {
+            log.push(isError ? ConsoleLog::REPLY_ERR : ConsoleLog::INFO, msg);
+        },
+        cancel);
 
-    // Gather all files, skipping .git, build dirs, IDE-only source files.
-    static const std::vector<std::string> skipDirs = {
-        ".git","build","CMakeFiles",".vs","__pycache__","node_modules"
-    };
-    static const std::vector<std::string> skipExts = {
-        ".o",".a",".d",".pdb",".ilk",".exp",".lib"
-    };
-
-    try {
-        fs::create_directories(dst);
-        size_t copied = 0;
-
-        for (auto& entry : fs::recursive_directory_iterator(src,
-            fs::directory_options::skip_permission_denied))
-        {
-            const fs::path& p = entry.path();
-
-            // Skip hidden / build dirs
-            bool skip = false;
-            for (auto& part : p) {
-                if (std::find(skipDirs.begin(), skipDirs.end(), part.string())
-                    != skipDirs.end()) {
-                    skip = true; break;
-                }
-            }
-            if (skip) continue;
-
-            std::string ext = p.extension().string();
-            if (std::find(skipExts.begin(), skipExts.end(), ext) != skipExts.end())
-                continue;
-
-            fs::path rel = fs::relative(p, src);
-            fs::path dest = dst / rel;
-
-            if (entry.is_directory()) {
-                fs::create_directories(dest);
-            }
-            else {
-                fs::create_directories(dest.parent_path());
-                fs::copy_file(p, dest, fs::copy_options::overwrite_existing);
-                ++copied;
-            }
-        }
-
-        // Write a launch script
-        {
-            fs::path launcher = dst / "RunGame.sh";
-            std::ofstream lf(launcher);
-            lf << "#!/bin/bash\n"
-                << "cd \"$(dirname \"$0\")\"\n"
-                << "./HonHonEngine \"$@\"\n";
-            lf.close();
-            // chmod +x via system() — portable enough for dev use
-            std::string chmod_cmd = "chmod +x \"" + launcher.string() + "\"";
-            std::system(chmod_cmd.c_str());
-
-            fs::path winLauncher = dst / "RunGame.bat";
-            std::ofstream wf(winLauncher);
-            wf << "@echo off\n"
-                << "cd /d \"%~dp0\"\n"
-                << "HonHonEngine.exe %*\n";
-        }
-
-        // Optional: create a .tar.gz archive next to outDir
-        std::string archiveName = dst.filename().string() + ".tar.gz";
-        fs::path    archivePath = dst.parent_path() / archiveName;
-        std::string cmd = "tar -czf \"" + archivePath.string()
-            + "\" -C \"" + dst.parent_path().string()
-            + "\" \"" + dst.filename().string() + "\"";
-        if (std::system(cmd.c_str()) == 0) {
-            log.push(ConsoleLog::REPLY_OK,
-                "[Ship] Archive: " + archivePath.string());
-        }
-
+    if (result.success) {
         log.push(ConsoleLog::REPLY_OK,
-            "[Ship] Packaged " + std::to_string(copied)
-            + " files → " + dst.string());
+            "[Ship] Build succeeded -> " + result.executablePath);
     }
-    catch (const std::exception& e) {
+    else {
         log.push(ConsoleLog::REPLY_ERR,
-            std::string("[Ship] Error: ") + e.what());
+            "[Ship] Build FAILED: " + result.errorLog);
     }
 }
 
@@ -1235,20 +1205,29 @@ static const char* kColorNames[] = {
 static const int kNumColors = 10;
 
 struct HierarchyNode {
-    enum Kind { OBJECT, LIGHT, FOLDER };
+    enum Kind { OBJECT, LIGHT, CAMERA, FOLDER };
     Kind kind = OBJECT; std::string name; bool folderOpen = true; std::vector<HierarchyNode> children;
+};
+
+struct IDECamera {
+    std::string name;
+    float px = 0, py = 5, pz = 15;
+    float fov = 60.f;
+    Camera* runtimeCamera = nullptr; // non-owning, owned by sm->cameras
 };
 
 
 struct IDEState {
     std::vector<IDEObject> objects;
     std::vector<IDELight> lights;
+    std::vector<IDECamera> cameras;          // scene cameras added by the user
+    Camera* savedEditorCamera = nullptr;     // editor cam pointer, saved on Play
     // Non-owning pointer to the ScriptManager that lives in sm->scriptManager.
     // Ownership was moved there so GPURenderer::UpdateGameLogic can drive updates.
     ScriptManager* scriptManager = nullptr;
     float editorFov = 60.f; // editor viewport camera FOV
+    bool consoleFocused = false;
 
-    // MODIFIED: sélection multiple au lieu de selectedObject
     MultiSelection selection;
 
     std::vector<HierarchyNode> hierRoots;
@@ -1366,20 +1345,22 @@ struct IDEState {
     bool editorCamOrbit = false;
     ImVec2 editorCamLastMouse;
 
-    // NEW: Gizmo state
-    GizmoState gizmo;
+    // Gizmo state
+    TransformGizmo gizmo;
+    bool gizmoLocalMode = false;
+    bool gizmoPivotCenter = false;
 
-    // NEW: Camera bookmarks
+    // Camera bookmarks
     CameraBookmarks bookmarks;
 
-    // NEW: Focus transition
+    // Focus transition
     FocusTransition focus;
 
-    // NEW: Ortho/persp
+    // Ortho/persp
     bool viewportOrtho = false;
     float orthoSize = 10.f;
 
-    // NEW: Overlays
+    // Overlays
     bool showGrid = true;
     bool showAxes = true;
     bool showIcons3D = true;
@@ -1387,11 +1368,20 @@ struct IDEState {
     int gridPlane = 0;   // 0=XZ, 1=XY, 2=YZ
     int debugMode = 0;   // 0=shaded, 1=wireframe, 2=overdraw, 3=depth, 4=normals
 
-    // NEW: FPS fly mode
+    // FPS fly mode
     bool fpsFlyMode = false;
 
-    // NEW: Box selection
+    // Box selection
     BoxSelectionState boxSelect;
+
+    // ── Skybox / Environment ─────────────────────────────────────────────────
+    bool  showEnvironmentWindow = false;
+    // 0 = Procedural (default), 1 = Cubemap from files
+    int   skyboxMode = 0;
+    // Per-face paths for cubemap import (right, left, top, bottom, front, back)
+    char  skyboxFaces[6][512] = {};
+    // Sun glow intensity override (0 = driven by directional light)
+    float skyboxSunGlowOverride = -1.f; // -1 means "use light intensity"
 
     // ── Import Settings Overlay ───────────────────────────────────────────────
     // Floating temporary panel shown above the Inspector when an asset is
@@ -1402,6 +1392,29 @@ struct IDEState {
     std::function<void()> importOverlayOnImport; // callback for Import button
     ImVec2 importOverlayAnchorPos = {};    // Inspector window top-left (updated each frame)
     ImVec2 importOverlayAnchorSize = {};    // Inspector window size     (updated each frame)
+
+    // ── Physics / RigidBody ────────────────────────────────────────────────────
+    PhysicsWorld physicsWorld;
+    std::unordered_map<BaseObject*, RigidBody>         rigidBodies;
+    std::unordered_map<BaseObject*, CollisionTrigger>  collisionTriggers;
+
+    // ── Prefab ────────────────────────────────────────────────────────────────
+    std::unordered_map<std::string, std::string> prefabSourceGUID;
+
+    // ── Profiler / Memory debug windows ──────────────────────────────────────
+    bool showProfiler = false;
+    bool showMemoryWindow = false;
+    static constexpr int kProfilerSamples = 256;
+    float frameTimeSamples[kProfilerSamples] = {};
+    int   frameTimeSampleIdx = 0;
+
+    // ── Toolchain settings window ─────────────────────────────────────────────
+    bool showToolchainWindow = false;
+
+    // ── Script creation wizard ────────────────────────────────────────────────
+    bool showScriptWizard = false;
+    char newScriptName[64] = "MyScript";
+    int  newScriptTemplate = 0; // 0=Empty, 1=StartUpdate, 2=Full
 };
 
 // =============================================================================
@@ -1461,11 +1474,21 @@ static void RebuildHierarchy(IDEState& ide)
             n.name = lt.name;
             ide.hierRoots.push_back(n);
         }
+    // Add cameras that are not yet in the tree
+    for (auto& cam : ide.cameras)
+        if (!inTree.count(cam.name)) {
+            HierarchyNode n;
+            n.kind = HierarchyNode::CAMERA;
+            n.name = cam.name;
+            ide.hierRoots.push_back(n);
+        }
 
     // Nettoyer les références invalides
     std::unordered_set<std::string> objNames, ltNames;
     for (auto& o : ide.objects) objNames.insert(o.name);
     for (auto& l : ide.lights)  ltNames.insert(l.name);
+    std::unordered_set<std::string> camNames;
+    for (auto& c : ide.cameras) camNames.insert(c.name);
 
     std::function<void(std::vector<HierarchyNode>&)> prune = [&](std::vector<HierarchyNode>& nodes) {
         nodes.erase(std::remove_if(nodes.begin(), nodes.end(), [&](HierarchyNode& n) -> bool {
@@ -1476,6 +1499,7 @@ static void RebuildHierarchy(IDEState& ide)
             }
             if (n.kind == HierarchyNode::OBJECT) return !objNames.count(n.name);
             if (n.kind == HierarchyNode::LIGHT)  return !ltNames.count(n.name);
+            if (n.kind == HierarchyNode::CAMERA) return !camNames.count(n.name);
             return false;
             }), nodes.end());
         };
@@ -1652,28 +1676,26 @@ static void ParseListReply(const std::string& json, IDEState& ide)
     std::set<std::string> restoredSelection;
     for (const auto& name : previousSelection) {
         bool found = false;
-        // Vérifier dans les objets
         for (const auto& obj : ide.objects) {
-            if (obj.name == name) {
-                found = true;
-                break;
-            }
+            if (obj.name == name) { found = true; break; }
         }
-        // Vérifier dans les lumières
         if (!found) {
             for (const auto& lt : ide.lights) {
-                if (lt.name == name) {
-                    found = true;
-                    break;
-                }
+                if (lt.name == name) { found = true; break; }
+            }
+        }
+        // Also keep cameras in the selection — they live in ide.cameras, not objects/lights
+        if (!found) {
+            for (const auto& cam : ide.cameras) {
+                if (cam.name == name) { found = true; break; }
             }
         }
         if (found) {
             restoredSelection.insert(name);
         }
-        else {
-            ide.log.push(ConsoleLog::INFO, "[Selection] Object '" + name + "' no longer exists, removed from selection");
-        }
+        // Silently drop truly missing names — the log.push here caused a
+        // recursive mutex deadlock because ParseListReply is called while
+        // log.mtx is already held by the main-thread log-drain loop.
     }
 
     // Mettre à jour la sélection
@@ -1729,20 +1751,14 @@ static void ParseListReply(const std::string& json, IDEState& ide)
     // Mettre à jour l'inspector si l'objet verrouillé existe toujours
     if (ide.inspectorLocked && !ide.lockedInspectorObject.empty()) {
         bool lockedExists = false;
-        for (const auto& obj : ide.objects) {
-            if (obj.name == ide.lockedInspectorObject) {
-                lockedExists = true;
-                break;
-            }
-        }
-        if (!lockedExists) {
-            for (const auto& lt : ide.lights) {
-                if (lt.name == ide.lockedInspectorObject) {
-                    lockedExists = true;
-                    break;
-                }
-            }
-        }
+        for (const auto& obj : ide.objects)
+            if (obj.name == ide.lockedInspectorObject) { lockedExists = true; break; }
+        if (!lockedExists)
+            for (const auto& lt : ide.lights)
+                if (lt.name == ide.lockedInspectorObject) { lockedExists = true; break; }
+        if (!lockedExists)
+            for (const auto& cam : ide.cameras)
+                if (cam.name == ide.lockedInspectorObject) { lockedExists = true; break; }
         if (!lockedExists) {
             ide.inspectorLocked = false;
             ide.lockedInspectorObject.clear();
@@ -1752,6 +1768,16 @@ static void ParseListReply(const std::string& json, IDEState& ide)
 
 static void ParseInspectReply(const std::string& json, IDEState& ide)
 {
+    // Camera nodes are handled entirely by the camera inspector — skip parse.
+    if (json.find("camera:") != std::string::npos) return;
+    // Also skip failed inspects whose target is in ide.cameras
+    {
+        std::string msg = JsonGet(json, "msg");
+        if (!msg.empty() && msg.rfind("camera:", 0) == 0) return;
+        for (auto& c : ide.cameras)
+            if (c.name == JsonGet(json, "name")) return;
+    }
+
     ide.inspPos[0] = ide.inspPos[1] = ide.inspPos[2] = 0.f;
     ide.inspScale[0] = ide.inspScale[1] = ide.inspScale[2] = 1.f;
     ide.inspRot[0] = ide.inspRot[1] = ide.inspRot[2] = 0.f;
@@ -2059,11 +2085,14 @@ static void DrawHierarchyNodes(std::vector<HierarchyNode>& nodes, IDEState& ide,
         if (!matchesFilter(node.name)) continue;
 
         bool isLight = (node.kind == HierarchyNode::LIGHT);
+        bool isCamera = (node.kind == HierarchyNode::CAMERA);
 
         IDEObject* pObj = nullptr;
         IDELight* pLt = nullptr;
-        if (!isLight) for (auto& o : ide.objects) if (o.name == node.name) { pObj = &o; break; }
-        else          for (auto& l : ide.lights)  if (l.name == node.name) { pLt = &l; break; }
+        IDECamera* pCam = nullptr;
+        if (!isLight && !isCamera) for (auto& o : ide.objects) if (o.name == node.name) { pObj = &o; break; }
+        else if (isLight)          for (auto& l : ide.lights)  if (l.name == node.name) { pLt = &l; break; }
+        else                       for (auto& c : ide.cameras) if (c.name == node.name) { pCam = &c; break; }
 
         bool locked = pObj && pObj->locked;
         bool visible = pObj ? pObj->visible : true;
@@ -2076,12 +2105,15 @@ static void DrawHierarchyNodes(std::vector<HierarchyNode>& nodes, IDEState& ide,
             | ImGuiTreeNodeFlags_SpanFullWidth;
         if (selected) flags |= ImGuiTreeNodeFlags_Selected;
 
-        if (locked)        ImGui::PushStyleColor(ImGuiCol_Text, { 0.5f,0.5f,0.5f,1.f });
-        else if (isLight)  ImGui::PushStyleColor(ImGuiCol_Text, { 1.f,0.9f,0.4f,1.f });
-        else               ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_Text));
+        if (locked)         ImGui::PushStyleColor(ImGuiCol_Text, { 0.5f,0.5f,0.5f,1.f });
+        else if (isCamera)  ImGui::PushStyleColor(ImGuiCol_Text, { 0.6f,0.9f,1.0f,1.f });
+        else if (isLight)   ImGui::PushStyleColor(ImGuiCol_Text, { 1.f,0.9f,0.4f,1.f });
+        else                ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_Text));
 
         std::string iconStr;
-        if (isLight)
+        if (isCamera)
+            iconStr = "  " ICON_FA_VIDEO " ";
+        else if (isLight)
             iconStr = (pLt && pLt->lightType == "directional")
             ? "  " ICON_FA_SUN " "
             : (pLt && pLt->lightType == "ambient")
@@ -2090,7 +2122,7 @@ static void DrawHierarchyNodes(std::vector<HierarchyNode>& nodes, IDEState& ide,
         else
             iconStr = locked ? "  " ICON_FA_LOCK " " : "  " ICON_FA_CUBE " ";
 
-        if (!visible) iconStr = "  " ICON_FA_EYE_SLASH " ";
+        if (!isCamera && !isLight && !visible) iconStr = "  " ICON_FA_EYE_SLASH " ";
 
         std::string label = iconStr + node.name;
         if (pObj && !pObj->tag.empty()) label += "  [" + pObj->tag + "]";
@@ -2199,8 +2231,25 @@ static void DrawHierarchyNodes(std::vector<HierarchyNode>& nodes, IDEState& ide,
 
             if (ImGui::MenuItem("Duplicate")) {
                 std::string newName = node.name + "_copy";
-                if (!isLight) {
+                if (isCamera) {
+                    if (pCam) {
+                        Camera* newRtCam = new Camera(
+                            Vector3(pCam->px, pCam->py, pCam->pz),
+                            Quaternion::LookRotation(Vector3(0, 0, -1)));
+                        ide.sm->cameras->push_back(newRtCam);
+                        IDECamera dup = *pCam;
+                        dup.name = newName;
+                        dup.runtimeCamera = newRtCam;
+                        ide.cameras.push_back(dup);
+                        ide.sceneDirty = true;
+                        RebuildHierarchy(ide);
+                    }
+                }
+                else if (!isLight) {
                     ide.bus.send("clone " + node.name + " " + newName);
+                    ide.sceneDirty = true;
+                    ide.pendingSelection = newName;
+                    RefreshSceneList(ide);
                 }
                 else {
                     if (pLt) {
@@ -2210,10 +2259,10 @@ static void DrawHierarchyNodes(std::vector<HierarchyNode>& nodes, IDEState& ide,
                             pLt->lightType.c_str());
                         ide.bus.send(buf);
                     }
+                    ide.sceneDirty = true;
+                    ide.pendingSelection = newName;
+                    RefreshSceneList(ide);
                 }
-                ide.sceneDirty = true;
-                ide.pendingSelection = newName;
-                RefreshSceneList(ide);
             }
 
             if (ImGui::MenuItem("Copy")) {
@@ -2250,6 +2299,10 @@ static void DrawHierarchyNodes(std::vector<HierarchyNode>& nodes, IDEState& ide,
                     glm::vec3 target(pObj->px, pObj->py, pObj->pz);
                     ide.focus.Start(ide.sm->currentCamera, ide.editorFov, ide.viewportOrtho, ide.orthoSize, target, 5.f);
                 }
+                else if (pCam) {
+                    glm::vec3 target(pCam->px, pCam->py, pCam->pz);
+                    ide.focus.Start(ide.sm->currentCamera, ide.editorFov, ide.viewportOrtho, ide.orthoSize, target, 5.f);
+                }
             }
 
             ImGui::Separator();
@@ -2265,8 +2318,29 @@ static void DrawHierarchyNodes(std::vector<HierarchyNode>& nodes, IDEState& ide,
             ImGui::Separator();
 
             ImGui::PushStyleColor(ImGuiCol_Text, { 1.f,0.4f,0.4f,1.f });
-            if (ImGui::MenuItem(isLight ? "Remove Light" : "Delete")) {
-                if (isLight) {
+            const char* deleteLabel = isLight ? "Remove Light" : isCamera ? "Remove Camera" : "Delete";
+            if (ImGui::MenuItem(deleteLabel)) {
+                if (isCamera) {
+                    // Remove from ide.cameras and from sm->cameras
+                    ide.cameras.erase(
+                        std::remove_if(ide.cameras.begin(), ide.cameras.end(),
+                            [&](const IDECamera& c) { return c.name == node.name; }),
+                        ide.cameras.end());
+                    // Also remove the runtime Camera* from the scene
+                    if (ide.sm && ide.sm->cameras) {
+                        auto& sc = *ide.sm->cameras;
+                        sc.erase(std::remove_if(sc.begin(), sc.end(),
+                            [&](Camera* c) {
+                                for (auto& ic : ide.cameras) if (ic.runtimeCamera == c) return false;
+                                // If not in ide.cameras any more, it was the removed one
+                                return true;
+                            }), sc.end());
+                    }
+                    // Reset active play camera if we just removed cameras[0]
+                    if (!ide.cameras.empty() && ide.savedEditorCamera == nullptr)
+                        ide.sm->currentCamera = ide.cameras[0].runtimeCamera;
+                }
+                else if (isLight) {
                     ide.bus.send("removelight " + node.name);
                 }
                 else {
@@ -2277,7 +2351,7 @@ static void DrawHierarchyNodes(std::vector<HierarchyNode>& nodes, IDEState& ide,
                 }
                 ide.sceneDirty = true;
                 ide.selection.Remove(node.name);
-                RefreshSceneList(ide);
+                RebuildHierarchy(ide);
             }
             ImGui::PopStyleColor();
 
@@ -2703,6 +2777,8 @@ static void DrawScriptsInspector(IDEState& ide, const std::string& target, BaseO
     if (ImGui::BeginDragDropTarget()) {
         if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kAssetDragPayload)) {
             auto* ap = (AssetDragPayload*)payload->Data;
+
+            // Handle script drops
             if (ap->type == AssetType::Script) {
                 AssetRecord* rec = ide.assetDb.FindByGUID(std::string(ap->guidStr));
                 if (rec) {
@@ -2713,6 +2789,14 @@ static void DrawScriptsInspector(IDEState& ide, const std::string& target, BaseO
                     else
                         ide.log.push(ConsoleLog::REPLY_ERR,
                             "[Inspector] Failed to attach script " + rec->displayName);
+                }
+            }
+            // Optionally handle HDR drops in the scripts section (unusual, but possible)
+            else if (ap->type == AssetType::Texture) {
+                std::string ext = std::filesystem::path(ap->path).extension().string();
+                if (ext == ".hdr") {
+                    ide.log.push(ConsoleLog::INFO,
+                        "[Inspector] HDR dropped on Scripts section - use the Environment window instead");
                 }
             }
         }
@@ -2728,15 +2812,11 @@ static void DrawScriptsInspector(IDEState& ide, const std::string& target, BaseO
         for (auto& [guid, rec] : ide.assetDb.records) {
             if (rec.type == AssetType::Script) {
                 if (ImGui::MenuItem(rec.displayName.c_str())) {
-                    // Attach this script
                     ScriptComponent newComp;
                     newComp.scriptGUID = guid;
-                    newComp.compiledPath = ""; // will be set by LoadScript
+                    newComp.compiledPath = "";
                     if (ide.scriptManager->LoadScript(guid, rec.path, newComp)) {
                         obj->scripts.push_back(newComp);
-                        // Set game object pointer on the script instance
-                        // We need a wrapper – for simplicity we store the BaseObject pointer.
-                        // Extend IScript with SetGameObject or add a member.
                     }
                     else {
                         ide.log.push(ConsoleLog::REPLY_ERR,
@@ -2799,6 +2879,729 @@ static void DrawScriptsInspector(IDEState& ide, const std::string& target, BaseO
             ImGui::PopStyleColor();
         }
         ImGui::PopID();
+    }
+
+    // Note: For HDR skybox drops, they should be handled in the Viewport or Environment window,
+    // not in the Scripts section. Add a hint if needed
+    ImGui::TextDisabled("Drag scripts from Asset Browser to attach them");
+}
+
+// =============================================================================
+//  RigidBody Inspector
+// =============================================================================
+static void DrawRigidBodyInspector(IDEState& ide, BaseObject* obj)
+{
+    if (!obj) return;
+
+    auto it = ide.rigidBodies.find(obj);
+    bool hasRB = (it != ide.rigidBodies.end());
+
+    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4{ 0.15f, 0.25f, 0.45f, 1.0f });
+    if (!hasRB)
+    {
+        ImGui::Separator();
+        if (ImGui::Button("+ Add RigidBody", { -1, 0 }))
+        {
+            RigidBody rb;
+            rb.object = obj;
+            ide.rigidBodies[obj] = rb;
+            ide.physicsWorld.Register(&ide.rigidBodies[obj]);
+            ide.log.push(ConsoleLog::INFO, "[Physics] RigidBody added to object");
+        }
+        ImGui::PopStyleColor();
+        return;
+    }
+    ImGui::PopStyleColor();
+
+    RigidBody& rb = it->second;
+    if (ImGui::CollapsingHeader("  RigidBody", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        ImGui::PushID("rigidbody");
+        ImGui::DragFloat("Mass", (float*)&rb.mass, 0.1f, 0.001f, 10000.f);
+        ImGui::DragFloat("Drag", (float*)&rb.drag, 0.001f, 0.f, 1.f);
+        ImGui::DragFloat("Angular Drag", (float*)&rb.angularDrag, 0.001f, 0.f, 1.f);
+        ImGui::DragFloat("Restitution", (float*)&rb.restitution, 0.01f, 0.f, 1.f);
+        ImGui::DragFloat("Friction", (float*)&rb.friction, 0.01f, 0.f, 1.f);
+        ImGui::Checkbox("Use Gravity", &rb.useGravity);
+        ImGui::SameLine();
+        ImGui::Checkbox("Is Kinematic", &rb.isKinematic);
+        ImGui::Separator();
+        ImGui::TextDisabled("Velocity: %.2f %.2f %.2f",
+            rb.velocity.x, rb.velocity.y, rb.velocity.z);
+        ImGui::TextDisabled("Grounded: %s", rb.isGrounded ? "yes" : "no");
+
+        ImGui::Spacing();
+        if (ImGui::Button("Add Force (0,10,0)")) {
+            rb.AddImpulse(Vector3(0, 10, 0));
+        }
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Button, { 0.7f, 0.2f, 0.2f, 1.f });
+        if (ImGui::Button("Remove RigidBody")) {
+            ide.physicsWorld.Unregister(&rb);
+            ide.rigidBodies.erase(it);
+        }
+        ImGui::PopStyleColor();
+        ImGui::PopID();
+    }
+}
+
+// =============================================================================
+//  CollisionTrigger Inspector
+// =============================================================================
+static void DrawCollisionTriggerInspector(IDEState& ide, BaseObject* obj)
+{
+    if (!obj) return;
+
+    auto it = ide.collisionTriggers.find(obj);
+    bool hasCT = (it != ide.collisionTriggers.end());
+
+    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4{ 0.25f, 0.15f, 0.40f, 1.0f });
+    if (!hasCT)
+    {
+        ImGui::Separator();
+        if (ImGui::Button("+ Add CollisionTrigger", { -1, 0 }))
+        {
+            CollisionTrigger ct;
+            ct.object = obj;
+            ide.collisionTriggers[obj] = ct;
+            ide.log.push(ConsoleLog::INFO, "[Physics] CollisionTrigger added to object");
+        }
+        ImGui::PopStyleColor();
+        return;
+    }
+    ImGui::PopStyleColor();
+
+    CollisionTrigger& ct = it->second;
+    if (ImGui::CollapsingHeader("  CollisionTrigger", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        ImGui::PushID("collisiontrigger");
+        ImGui::Checkbox("Enabled", &ct.enabled);
+        ImGui::SameLine();
+        ImGui::Checkbox("Is Solid", &ct.isSolid);
+
+        char filterBuf[64];
+        strncpy_s(filterBuf, sizeof(filterBuf), ct.filterTag.c_str(), _TRUNCATE);
+        if (ImGui::InputText("Filter Tag", filterBuf, sizeof(filterBuf)))
+            ct.filterTag = filterBuf;
+
+        ImGui::Separator();
+        ImGui::TextDisabled("Callbacks: not yet editable in UI");
+        ImGui::TextDisabled("  OnEnter / OnStay / OnExit handled via script.");
+
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_Button, { 0.7f, 0.2f, 0.2f, 1.f });
+        if (ImGui::Button("Remove CollisionTrigger")) {
+            ide.collisionTriggers.erase(it);
+        }
+        ImGui::PopStyleColor();
+        ImGui::PopID();
+    }
+}
+
+// =============================================================================
+//  AnimatorComponent Inspector
+// =============================================================================
+static void DrawAnimatorInspector(IDEState& ide, BaseObject* obj)
+{
+    if (!obj) return;
+    // AnimatorComponent is stored directly on BaseObject
+    AnimatorComponent* anim = &obj->animator;
+    if (!anim) return;
+
+    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4{ 0.15f, 0.35f, 0.20f, 1.0f });
+    if (ImGui::CollapsingHeader("  Animator", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        ImGui::PopStyleColor();
+        ImGui::PushID("animator");
+
+        // Current clip
+        std::string curClip = anim->active() ? anim->currentClipName() : "(none)";
+        ImGui::TextDisabled("Current clip: %s", curClip.c_str());
+        ImGui::DragFloat("Speed", &anim->speed, 0.01f, 0.f, 10.f);
+
+        // Skeleton / bone info
+        if (anim->skeleton) {
+            ImGui::TextDisabled("Bones: %zu  |  Palette: %zu",
+                anim->skeleton->bones.size(), anim->bonePalette.size());
+        }
+
+        ImGui::Separator();
+
+        // Clip selection from asset database
+        if (ImGui::BeginCombo("Play Clip", curClip.c_str()))
+        {
+            for (auto& [guid, rec] : ide.assetDb.records)
+            {
+                if (rec.type != AssetType::Model) continue;
+                for (auto& sub : rec.subObjects)
+                {
+                    // Animation clips are stored as sub-objects of model assets
+                    bool sel = (curClip == sub.name);
+                    if (ImGui::Selectable(sub.name.c_str(), sel))
+                    {
+                        // Build a minimal AnimationClip to play
+                        auto clip = std::make_shared<AnimationClip>();
+                        clip->name = sub.name;
+                        clip->duration = 1.f;
+                        clip->loops = true;
+                        anim->play(clip, 0.f);
+                    }
+                    if (sel) ImGui::SetItemDefaultFocus();
+                }
+            }
+            ImGui::EndCombo();
+        }
+
+        // Cross-fade popup
+        if (ImGui::Button("Cross-fade to..."))
+            ImGui::OpenPopup("CrossFadePopup");
+
+        if (ImGui::BeginPopup("CrossFadePopup"))
+        {
+            static float fadeDur = 0.25f;
+            ImGui::DragFloat("Fade Duration", &fadeDur, 0.01f, 0.01f, 5.f);
+            ImGui::Separator();
+            for (auto& [guid, rec] : ide.assetDb.records)
+            {
+                if (rec.type != AssetType::Model) continue;
+                for (auto& sub : rec.subObjects)
+                {
+                    if (ImGui::MenuItem(sub.name.c_str()))
+                    {
+                        auto clip = std::make_shared<AnimationClip>();
+                        clip->name = sub.name;
+                        clip->duration = 1.f;
+                        clip->loops = true;
+                        anim->crossFadeTo(clip, fadeDur, 0.f);
+                        ImGui::CloseCurrentPopup();
+                    }
+                }
+            }
+            ImGui::EndPopup();
+        }
+
+        ImGui::PopID();
+    }
+    else { ImGui::PopStyleColor(); }
+}
+
+// =============================================================================
+//  Material Texture Layers Editor
+// =============================================================================
+static void DrawMaterialTextureLayersEditor(IDEState& ide, BaseObject* obj)
+{
+    if (!obj || !obj->material) return;
+    Material* mat = obj->material;
+
+    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4{ 0.35f, 0.20f, 0.10f, 1.0f });
+    if (ImGui::CollapsingHeader("  Texture Layers"))
+    {
+        ImGui::PopStyleColor();
+        ImGui::PushID("texlayers");
+
+        static const char* blendModeNames[] = { "Normal", "Multiply", "Add" };
+        static const char* maskChanNames[] = { "R", "G", "B", "A" };
+
+        int toRemove = -1;
+        for (int i = 0; i < (int)mat->textureLayers.size(); ++i)
+        {
+            TextureLayer& layer = mat->textureLayers[i];
+            ImGui::PushID(i);
+
+            char header[64];
+            std::snprintf(header, sizeof(header), "Layer %d: %s", i,
+                layer.texture.name.empty() ? "(no texture)" : layer.texture.name.c_str());
+
+            if (ImGui::TreeNodeEx(header, ImGuiTreeNodeFlags_DefaultOpen))
+            {
+                // Texture drop target
+                char texBuf[256];
+                strncpy_s(texBuf, sizeof(texBuf),
+                    layer.texture.name.empty() ? "(none)" : layer.texture.name.c_str(), _TRUNCATE);
+                ImGui::InputText("Texture", texBuf, sizeof(texBuf),
+                    ImGuiInputTextFlags_ReadOnly);
+
+                if (ImGui::BeginDragDropTarget()) {
+                    if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload(kAssetDragPayload)) {
+                        auto* ap = (AssetDragPayload*)p->Data;
+                        if (ap->type == AssetType::Texture) {
+                            std::string texName = fs::path(ap->path).stem().string();
+                            Texture texDesc(texName, ap->path);
+                            ide.renderer->texManager.load(texDesc);
+                            layer.texture = texDesc;
+                            mat->dirty = true;
+                        }
+                    }
+                    ImGui::EndDragDropTarget();
+                }
+
+                bool changed = false;
+                changed |= ImGui::DragFloat("Tiling U", &layer.texture.tilingU, 0.01f, 0.01f, 100.f);
+                changed |= ImGui::DragFloat("Tiling V", &layer.texture.tilingV, 0.01f, 0.01f, 100.f);
+                changed |= ImGui::DragFloat("Offset U", &layer.texture.offsetU, 0.01f, -100.f, 100.f);
+                changed |= ImGui::DragFloat("Offset V", &layer.texture.offsetV, 0.01f, -100.f, 100.f);
+                changed |= ImGui::DragFloat("Weight", &layer.blendWeight, 0.01f, 0.f, 1.f);
+                int blendModeInt = static_cast<int>(layer.blendMode);
+                if (ImGui::Combo("Blend Mode", &blendModeInt, blendModeNames, 3)) {
+                    layer.blendMode = static_cast<LayerBlendMode>(blendModeInt);
+                }
+
+                ImGui::Separator();
+                ImGui::TextDisabled("Mask");
+                changed |= ImGui::DragFloat("Mask Min", &layer.maskMin, 0.01f, 0.f, 1.f);
+                changed |= ImGui::DragFloat("Mask Max", &layer.maskMax, 0.01f, 0.f, 1.f);
+                changed |= ImGui::Combo("Mask Channel", &layer.maskChannel, maskChanNames, 4);
+                changed |= ImGui::Checkbox("Invert Mask", &layer.maskInvert);
+                int maskTypeInt = static_cast<int>(layer.maskType);
+                if (ImGui::DragInt("Mask Type", &maskTypeInt, 1, 0, 4)) {
+                    layer.maskType = static_cast<LayerMaskType>(maskTypeInt);
+                }
+
+                if (changed) mat->dirty = true;
+
+                ImGui::Spacing();
+                ImGui::PushStyleColor(ImGuiCol_Button, { 0.7f, 0.2f, 0.2f, 1.f });
+                if (ImGui::SmallButton("Remove Layer")) toRemove = i;
+                ImGui::PopStyleColor();
+
+                ImGui::TreePop();
+            }
+            ImGui::PopID();
+        }
+
+        if (toRemove >= 0) {
+            mat->textureLayers.erase(mat->textureLayers.begin() + toRemove);
+            mat->dirty = true;
+        }
+
+        if ((int)mat->textureLayers.size() < 8)
+        {
+            if (ImGui::Button("+ Add Texture Layer", { -1, 0 })) {
+                mat->textureLayers.push_back(TextureLayer{});
+                mat->dirty = true;
+            }
+        }
+        else {
+            ImGui::TextDisabled("Maximum 8 layers reached.");
+        }
+
+        ImGui::PopID();
+    }
+    else { ImGui::PopStyleColor(); }
+}
+
+// =============================================================================
+//  Prefab creation helper
+// =============================================================================
+static void DrawPrefabSection(IDEState& ide, const std::string& target, BaseObject* obj)
+{
+    if (!obj) return;
+
+    ImGui::Separator();
+    if (ImGui::Button("Create Prefab...", { -1, 0 }))
+        ImGui::OpenPopup("CreatePrefabPopup");
+
+    if (ImGui::BeginPopupModal("CreatePrefabPopup", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        static char prefabName[64] = {};
+        if (prefabName[0] == '\0')
+            strncpy_s(prefabName, sizeof(prefabName), target.c_str(), _TRUNCATE);
+
+        ImGui::InputText("Prefab Name", prefabName, sizeof(prefabName));
+
+        if (ImGui::Button("Save", { 120, 0 }))
+        {
+            // Build a .honprefab JSON file
+            std::string outDir = std::string(ide.project.rootFolder).empty()
+                ? "assets/prefabs/" : (std::string(ide.project.rootFolder) + "/assets/prefabs/");
+            fs::create_directories(outDir);
+            std::string outPath = outDir + prefabName + ".honprefab";
+
+            std::ofstream f(outPath);
+            if (f.is_open())
+            {
+                f << "{\n";
+                f << "  \"name\": \"" << prefabName << "\",\n";
+                f << "  \"transform\": {\n";
+                f << "    \"px\":" << obj->transform.position.x
+                    << ", \"py\":" << obj->transform.position.y
+                    << ", \"pz\":" << obj->transform.position.z << ",\n";
+                f << "    \"sx\":" << obj->transform.scale.x
+                    << ", \"sy\":" << obj->transform.scale.y
+                    << ", \"sz\":" << obj->transform.scale.z << ",\n";
+                f << "    \"rw\":" << obj->transform.rotation.w
+                    << ", \"rx\":" << obj->transform.rotation.x
+                    << ", \"ry\":" << obj->transform.rotation.y
+                    << ", \"rz\":" << obj->transform.rotation.z << "\n";
+                f << "  },\n";
+
+                // RigidBody component
+                auto rbIt = ide.rigidBodies.find(obj);
+                if (rbIt != ide.rigidBodies.end()) {
+                    const RigidBody& rb = rbIt->second;
+                    f << "  \"rigidbody\": {"
+                        << "\"mass\":" << rb.mass
+                        << ", \"drag\":" << rb.drag
+                        << ", \"restitution\":" << rb.restitution
+                        << ", \"friction\":" << rb.friction
+                        << ", \"useGravity\":" << (rb.useGravity ? "true" : "false")
+                        << ", \"isKinematic\":" << (rb.isKinematic ? "true" : "false")
+                        << "},\n";
+                }
+
+                // Scripts
+                f << "  \"scripts\": [";
+                bool first = true;
+                for (auto& sc : obj->scripts) {
+                    if (!first) f << ", ";
+                    f << "\"" << sc.scriptGUID << "\"";
+                    first = false;
+                }
+                f << "]\n}\n";
+                f.close();
+
+                // Register in asset DB
+                auto& rec = ide.assetDb.Register(outPath);
+                ide.assetDb.Save(".honassets");
+                ide.toastMgr.Push("Prefab saved: " + outPath, Toast::Success, 2.5f);
+                ide.prefabSourceGUID[target] = rec.guid.ToString();
+                ide.assetBrowser.dirDirty = true;
+            }
+            else {
+                ide.log.push(ConsoleLog::REPLY_ERR, "[Prefab] Could not write: " + outPath);
+            }
+            prefabName[0] = '\0';
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", { 80, 0 })) {
+            prefabName[0] = '\0';
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    // Show prefab source GUID if this object was instantiated from one
+    auto pfIt = ide.prefabSourceGUID.find(target);
+    if (pfIt != ide.prefabSourceGUID.end())
+    {
+        ImGui::TextDisabled("Prefab source: %s", pfIt->second.c_str());
+        if (ImGui::SmallButton("Apply to Prefab")) {
+            ide.log.push(ConsoleLog::INFO,
+                "[Prefab] Apply-to-prefab not yet implemented.");
+        }
+    }
+}
+
+// =============================================================================
+//  Multi-Object Transform Editing
+// =============================================================================
+static void DrawMultiSelectionInspector(IDEState& ide)
+{
+    size_t count = ide.selection.Size();
+    ImGui::TextColored({ 0.8f, 0.9f, 1.0f, 1.f },
+        "  %zu objects selected", count);
+    ImGui::Separator();
+
+    // Gather objects
+    std::vector<BaseObject*> selectedObjects;
+    {
+        std::shared_lock<std::shared_mutex> lk(g_sceneMutex);
+        for (const auto& name : ide.selection.items) {
+            auto it = g_namedObjects.find(name);
+            if (it != g_namedObjects.end()) selectedObjects.push_back(it->second);
+        }
+    }
+
+    ImGui::TextDisabled("  Transform (applies delta to all selected)");
+
+    static float multiPos[3] = {};
+    static float multiRot[3] = {};
+    static float multiScale[3] = { 0.f, 0.f, 0.f };
+
+    float step = ide.snapEnabled ? ide.snapPosition : 0.05f;
+
+    if (ImGui::DragFloat3("Position Offset##multi", multiPos, step))
+    {
+        for (BaseObject* o : selectedObjects) {
+            o->transform.position.x += multiPos[0];
+            o->transform.position.y += multiPos[1];
+            o->transform.position.z += multiPos[2];
+        }
+        multiPos[0] = multiPos[1] = multiPos[2] = 0.f;
+        ide.sceneDirty = true;
+    }
+
+    float rotStep = ide.snapEnabled ? ide.snapRotation : 0.5f;
+    if (ImGui::DragFloat3("Rotation Offset##multi", multiRot, rotStep))
+    {
+        for (BaseObject* o : selectedObjects) {
+            Quaternion delta = EulerToQuat(multiRot[0], multiRot[1], multiRot[2]);
+            o->transform.rotation = delta * o->transform.rotation;
+        }
+        multiRot[0] = multiRot[1] = multiRot[2] = 0.f;
+        ide.sceneDirty = true;
+    }
+
+    float scaleStep = ide.snapEnabled ? ide.snapScale : 0.01f;
+    if (ImGui::DragFloat3("Scale Offset##multi", multiScale, scaleStep))
+    {
+        for (BaseObject* o : selectedObjects) {
+            o->transform.scale.x += multiScale[0];
+            o->transform.scale.y += multiScale[1];
+            o->transform.scale.z += multiScale[2];
+        }
+        multiScale[0] = multiScale[1] = multiScale[2] = 0.f;
+        ide.sceneDirty = true;
+    }
+
+    ImGui::Spacing();
+    if (ImGui::Button("Clear Selection")) ide.selection.Clear();
+    ImGui::SameLine();
+    if (ImGui::Button("Delete All")) {
+        for (const auto& name : ide.selection.items)
+            ide.bus.send("delete " + name);
+        ide.selection.Clear();
+        ide.sceneDirty = true;
+        RefreshSceneList(ide);
+    }
+}
+
+// =============================================================================
+//  Profiler Window
+// =============================================================================
+static void DrawProfilerWindow(IDEState& ide, float dt)
+{
+    if (!ide.showProfiler) return;
+    ImGui::SetNextWindowSize({ 500, 350 }, ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Profiler", &ide.showProfiler))
+    {
+        // Record frame time
+        ide.frameTimeSamples[ide.frameTimeSampleIdx] = dt * 1000.f;
+        ide.frameTimeSampleIdx = (ide.frameTimeSampleIdx + 1) % IDEState::kProfilerSamples;
+
+        float maxMs = 0.f;
+        for (float v : ide.frameTimeSamples) maxMs = (std::max)(maxMs, v);
+
+        char overlay[32];
+        float cur = ide.frameTimeSamples[(ide.frameTimeSampleIdx - 1 + IDEState::kProfilerSamples)
+            % IDEState::kProfilerSamples];
+        std::snprintf(overlay, sizeof(overlay), "%.2f ms", cur);
+
+        ImGui::PlotLines("Frame Time (ms)", ide.frameTimeSamples, IDEState::kProfilerSamples,
+            ide.frameTimeSampleIdx, overlay, 0.f, (std::max)(maxMs * 1.2f, 33.f), { -1, 80 });
+
+        ImGui::Separator();
+        ImGui::TextDisabled("FPS: %d", ide.statsFps > 0 ? ide.statsFps : (int)(1.f / (dt + 1e-6f)));
+        ImGui::TextDisabled("Objects: %zu | Lights: %zu", ide.objects.size(), ide.lights.size());
+        ImGui::TextDisabled("RigidBodies: %zu | Triggers: %zu",
+            ide.rigidBodies.size(), ide.collisionTriggers.size());
+        ImGui::TextDisabled("Scripts total: (see Memory window)");
+
+        ImGui::Separator();
+        ImGui::TextDisabled("Draw calls: reported by GPURenderer (if exposed)");
+    }
+    ImGui::End();
+}
+
+// =============================================================================
+//  Memory Window
+// =============================================================================
+static void DrawMemoryWindow(IDEState& ide)
+{
+    if (!ide.showMemoryWindow) return;
+    ImGui::SetNextWindowSize({ 420, 300 }, ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Memory", &ide.showMemoryWindow))
+    {
+        size_t texCount = 0;
+        size_t scriptCount = 0;
+        size_t totalVerts = 0;
+
+        for (auto& [guid, rec] : ide.assetDb.records) {
+            if (rec.type == AssetType::Texture) ++texCount;
+            if (rec.type == AssetType::Script)  ++scriptCount;
+        }
+
+        {
+            std::shared_lock<std::shared_mutex> lk(g_sceneMutex);
+            for (auto& [name, obj] : g_namedObjects) {
+                if (obj) {
+                    totalVerts += obj->bVertices.size();
+                }
+            }
+        }
+
+        ImGui::Text("Asset Database Records:  %zu", ide.assetDb.records.size());
+        ImGui::Text("Textures registered:     %zu", texCount);
+        ImGui::Text("Scripts registered:      %zu", scriptCount);
+        ImGui::Text("Total mesh vertices:     %zu", totalVerts);
+        ImGui::Text("Scene objects:           %zu", ide.objects.size());
+        ImGui::Text("Scene lights:            %zu", ide.lights.size());
+        ImGui::Text("RigidBodies:             %zu", ide.rigidBodies.size());
+        ImGui::Text("Collision Triggers:      %zu", ide.collisionTriggers.size());
+        ImGui::Text("Hierarchy folders:       %zu", [&]() {
+            size_t cnt = 0;
+            for (auto& n : ide.hierRoots) if (n.kind == HierarchyNode::FOLDER) ++cnt;
+            return cnt;
+            }());
+    }
+    ImGui::End();
+}
+
+// =============================================================================
+//  Toolchain Settings Window
+// =============================================================================
+static void DrawToolchainWindow(IDEState& ide)
+{
+    if (!ide.showToolchainWindow) return;
+    ImGui::SetNextWindowSize({ 520, 420 }, ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Scripting Toolchain", &ide.showToolchainWindow))
+    {
+        EditorSettings& es = ide.editorSettings;
+
+        ImGui::SeparatorText("Compiler");
+        ImGui::InputText("Compiler Path", es.compilerPath, sizeof(es.compilerPath));
+        ImGui::InputText("Engine Lib Path", es.engineLibPath, sizeof(es.engineLibPath));
+
+        ImGui::SeparatorText("Include Paths");
+        static char newInclude[256] = {};
+        ImGui::InputText("##newinc", newInclude, sizeof(newInclude));
+        ImGui::SameLine();
+        if (ImGui::Button("Add##inc")) {
+            if (newInclude[0] != '\0') {
+                es.includePaths.push_back(newInclude);
+                newInclude[0] = '\0';
+            }
+        }
+        for (int i = 0; i < (int)es.includePaths.size(); ++i) {
+            ImGui::PushID(i);
+            ImGui::TextUnformatted(es.includePaths[i].c_str());
+            ImGui::SameLine();
+            if (ImGui::SmallButton("X")) { es.includePaths.erase(es.includePaths.begin() + i); --i; }
+            ImGui::PopID();
+        }
+
+        ImGui::SeparatorText("Library Paths");
+        static char newLib[256] = {};
+        ImGui::InputText("##newlib", newLib, sizeof(newLib));
+        ImGui::SameLine();
+        if (ImGui::Button("Add##lib")) {
+            if (newLib[0] != '\0') {
+                es.libraryPaths.push_back(newLib);
+                newLib[0] = '\0';
+            }
+        }
+        for (int i = 0; i < (int)es.libraryPaths.size(); ++i) {
+            ImGui::PushID(1000 + i);
+            ImGui::TextUnformatted(es.libraryPaths[i].c_str());
+            ImGui::SameLine();
+            if (ImGui::SmallButton("X")) { es.libraryPaths.erase(es.libraryPaths.begin() + i); --i; }
+            ImGui::PopID();
+        }
+
+        ImGui::SeparatorText("Link Libraries");
+        static char newLinkLib[128] = {};
+        ImGui::InputText("##newlnk", newLinkLib, sizeof(newLinkLib));
+        ImGui::SameLine();
+        if (ImGui::Button("Add##lnk")) {
+            if (newLinkLib[0] != '\0') {
+                es.linkLibraries.push_back(newLinkLib);
+                newLinkLib[0] = '\0';
+            }
+        }
+        for (int i = 0; i < (int)es.linkLibraries.size(); ++i) {
+            ImGui::PushID(2000 + i);
+            ImGui::TextUnformatted(es.linkLibraries[i].c_str());
+            ImGui::SameLine();
+            if (ImGui::SmallButton("X")) { es.linkLibraries.erase(es.linkLibraries.begin() + i); --i; }
+            ImGui::PopID();
+        }
+
+        ImGui::Separator();
+        if (ImGui::Button("Apply & Save", { 160, 0 }))
+        {
+            ScriptManager::SetToolchainPath(fs::path(es.compilerPath));
+            for (auto& inc : es.includePaths)
+                ScriptManager::AddIncludePath(fs::path(inc));
+            for (auto& lib : es.libraryPaths)
+                ScriptManager::AddLibraryPath(fs::path(lib));
+            for (auto& lnk : es.linkLibraries)
+                ScriptManager::AddLinkLibrary(lnk);
+            es.Save("ide_settings.ini");
+            ide.toastMgr.Push("Toolchain settings applied.", Toast::Success, 2.0f);
+        }
+    }
+    ImGui::End();
+}
+
+// =============================================================================
+//  Script Creation Wizard Modal
+// =============================================================================
+static void DrawScriptWizardModal(IDEState& ide)
+{
+    if (ide.showScriptWizard) {
+        ImGui::OpenPopup("Create Script##wizard");
+        ide.showScriptWizard = false;
+    }
+
+    if (ImGui::BeginPopupModal("Create Script##wizard", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        static const char* kTemplates[] = { "Empty", "Start/Update", "Full Example" };
+        ImGui::InputText("Script Name", ide.newScriptName, sizeof(ide.newScriptName));
+        ImGui::Combo("Template", &ide.newScriptTemplate, kTemplates, 3);
+        ImGui::TextDisabled("Language: C++ (.cpp)");
+
+        if (ImGui::Button("Create", { 120, 0 }))
+        {
+            std::string scriptDir = std::string(ide.project.rootFolder).empty()
+                ? "scripts/" : (std::string(ide.project.rootFolder) + "/scripts/");
+            fs::create_directories(scriptDir);
+            std::string outPath = scriptDir + ide.newScriptName + ".cpp";
+
+            std::ofstream f(outPath);
+            if (f.is_open())
+            {
+                f << "#include \"iscript.h\"\n";
+                f << "#include \"baseobject.h\"\n\n";
+                f << "class " << ide.newScriptName << " : public IScript {\n";
+                f << "public:\n";
+                if (ide.newScriptTemplate >= 1) {
+                    f << "    void Start() override {}\n";
+                    f << "    void Update(float dt) override {}\n";
+                }
+                if (ide.newScriptTemplate == 2) {
+                    f << "    void OnDestroy() override {}\n";
+                    f << "    void OnCollision(BaseObject* other) {}\n";
+                }
+                f << "};\n\n";
+                f << "extern \"C\" IScript* CreateScript() { return new " << ide.newScriptName << "(); }\n";
+                f << "extern \"C\" void DestroyScript(IScript* s) { delete s; }\n";
+                f.close();
+
+                // Register in asset DB
+                auto& rec = ide.assetDb.Register(outPath);
+                ide.assetDb.Save(".honassets");
+                ide.assetBrowser.dirDirty = true;
+
+                // Attempt to compile
+                if (ide.scriptManager) {
+                    std::string dllOut;
+                    std::string cmd = "g++ -std=c++20 -shared -fPIC -o "
+                        + scriptDir + ide.newScriptName + ".so "
+                        + outPath + " 2>&1";
+                    ScriptManager::CompileScript(outPath, cmd, dllOut);
+                }
+
+                ide.toastMgr.Push("Script created: " + outPath, Toast::Success, 2.5f);
+            }
+            else {
+                ide.log.push(ConsoleLog::REPLY_ERR, "[Script] Could not write: " + outPath);
+            }
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", { 80, 0 })) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
     }
 }
 
@@ -2876,14 +3679,9 @@ static void DrawInspectorPanel(IDEState& ide)
         ImGui::SameLine();
     }
 
-    // MODIFIED: multi-selection message
+    // Multi-selection: delegate to dedicated inspector
     if (ide.selection.Size() > 1) {
-        ImGui::TextColored({ 0.8f, 0.9f, 1.0f, 1.f }, "  %zu objects selected", ide.selection.Size());
-        ImGui::TextDisabled("  Multi-selection editing limited");
-        ImGui::Separator();
-        if (ImGui::Button("Clear selection")) {
-            ide.selection.Clear();
-        }
+        DrawMultiSelectionInspector(ide);
         ImGui::EndChild();
         return;
     }
@@ -2901,8 +3699,50 @@ static void DrawInspectorPanel(IDEState& ide)
     IDELight* pLt = nullptr;
     for (auto& l : ide.lights) if (l.name == inspectionTarget) { pLt = &l; break; }
 
+    IDECamera* pCam = nullptr;
+    for (auto& c : ide.cameras) if (c.name == inspectionTarget) { pCam = &c; break; }
+
     bool isLight = (pObj == nullptr && pLt != nullptr);
-    bool isUnknown = (pObj == nullptr && pLt == nullptr);
+    bool isCamera = (pObj == nullptr && pLt == nullptr && pCam != nullptr);
+    bool isUnknown = (pObj == nullptr && pLt == nullptr && pCam == nullptr);
+
+    // ── Camera inspector ─────────────────────────────────────────────────────
+    if (isCamera && pCam)
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, { 0.6f,0.9f,1.0f,1.f });
+        ImGui::Text("  " ICON_FA_VIDEO "  %s  [Camera]", inspectionTarget.c_str());
+        ImGui::PopStyleColor();
+        ImGui::Separator();
+
+        bool changed = false;
+        changed |= ImGui::DragFloat3("Position##cam", &pCam->px, 0.05f);
+        changed |= ImGui::DragFloat("FOV##cam", &pCam->fov, 0.5f, 10.f, 170.f);
+
+        if (changed && pCam->runtimeCamera)
+        {
+            pCam->runtimeCamera->transform.position = Vector3(pCam->px, pCam->py, pCam->pz);
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+
+        // Make this the active play camera
+        bool isActive = (!ide.cameras.empty() && &ide.cameras[0] == pCam);
+        if (isActive)
+            ImGui::TextColored({ 0.4f,1.f,0.4f,1.f }, "  " ICON_FA_CIRCLE_CHECK "  Default play camera");
+        else if (ImGui::Button("Set as default play camera"))
+        {
+            // Swap to front so Play picks it up as cameras[0]
+            for (size_t i = 1; i < ide.cameras.size(); ++i)
+                if (&ide.cameras[i] == pCam) {
+                    std::swap(ide.cameras[0], ide.cameras[i]);
+                    break;
+                }
+        }
+
+        ImGui::EndChild();
+        return;
+    }
 
     if (isUnknown)
     {
@@ -2962,6 +3802,21 @@ static void DrawInspectorPanel(IDEState& ide)
         if (it != g_namedObjects.end()) baseObj = it->second;
         lock.unlock();
         DrawScriptsInspector(ide, inspectionTarget, baseObj);
+    }
+
+    // Physics components (objects only)
+    if (!isLight && pObj) {
+        BaseObject* baseObj = nullptr;
+        {
+            std::shared_lock<std::shared_mutex> lock(g_sceneMutex);
+            auto it = g_namedObjects.find(inspectionTarget);
+            if (it != g_namedObjects.end()) baseObj = it->second;
+        }
+        DrawRigidBodyInspector(ide, baseObj);
+        DrawCollisionTriggerInspector(ide, baseObj);
+        DrawAnimatorInspector(ide, baseObj);
+        DrawMaterialTextureLayersEditor(ide, baseObj);
+        DrawPrefabSection(ide, inspectionTarget, baseObj);
     }
 
     // ── Asset Import Settings ─────────────────────────────────────────────────
@@ -3058,8 +3913,6 @@ static void UpdateEditorCamera(IDEState& ide, float dt, int vw, int vh,
     bool mouseInViewport = (io.MousePos.x >= imagePos.x && io.MousePos.x <= imagePos.x + imageSize.x &&
         io.MousePos.y >= imagePos.y && io.MousePos.y <= imagePos.y + imageSize.y);
 
-    if (!mouseInViewport) return;
-
     // --- Point focal : centre de l'objet sélectionné ou centre de la scène ---
     glm::vec3 pivotPoint(0.0f, 0.0f, 0.0f);
 
@@ -3077,6 +3930,15 @@ static void UpdateEditorCamera(IDEState& ide, float dt, int vw, int vh,
             for (auto& light : ide.lights) {
                 if (light.name == primary) {
                     pivotPoint = glm::vec3(light.px, light.py, light.pz);
+                    break;
+                }
+            }
+        }
+        // Si non trouvé dans les lumières, chercher dans les caméras
+        if (pivotPoint == glm::vec3(0.0f)) {
+            for (auto& cam : ide.cameras) {
+                if (cam.name == primary) {
+                    pivotPoint = glm::vec3(cam.px, cam.py, cam.pz);
                     break;
                 }
             }
@@ -3103,17 +3965,44 @@ static void UpdateEditorCamera(IDEState& ide, float dt, int vw, int vh,
     // --- Gestion des états de souris ---
     static bool wasRightDragging = false;
     static bool wasMiddleDragging = false;
+    static bool dragStartedInViewport = false;  // Nouveau flag pour suivre où le drag a commencé
     static ImVec2 lastMousePos;
 
     bool rightMouseDown = ImGui::IsMouseDown(ImGuiMouseButton_Right);
     bool middleMouseDown = ImGui::IsMouseDown(ImGuiMouseButton_Middle);
+
+    // Vérifier si on vient juste de commencer un drag
+    bool rightJustStarted = rightMouseDown && !wasRightDragging;
+    bool middleJustStarted = middleMouseDown && !wasMiddleDragging;
+
+    // Empêcher le début d'un drag en dehors du viewport
+    if (rightJustStarted && !mouseInViewport) {
+        // Ne pas démarrer le drag si on est en dehors
+        wasRightDragging = false;
+    }
+    else if (rightJustStarted && mouseInViewport) {
+        dragStartedInViewport = true;
+    }
+
+    if (middleJustStarted && !mouseInViewport) {
+        // Ne pas démarrer le drag si on est en dehors
+        wasMiddleDragging = false;
+    }
+    else if (middleJustStarted && mouseInViewport) {
+        dragStartedInViewport = true;
+    }
+
+    // Réinitialiser le flag quand aucun bouton n'est enfoncé
+    if (!rightMouseDown && !middleMouseDown) {
+        dragStartedInViewport = false;
+    }
 
     // Calculer le delta souris
     ImVec2 currentMousePos = io.MousePos;
     ImVec2 mouseDelta = { 0, 0 };
 
     // Pour le clic droit (orbit)
-    if (rightMouseDown) {
+    if (rightMouseDown && (wasRightDragging || dragStartedInViewport)) {
         if (wasRightDragging) {
             mouseDelta.x = currentMousePos.x - lastMousePos.x;
             mouseDelta.y = (currentMousePos.y - lastMousePos.y) * -1;
@@ -3126,7 +4015,7 @@ static void UpdateEditorCamera(IDEState& ide, float dt, int vw, int vh,
     }
 
     // Pour le clic milieu (pan)
-    if (middleMouseDown) {
+    if (middleMouseDown && (wasMiddleDragging || dragStartedInViewport)) {
         if (wasMiddleDragging) {
             mouseDelta.x = currentMousePos.x - lastMousePos.x;
             mouseDelta.y = currentMousePos.y - lastMousePos.y;
@@ -3139,7 +4028,7 @@ static void UpdateEditorCamera(IDEState& ide, float dt, int vw, int vh,
     }
 
     // --- ROTATION : Clic droit (rotation autour de la caméra, pas du pivot) ---
-    if (rightMouseDown && !io.KeyAlt && (mouseDelta.x != 0 || mouseDelta.y != 0)) {
+    if (rightMouseDown && !io.KeyAlt && (mouseDelta.x != 0 || mouseDelta.y != 0) && dragStartedInViewport) {
         // Accelerative rotation: slow for small movements, faster for quick flicks.
         // ~0.17°/px at 1 px, scales to ~4° at 20 px;
         auto accel = [](float raw) -> float {
@@ -3195,7 +4084,7 @@ static void UpdateEditorCamera(IDEState& ide, float dt, int vw, int vh,
             Vector3(forward.x, forward.y, forward.z));
     }
 
-    else if (middleMouseDown && (mouseDelta.x != 0 || mouseDelta.y != 0)) {
+    else if (middleMouseDown && (mouseDelta.x != 0 || mouseDelta.y != 0) && dragStartedInViewport) {
         glm::vec3 camPos = cam->transform.position.ToGLM();
         glm::vec3 forward = cam->transform.forward().ToGLM();
         glm::vec3 right = cam->transform.right().ToGLM();
@@ -3224,7 +4113,6 @@ static void UpdateEditorCamera(IDEState& ide, float dt, int vw, int vh,
         pivotPoint += panDelta;
     }
 }
-
 // =============================================================================
 //  Viewport  — avec contrôles de caméra éditeur (Unity-style)
 // =============================================================================
@@ -3239,18 +4127,22 @@ static void HandleShortcuts(IDEState& ide, bool& quitRequested)
         ide.sceneDirty = false;
         RefreshSceneList(ide);
     }
+
     // Ctrl+S : Save scene
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S)) {
         ide.showSaveModal = true;
     }
+
     // Ctrl+O : Load scene
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O)) {
         ide.showLoadModal = true;
     }
+
     // Ctrl+Shift+S : Toggle snap
     if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_S)) {
         ide.snapEnabled = !ide.snapEnabled;
     }
+
     // Ctrl+Z : Undo
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z)) {
         if (!ide.undoStack.empty()) {
@@ -3258,6 +4150,13 @@ static void HandleShortcuts(IDEState& ide, bool& quitRequested)
             ide.log.push(ConsoleLog::INFO, "[Edit] Undo");
         }
     }
+
+    // Ctrl+Y or Ctrl+Shift+Z : Redo
+    if ((io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Y)) ||
+        (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z))) {
+        ide.log.push(ConsoleLog::INFO, "[Edit] Redo (not yet implemented)");
+    }
+
     // Ctrl+D : Duplicate
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D)) {
         if (!ide.selection.Empty()) {
@@ -3267,6 +4166,7 @@ static void HandleShortcuts(IDEState& ide, bool& quitRequested)
             RefreshSceneList(ide);
         }
     }
+
     // Delete key
     if (ImGui::IsKeyPressed(ImGuiKey_Delete)) {
         if (!ide.selection.Empty()) {
@@ -3279,8 +4179,8 @@ static void HandleShortcuts(IDEState& ide, bool& quitRequested)
         }
     }
 
-    // Ctrl+O : Ortho/persp toggle
-    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O)) {
+    // Ctrl+Alt+O : Ortho/persp toggle
+    if (io.KeyCtrl && io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_O)) {
         ide.viewportOrtho = !ide.viewportOrtho;
         ide.log.push(ConsoleLog::INFO, std::string("Camera: ") + (ide.viewportOrtho ? "Orthographic" : "Perspective"));
     }
@@ -3291,12 +4191,26 @@ static void HandleShortcuts(IDEState& ide, bool& quitRequested)
         for (auto& obj : ide.objects) {
             if (obj.name == primary) {
                 glm::vec3 target(obj.px, obj.py, obj.pz);
-
-                // Calculate appropriate distance based on object size
-                float objSize = (std::max)({ obj.sx, obj.sy, obj.sz });
-                float distance = (objSize * 1.5f) + 3.0f;  // 1.5x size + 3 units margin
-
-                // Use the fixed focus method
+                float objSize = ((std::max))({ obj.sx, obj.sy, obj.sz });
+                float distance = (objSize * 1.5f) + 3.0f;
+                ide.focus.Start(ide.sm->currentCamera, ide.editorFov,
+                    ide.viewportOrtho, ide.orthoSize, target, distance);
+                break;
+            }
+        }
+        for (auto& light : ide.lights) {
+            if (light.name == primary) {
+                glm::vec3 target(light.px, light.py, light.pz);
+                float distance = 5.0f;
+                ide.focus.Start(ide.sm->currentCamera, ide.editorFov,
+                    ide.viewportOrtho, ide.orthoSize, target, distance);
+                break;
+            }
+        }
+        for (auto& cam : ide.cameras) {
+            if (cam.name == primary) {
+                glm::vec3 target(cam.px, cam.py, cam.pz);
+                float distance = 5.0f;
                 ide.focus.Start(ide.sm->currentCamera, ide.editorFov,
                     ide.viewportOrtho, ide.orthoSize, target, distance);
                 break;
@@ -3305,7 +4219,7 @@ static void HandleShortcuts(IDEState& ide, bool& quitRequested)
     }
 
     // Tab : FPS fly mode toggle
-    if (ImGui::IsKeyPressed(ImGuiKey_Tab) && !io.KeyCtrl) {
+    if (ImGui::IsKeyPressed(ImGuiKey_Tab) && !io.KeyCtrl && !io.KeyAlt) {
         ide.fpsFlyMode = !ide.fpsFlyMode;
         SDL_SetRelativeMouseMode(ide.fpsFlyMode ? SDL_TRUE : SDL_FALSE);
         ide.log.push(ConsoleLog::INFO, std::string("FPS fly mode ") + (ide.fpsFlyMode ? "ON" : "OFF"));
@@ -3320,6 +4234,7 @@ static void HandleShortcuts(IDEState& ide, bool& quitRequested)
             }
         }
     }
+
     // Ctrl+Alt+1..9 : Save bookmarks
     if (io.KeyCtrl && io.KeyAlt && !io.KeyShift) {
         for (int i = 0; i < 9; ++i) {
@@ -3348,10 +4263,10 @@ static void HandleShortcuts(IDEState& ide, bool& quitRequested)
     }
 
     // Q/W/E/R : Tools
-    if (!io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Q)) ide.toolMode = 0;
-    if (!io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_W)) ide.toolMode = 1;
-    if (!io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_E)) ide.toolMode = 2;
-    if (!io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_R)) ide.toolMode = 3;
+    if (!io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_Q)) ide.toolMode = 0;
+    if (!io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_W)) ide.toolMode = 1;
+    if (!io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_E)) ide.toolMode = 2;
+    if (!io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_R)) ide.toolMode = 3;
 
     // Ctrl+P : Play / Stop
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_P)) {
@@ -3360,6 +4275,12 @@ static void HandleShortcuts(IDEState& ide, bool& quitRequested)
         ide.renderer->SetPlayMode(ide.playing);
     }
 
+    // Ctrl+Shift+P : Pause (if needed)
+    if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_P)) {
+        ide.log.push(ConsoleLog::INFO, "[Game] Pause (not yet implemented)");
+    }
+
+    // F11 : Toggle fullscreen
     if (ImGui::IsKeyPressed(ImGuiKey_F11)) {
         static bool fullscreen = false;
         fullscreen = !fullscreen;
@@ -3371,14 +4292,211 @@ static void HandleShortcuts(IDEState& ide, bool& quitRequested)
         if (ide.fpsFlyMode) {
             ide.fpsFlyMode = false;
             SDL_SetRelativeMouseMode(SDL_FALSE);
+            ide.log.push(ConsoleLog::INFO, "FPS fly mode OFF");
         }
         else if (ide.playing) {
             ide.playing = false;
             SDL_SetRelativeMouseMode(SDL_FALSE);
             ide.renderer->SetPlayMode(false);
+            ide.log.push(ConsoleLog::INFO, "Play mode stopped");
         }
         else if (!ide.selection.Empty()) {
             ide.selection.Clear();
+            ide.log.push(ConsoleLog::INFO, "Selection cleared");
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  CONSOLE COPY SHORTCUTS (utilise ide.consoleFocused, mis à jour dans DrawConsolePanel)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // Ctrl+C : Copy selected console text
+    if (io.KeyCtrl && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_C)) {
+        if (ide.consoleFocused) {
+            if (!ide.log.selectedText.empty()) {
+                ImGui::SetClipboardText(ide.log.selectedText.c_str());
+                ide.toastMgr.Push("Copied to clipboard", Toast::Success, 1.5f);
+            }
+            else {
+                ide.toastMgr.Push("No text selected", Toast::Warning, 1.5f);
+            }
+        }
+    }
+
+    // Ctrl+Shift+C : Copy all console text
+    if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_C)) {
+        if (ide.consoleFocused) {
+            std::string allText;
+            {
+                std::lock_guard<std::mutex> lk(ide.log.mtx);
+                for (auto& e : ide.log.entries) {
+                    allText += e.text + "\n";
+                }
+            }
+            if (!allText.empty()) {
+                ImGui::SetClipboardText(allText.c_str());
+                ide.toastMgr.Push("All console text copied (" + std::to_string(ide.log.entries.size()) + " lines)", Toast::Success, 2.0f);
+            }
+            else {
+                ide.toastMgr.Push("Console is empty", Toast::Warning, 1.5f);
+            }
+        }
+    }
+
+    // Ctrl+Shift+X : Clear console
+    if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_X)) {
+        if (ide.consoleFocused) {
+            ide.log.clear();
+            ide.logReadIdx = 0;
+            ide.toastMgr.Push("Console cleared", Toast::Info, 1.5f);
+        }
+    }
+
+    // Ctrl+L : Clear console (alternative)
+    if (io.KeyCtrl && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_L)) {
+        if (ide.consoleFocused) {
+            ide.log.clear();
+            ide.logReadIdx = 0;
+            ide.toastMgr.Push("Console cleared", Toast::Info, 1.5f);
+        }
+    }
+
+    // Ctrl+A : Select all console text
+    if (io.KeyCtrl && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_A)) {
+        if (ide.consoleFocused) {
+            std::string allText;
+            {
+                std::lock_guard<std::mutex> lk(ide.log.mtx);
+                for (auto& e : ide.log.entries) {
+                    allText += e.text + "\n";
+                }
+            }
+            if (!allText.empty()) {
+                ide.log.selectedText = allText;
+                ide.toastMgr.Push("All console text selected (press Ctrl+C to copy)", Toast::Info, 2.0f);
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  ADDITIONAL UTILITY SHORTCUTS
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // Ctrl+Shift+R : Force refresh scene list
+    if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_R)) {
+        RefreshSceneList(ide);
+        ide.toastMgr.Push("Scene list refreshed", Toast::Info, 1.5f);
+    }
+
+    // Ctrl+Shift+E : Export scene as JSON
+    if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_E)) {
+        ide.bus.send("exportscene scene_export.json");
+        ide.toastMgr.Push("Scene exported to scene_export.json", Toast::Success, 2.0f);
+    }
+
+    // Ctrl+G : Toggle grid
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_G)) {
+        ide.showGrid = !ide.showGrid;
+        ide.toastMgr.Push(ide.showGrid ? "Grid shown" : "Grid hidden", Toast::Info, 1.0f);
+    }
+
+    // Ctrl+I : Toggle 3D icons
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_I)) {
+        ide.showIcons3D = !ide.showIcons3D;
+        ide.toastMgr.Push(ide.showIcons3D ? "3D Icons shown" : "3D Icons hidden", Toast::Info, 1.0f);
+    }
+
+    // Ctrl+W : Toggle wireframe mode
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_W)) {
+        ide.wireframe = !ide.wireframe;
+        ide.bus.send(ide.wireframe ? "wireframe on" : "wireframe off");
+        ide.toastMgr.Push(ide.wireframe ? "Wireframe mode ON" : "Wireframe mode OFF", Toast::Info, 1.0f);
+    }
+
+    // F1 : Help
+    if (ImGui::IsKeyPressed(ImGuiKey_F1)) {
+        ide.bus.send("help");
+        ide.toastMgr.Push("Help displayed in console", Toast::Info, 2.0f);
+    }
+
+    // F2 : Rename selected object
+    if (ImGui::IsKeyPressed(ImGuiKey_F2) && !ide.selection.Empty()) {
+        std::string primary = ide.selection.Primary();
+        strncpy_s(ide.renameOldName, sizeof(ide.renameOldName), primary.c_str(), sizeof(ide.renameOldName) - 1);
+        strncpy_s(ide.renameNewName, sizeof(ide.renameNewName), primary.c_str(), sizeof(ide.renameNewName) - 1);
+        ide.showRenameModal = true;
+    }
+
+    // F5 : Quick save
+    if (ImGui::IsKeyPressed(ImGuiKey_F5)) {
+        if (strlen(ide.sceneFilePath) > 0) {
+            ide.bus.send(std::string("savescene ") + ide.sceneFilePath);
+            ide.sceneDirty = false;
+            ide.toastMgr.Push("Scene saved", Toast::Success, 1.5f);
+        }
+        else {
+            ide.showSaveModal = true;
+        }
+    }
+
+    // Ctrl+F : Global search (correction du nom du membre)
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_F)) {
+        ide.globalSearch.open = true;
+        ide.globalSearch.needsFocus = true;   // remplace focusInput
+    }
+
+    // Ctrl+H : Toggle hierarchy panel
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_H)) {
+        ide.showHierarchy = !ide.showHierarchy;
+    }
+
+    // Ctrl+Shift+C : Copy camera position to clipboard
+    if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_C)) {
+        if (ide.sm && ide.sm->currentCamera) {
+            Camera* cam = ide.sm->currentCamera;
+            char camPos[128];
+            snprintf(camPos, sizeof(camPos), "%.3f %.3f %.3f",
+                cam->transform.position.x,
+                cam->transform.position.y,
+                cam->transform.position.z);
+            ImGui::SetClipboardText(camPos);
+            ide.toastMgr.Push("Camera position copied", Toast::Success, 1.5f);
+        }
+    }
+
+    // Ctrl+Shift+V : Paste camera position from clipboard
+    if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_V)) {
+        if (ide.sm && ide.sm->currentCamera) {
+            const char* clipText = ImGui::GetClipboardText();
+            if (clipText) {
+                float x, y, z;
+                if (sscanf_s(clipText, "%f %f %f", &x, &y, &z) == 3) {
+                    ide.sm->currentCamera->transform.position = Vector3(x, y, z);
+                    ide.toastMgr.Push("Camera position set from clipboard", Toast::Success, 1.5f);
+                }
+                else {
+                    ide.toastMgr.Push("Clipboard does not contain valid position (x y z)", Toast::Warning, 2.0f);
+                }
+            }
+        }
+    }
+
+    // Ctrl+0 : Reset camera to default position
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_0)) {
+        if (ide.sm && ide.sm->currentCamera) {
+            ide.sm->currentCamera->transform.position = Vector3(0, 5, 15);
+            ide.sm->currentCamera->transform.rotation = Quaternion::LookRotation(Vector3(0, 0, -1));
+            ide.toastMgr.Push("Camera reset to default position", Toast::Info, 1.5f);
+        }
+    }
+
+    // Space : Toggle play mode (alternative to Ctrl+P)
+    if (ImGui::IsKeyPressed(ImGuiKey_Space) && !io.KeyCtrl && !io.KeyAlt && !ide.fpsFlyMode) {
+        if (!ImGui::IsAnyItemActive()) {
+            ide.playing = !ide.playing;
+            SDL_SetRelativeMouseMode(ide.playing ? SDL_TRUE : SDL_FALSE);
+            ide.renderer->SetPlayMode(ide.playing);
+            ide.toastMgr.Push(ide.playing ? "Play mode started" : "Play mode stopped", Toast::Info, 1.5f);
         }
     }
 }
@@ -3389,7 +4507,7 @@ static void HandleShortcuts(IDEState& ide, bool& quitRequested)
 static void DrawViewportToolbar(IDEState& ide, const ImVec2& imagePos, const ImVec2& imageSize)
 {
     ImGui::SetNextWindowPos(ImVec2(imagePos.x + 12, imagePos.y + 12));
-    ImGui::SetNextWindowSize(ImVec2(480, 40));  // Légèrement élargi pour les nouveaux boutons
+    ImGui::SetNextWindowSize(ImVec2(600, 42));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4{ 0.10f, 0.10f, 0.14f, 0.85f });
@@ -3408,30 +4526,42 @@ static void DrawViewportToolbar(IDEState& ide, const ImVec2& imagePos, const ImV
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4{ 0.5f, 0.65f, 0.85f, 0.95f });
 
     // View (Q)
-    if (ide.toolMode == 0) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{ 0.4f, 0.6f, 0.9f, 0.95f });
-    if (ImGui::Button(" Q ", ImVec2(44, 30))) ide.toolMode = 0;
-    if (ide.toolMode == 0) ImGui::PopStyleColor();
+    {
+        bool isActive = (ide.toolMode == 0);
+        if (isActive) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{ 0.4f, 0.6f, 0.9f, 0.95f });
+        if (ImGui::Button(" Q ", ImVec2(44, 30))) ide.toolMode = 0;
+        if (isActive) ImGui::PopStyleColor();
+    }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("View mode (Q) - Orbit camera with right click + box selection");
     ImGui::SameLine();
 
     // Move (W)
-    if (ide.toolMode == 1) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{ 0.4f, 0.6f, 0.9f, 0.95f });
-    if (ImGui::Button(" W ", ImVec2(44, 30))) ide.toolMode = 1;
-    if (ide.toolMode == 1) ImGui::PopStyleColor();
+    {
+        bool isActive = (ide.toolMode == 1);
+        if (isActive) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{ 0.4f, 0.6f, 0.9f, 0.95f });
+        if (ImGui::Button(" W ", ImVec2(44, 30))) ide.toolMode = 1;
+        if (isActive) ImGui::PopStyleColor();
+    }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Move mode (W) - Translate selected object");
     ImGui::SameLine();
 
     // Rotate (E)
-    if (ide.toolMode == 2) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{ 0.4f, 0.6f, 0.9f, 0.95f });
-    if (ImGui::Button(" E ", ImVec2(44, 30))) ide.toolMode = 2;
-    if (ide.toolMode == 2) ImGui::PopStyleColor();
+    {
+        bool isActive = (ide.toolMode == 2);
+        if (isActive) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{ 0.4f, 0.6f, 0.9f, 0.95f });
+        if (ImGui::Button(" E ", ImVec2(44, 30))) ide.toolMode = 2;
+        if (isActive) ImGui::PopStyleColor();
+    }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Rotate mode (E) - Rotate selected object");
     ImGui::SameLine();
 
     // Scale (R)
-    if (ide.toolMode == 3) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{ 0.4f, 0.6f, 0.9f, 0.95f });
-    if (ImGui::Button(" R ", ImVec2(44, 30))) ide.toolMode = 3;
-    if (ide.toolMode == 3) ImGui::PopStyleColor();
+    {
+        bool isActive = (ide.toolMode == 3);
+        if (isActive) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{ 0.4f, 0.6f, 0.9f, 0.95f });
+        if (ImGui::Button(" R ", ImVec2(44, 30))) ide.toolMode = 3;
+        if (isActive) ImGui::PopStyleColor();
+    }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Scale mode (R) - Scale selected object");
     ImGui::SameLine();
 
@@ -3439,66 +4569,79 @@ static void DrawViewportToolbar(IDEState& ide, const ImVec2& imagePos, const ImV
     ImGui::SameLine();
 
     // Local/World toggle
-    static bool localMode = true;
-    if (localMode) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{ 0.3f, 0.5f, 0.3f, 0.95f });
-    if (ImGui::Button(localMode ? " LOCAL " : " WORLD ", ImVec2(56, 30))) {
-        localMode = !localMode;
-        ide.gizmo.mode = localMode ? ImGuizmo::LOCAL : ImGuizmo::WORLD;
+    {
+        bool isActive = ide.gizmoLocalMode;
+        if (isActive) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{ 0.3f, 0.5f, 0.3f, 0.95f });
+        if (ImGui::Button(ide.gizmoLocalMode ? " LOCAL " : " WORLD ", ImVec2(56, 30))) {
+            ide.gizmoLocalMode = !ide.gizmoLocalMode;
+        }
+        if (isActive) ImGui::PopStyleColor();
     }
-    if (localMode) ImGui::PopStyleColor();
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Toggle Local / World transform space");
     ImGui::SameLine();
 
     // Pivot / Center toggle
-    if (ide.gizmo.pivotCenter) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{ 0.3f, 0.5f, 0.3f, 0.95f });
-    if (ImGui::Button(ide.gizmo.pivotCenter ? " PIVOT " : " CENTER ", ImVec2(56, 30))) {
-        ide.gizmo.pivotCenter = !ide.gizmo.pivotCenter;
+    {
+        bool isActive = ide.gizmoPivotCenter;
+        if (isActive) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{ 0.3f, 0.5f, 0.3f, 0.95f });
+        if (ImGui::Button(ide.gizmoPivotCenter ? " PIVOT " : " CENTER ", ImVec2(56, 30))) {
+            ide.gizmoPivotCenter = !ide.gizmoPivotCenter;
+        }
+        if (isActive) ImGui::PopStyleColor();
     }
-    if (ide.gizmo.pivotCenter) ImGui::PopStyleColor();
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Toggle Pivot / Center manipulation");
     ImGui::SameLine();
 
     // Snap
-    if (ide.snapEnabled) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{ 0.3f, 0.6f, 0.3f, 0.95f });
-    if (ImGui::Button(ide.snapEnabled ? " SNAP " : " Snap ", ImVec2(56, 30))) {
-        ide.snapEnabled = !ide.snapEnabled;
+    {
+        bool isActive = ide.snapEnabled;
+        if (isActive) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{ 0.3f, 0.6f, 0.3f, 0.95f });
+        if (ImGui::Button(ide.snapEnabled ? " SNAP " : " Snap ", ImVec2(56, 30))) {
+            ide.snapEnabled = !ide.snapEnabled;
+        }
+        if (isActive) ImGui::PopStyleColor();
     }
-    if (ide.snapEnabled) ImGui::PopStyleColor();
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Snap to grid (Ctrl+Shift+S)");
     ImGui::SameLine();
 
     // Grid toggle
-    if (ide.showGrid) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{ 0.3f, 0.5f, 0.5f, 0.95f });
-    if (ImGui::Button(" GRID ", ImVec2(56, 30))) ide.showGrid = !ide.showGrid;
-    if (ide.showGrid) ImGui::PopStyleColor();
+    {
+        bool isActive = ide.showGrid;
+        if (isActive) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{ 0.3f, 0.5f, 0.5f, 0.95f });
+        if (ImGui::Button(" GRID ", ImVec2(56, 30))) ide.showGrid = !ide.showGrid;
+        if (isActive) ImGui::PopStyleColor();
+    }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Toggle grid overlay");
     ImGui::SameLine();
 
-    // Frustum toggle (nouveau)
-    if (ide.showFrustum) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{ 0.5f, 0.3f, 0.5f, 0.95f });
-    if (ImGui::Button(" FRUSTUM ", ImVec2(60, 30))) ide.showFrustum = !ide.showFrustum;
-    if (ide.showFrustum) ImGui::PopStyleColor();
+    // Frustum toggle
+    {
+        bool isActive = ide.showFrustum;
+        if (isActive) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{ 0.5f, 0.3f, 0.5f, 0.95f });
+        if (ImGui::Button(" FRUSTUM ", ImVec2(64, 30))) ide.showFrustum = !ide.showFrustum;
+        if (isActive) ImGui::PopStyleColor();
+    }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Toggle camera frustum visualization");
     ImGui::SameLine();
 
-    // Icons 3D toggle (nouveau)
-    if (ide.showIcons3D) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{ 0.3f, 0.4f, 0.6f, 0.95f });
-    if (ImGui::Button(" ICONS ", ImVec2(56, 30))) ide.showIcons3D = !ide.showIcons3D;
-    if (ide.showIcons3D) ImGui::PopStyleColor();
+    // Icons 3D toggle
+    {
+        bool isActive = ide.showIcons3D;
+        if (isActive) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{ 0.3f, 0.4f, 0.6f, 0.95f });
+        if (ImGui::Button(" ICONS ", ImVec2(56, 30))) ide.showIcons3D = !ide.showIcons3D;
+        if (isActive) ImGui::PopStyleColor();
+    }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Toggle 3D icons for lights and cameras");
 
-    // IMPORTANT: Pop styles in reverse order of pushes
-    // 3 pushes de style var (ItemSpacing, FrameRounding, FramePadding)
-    ImGui::PopStyleVar(3);
-    // 3 pushes de style color (Button, ButtonHovered, ButtonActive)
-    ImGui::PopStyleColor(3);
+    // Pop styles in reverse order of pushes
+    ImGui::PopStyleColor(3);  // Button, ButtonHovered, ButtonActive
+    ImGui::PopStyleVar(3);    // ItemSpacing, FrameRounding, FramePadding
 
     ImGui::End();
 
-    // 2 pushes de style color au début (WindowBg, Border)
-    ImGui::PopStyleColor(2);
-    // 2 pushes de style var au début (WindowRounding, WindowBorderSize)
-    ImGui::PopStyleVar(2);
+    // These were pushed BEFORE ImGui::Begin, so pop AFTER ImGui::End
+    ImGui::PopStyleColor(2);  // WindowBg, Border
+    ImGui::PopStyleVar(2);    // WindowRounding, WindowBorderSize
 }
 
 static void DrawViewportStats(IDEState& ide, const ImVec2& imagePos, const ImVec2& imageSize)
@@ -3586,447 +4729,375 @@ static void DrawCameraPositionOverlay(IDEState& ide, const ImVec2& imagePos, con
 
 static void DrawViewportPanel(IDEState& ide, float dt)
 {
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, { 0,0 });
-    ImVec2 avail = ImGui::GetContentRegionAvail();
-    int vw = (int)avail.x, vh = (int)avail.y;
-    if (vw < 8) vw = 8; if (vh < 8) vh = 8;
+    ImVec2 panelSize = ImGui::GetContentRegionAvail();
+    int vpW = (int)panelSize.x;
+    int vpH = (int)panelSize.y;
+    if (vpW < 8)  vpW = 8;
+    if (vpH < 8)  vpH = 8;
+    ide.sceneFBO.resize(vpW, vpH);
 
-    if (vw != ide.sceneFBO.w || vh != ide.sceneFBO.h)
-    {
-        ide.sceneFBO.resize(vw, vh);
-        Settings::canvasWidth = vw;
-        Settings::canvasHeight = vh;
-    }
+    Settings::canvasWidth = vpW;
+    Settings::canvasHeight = vpH;
 
-    glDisable(GL_SCISSOR_TEST);
+    Camera* cam = ide.sm ? ide.sm->currentCamera : nullptr;
+    if (cam) cam->fov = ide.editorFov;
 
     ide.sceneFBO.bind();
     ide.renderer->Render(dt, ide.sceneFBO.fbo);
+    ide.sceneFBO.unbind();
 
-    // Overlays 3D (grille, axes, icônes) après le rendu principal
-    if (!ide.playing) {
-        Camera* cam = ide.sm->currentCamera;
-        glm::mat4 view = cam->transform.GetViewMatrix();
-        glm::mat4 proj;
-        if (ide.viewportOrtho) {
-            float aspect = (float)vw / (float)vh;
-            proj = glm::ortho(-ide.orthoSize * aspect, ide.orthoSize * aspect,
-                -ide.orthoSize, ide.orthoSize, 0.1f, 1000.f);
-        }
-        else {
-            proj = glm::perspective(glm::radians(ide.editorFov), (float)vw / (float)vh, 0.1f, 1000.f);
-        }
+    ImVec2 imagePos = ImGui::GetCursorScreenPos();
+    ImVec2 imageSize{ (float)vpW, (float)vpH };
 
-        if (ide.showGrid) {
-            DrawGrid(view, proj, 20.f, 20, ide.gridPlane);
-        }
-
-        if (ide.showIcons3D) {
-            // Icônes pour les lumières
-            for (auto& light : ide.lights) {
-                if (light.lightType == "ambient") continue;
-                glm::vec3 pos(light.px, light.py, light.pz);
-                glm::vec3 color(light.r / 255.f, light.g / 255.f, light.b / 255.f);
-                DrawBillboardIcon(pos, 0.3f, color, view, proj);
-            }
-
-            // Icônes pour les caméras (objets avec tag "Camera")
-            for (auto& obj : ide.objects) {
-                if (obj.tag == "Camera") {
-                    glm::vec3 pos(obj.px, obj.py, obj.pz);
-                    glm::vec3 color(0.2f, 0.8f, 0.8f); // Cyan pour caméras
-                    DrawBillboardIcon(pos, 0.25f, color, view, proj);
-                }
-            }
-        }
-
-        if (ide.showFrustum && ide.sm->currentCamera) {
-            Camera* cam = ide.sm->currentCamera;
-            float fovRad = glm::radians(ide.editorFov);
-            float aspect = (float)vw / (float)vh;
-            DrawFrustum(cam->transform.position.ToGLM(),
-                cam->transform.forward().ToGLM(),
-                fovRad, aspect, 100.f,
-                cam->transform.up().ToGLM(),
-                view, proj);
-        }
-    }
-
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glDisable(GL_DEPTH_TEST);
-    glBindVertexArray(0);
-    glUseProgram(0);
-    glEnable(GL_SCISSOR_TEST);
-
-    // Afficher l'image du viewport
     ImGui::Image(
-        (ImTextureID)(uintptr_t)ide.sceneFBO.color,
-        avail,
-        { 0,1 }, { 1,0 }
-    );
+        (ImTextureID)(intptr_t)ide.sceneFBO.color,
+        imageSize,
+        ImVec2(0, 1), ImVec2(1, 0));
 
-    ImVec2 imagePos = ImGui::GetItemRectMin();
-    ImVec2 imageSize = ImGui::GetItemRectSize();
-    ide.viewportHovered = ImGui::IsItemHovered();
+    glm::mat4 rendererView = ide.renderer->GetLastViewMatrix();
+    glm::mat4 rendererProj = ide.renderer->GetLastProjMatrix();
+    glm::vec3 camPos = cam ? cam->transform.position.ToGLM() : glm::vec3(0.f);
 
-    // Gizmo (après l'image, avant les overlays UI)
-    if (!ide.selection.Empty() && !ide.playing && (ide.toolMode >= 1 && ide.toolMode <= 3)) {
-        Camera* cam = ide.sm->currentCamera;
-        glm::mat4 view = cam->transform.GetViewMatrix();
-        glm::mat4 proj;
-        if (ide.viewportOrtho) {
-            float aspect = (float)vw / (float)vh;
-            proj = glm::ortho(-ide.orthoSize * aspect, ide.orthoSize * aspect,
-                -ide.orthoSize, ide.orthoSize, 0.1f, 1000.f);
-        }
-        else {
-            proj = glm::perspective(glm::radians(ide.editorFov), (float)vw / (float)vh, 0.1f, 1000.f);
-        }
+    if (cam)
+    {
+        if (ide.showGrid)
+            DrawGrid(rendererView, rendererProj, 20.f, 20, ide.gridPlane);
 
-        // Mettre à jour les snaps du gizmo
-        ide.gizmo.SetSnapFromIDE(ide.snapEnabled, ide.snapPosition, ide.snapRotation, ide.snapScale);
+        if (ide.showIcons3D)
+        {
+            for (auto& lt : ide.lights)
+            {
+                glm::vec3 lightColor =
+                    lt.lightType == "directional" ? glm::vec3(1.f, 0.95f, 0.6f)
+                    : lt.lightType == "ambient" ? glm::vec3(0.6f, 0.8f, 1.f)
+                    : glm::vec3(1.f, 0.85f, 0.3f);
 
-        std::string primary = ide.selection.Primary();
-
-        // Chercher dans les objets
-        bool found = false;
-        for (auto& obj : ide.objects) {
-            if (obj.name == primary) {
-                glm::vec3 pos(obj.px, obj.py, obj.pz);
-                glm::vec3 scale(obj.sx, obj.sy, obj.sz);
-                glm::quat rot(obj.rw, obj.rx, obj.ry, obj.rz);
-
-                bool changed = DrawGizmoForObject(primary, view, proj, ide.toolMode, ide.gizmo,
-                    pos, rot, scale,
-                    [&](const std::string& cmd) {
-                        ide.bus.send(cmd);
-                        ide.sceneDirty = true;
-                    },
-                    true);
-
-                if (changed) {
-                    // Mettre à jour les valeurs locales
-                    obj.px = pos.x; obj.py = pos.y; obj.pz = pos.z;
-                    obj.sx = scale.x; obj.sy = scale.y; obj.sz = scale.z;
-                    obj.rw = rot.w; obj.rx = rot.x; obj.ry = rot.y; obj.rz = rot.z;
-                    // Forcer un rafraîchissement de l'inspecteur
-                    ide.bus.send("inspect " + primary);
-                }
-                found = true;
-                break;
+                DrawBillboardIcon(glm::vec3(lt.px, lt.py, lt.pz),
+                    0.25f, lightColor, rendererView, rendererProj);
             }
         }
 
-        // Si non trouvé dans les objets, chercher dans les lumières
-        if (!found) {
-            for (auto& light : ide.lights) {
-                if (light.name == primary) {
-                    // Pour les lumières, seul le déplacement est supporté
-                    if (ide.toolMode == 1) {
-                        glm::vec3 pos(light.px, light.py, light.pz);
-                        glm::vec3 scale(1.0f, 1.0f, 1.0f);
-                        glm::quat rot(1.0f, 0.0f, 0.0f, 0.0f);
-
-                        bool changed = DrawGizmoForObject(primary, view, proj, ide.toolMode, ide.gizmo,
-                            pos, rot, scale,
-                            [&](const std::string& cmd) {
-                                ide.bus.send(cmd);
-                                ide.sceneDirty = true;
-                            },
-                            true);
-
-                        if (changed) {
-                            light.px = pos.x; light.py = pos.y; light.pz = pos.z;
-                            ide.bus.send("inspect " + primary);
-                        }
-                    }
+        if (ide.showFrustum && !ide.selection.Empty())
+        {
+            std::string primary = ide.selection.Primary();
+            for (auto& obj : ide.objects)
+            {
+                if (obj.name == primary)
+                {
+                    glm::vec3 camFwd = cam->transform.forward().ToGLM();
+                    glm::vec3 camPos = cam->transform.position.ToGLM();
+                    DrawFrustum(camPos, camFwd,
+                        glm::radians(ide.editorFov),
+                        (float)vpW / (float)vpH,
+                        50.f,
+                        glm::vec3(0.f, 1.f, 0.f),
+                        rendererView, rendererProj);
                     break;
                 }
             }
         }
     }
 
-    // Box selection handling
-    if (ide.viewportHovered && ide.toolMode == 0 && !ide.playing &&
-        ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGuizmo::IsUsing()) {
-        ide.boxSelect.Begin(ImGui::GetMousePos());
-    }
-    if (ide.boxSelect.active && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 2.0f)) {
-        ide.boxSelect.Update(ImGui::GetMousePos());
-        // Draw rectangle via ImDrawList
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        auto [mn, mx] = ide.boxSelect.GetRect();
-        dl->AddRectFilled(mn, mx, IM_COL32(100, 160, 240, 40));
-        dl->AddRect(mn, mx, IM_COL32(120, 180, 255, 200), 0.f, 0, 1.5f);
-    }
-    if (ide.boxSelect.active && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-        if (ide.boxSelect.IsSignificant()) {
-            // Raycast candidates from objects
-            std::vector<RaycastCandidate> candidates;
-            for (auto& obj : ide.objects) {
-                RaycastCandidate rc;
-                rc.name = obj.name;
-                rc.center = glm::vec3(obj.px, obj.py, obj.pz);
-                rc.halfSize = glm::vec3(obj.sx * 0.5f, obj.sy * 0.5f, obj.sz * 0.5f);
-                candidates.push_back(rc);
-            }
-            Camera* cam = ide.sm->currentCamera;
-            glm::mat4 view = cam->transform.GetViewMatrix();
-            glm::mat4 proj;
-            if (ide.viewportOrtho) {
-                float aspect = (float)vw / (float)vh;
-                proj = glm::ortho(-ide.orthoSize * aspect, ide.orthoSize * aspect,
-                    -ide.orthoSize, ide.orthoSize, 0.1f, 1000.f);
-            }
-            else {
-                proj = glm::perspective(glm::radians(ide.editorFov), (float)vw / (float)vh, 0.1f, 1000.f);
-            }
-            std::set<std::string> boxHits = BoxSelectObjects(ide.boxSelect, proj, view,
-                imagePos.x, imagePos.y, imageSize.x, imageSize.y, candidates);
-            if (ImGui::GetIO().KeyCtrl) {
-                for (auto& name : boxHits) ide.selection.Toggle(name);
-            }
-            else {
-                ide.selection.items = boxHits;
-            }
-            if (!boxHits.empty()) ide.bus.send("inspect " + *boxHits.begin());
-        }
-        ide.boxSelect.End();
-    }
-
-    // Raycast selection (clic simple)
-    if (ide.viewportHovered && !ide.boxSelect.active && !ide.playing &&
-        ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGuizmo::IsUsing() && ide.toolMode == 0) {
-
-        std::vector<RaycastCandidate> candidates;
-        for (auto& obj : ide.objects) {
-            RaycastCandidate rc;
-            rc.name = obj.name;
-            rc.center = glm::vec3(obj.px, obj.py, obj.pz);
-            rc.halfSize = glm::vec3(obj.sx * 0.5f, obj.sy * 0.5f, obj.sz * 0.5f);
-            candidates.push_back(rc);
-        }
-
-        Camera* cam = ide.sm->currentCamera;
-        glm::mat4 view = cam->transform.GetViewMatrix();
-        glm::mat4 proj;
-        if (ide.viewportOrtho) {
-            float aspect = (float)vw / (float)vh;
-            proj = glm::ortho(-ide.orthoSize * aspect, ide.orthoSize * aspect,
-                -ide.orthoSize, ide.orthoSize, 0.1f, 1000.f);
-        }
-        else {
-            proj = glm::perspective(glm::radians(ide.editorFov), (float)vw / (float)vh, 0.1f, 1000.f);
-        }
-
-        ImVec2 mousePos = ImGui::GetMousePos();
-        std::string hit = RaycastObjects(mousePos.x, mousePos.y,
-            imagePos.x, imagePos.y, imageSize.x, imageSize.y,
-            proj, view, cam->transform.position.ToGLM(), candidates);
-
-        if (!hit.empty()) {
-            ImGuiIO& io = ImGui::GetIO();
-            if (io.KeyCtrl) {
-                ide.selection.Toggle(hit);
-            }
-            else {
-                ide.selection.SetSingle(hit);
-            }
-            ide.bus.send("inspect " + hit);
-        }
-        else if (!ImGui::GetIO().KeyCtrl) {
-            ide.selection.Clear();
-        }
-    }
-
-    // ── Viewport drop targets ─────────────────────────────────────────────────
-    // Must be called on the Image item that was just rendered so that ImGui
-    // correctly reports the correct drop region.
-    if (ImGui::BeginDragDropTarget()) {
-        // ── 1. Hierarchy item → move object/light to world position ──────────
+    if (ImGui::BeginDragDropTarget())
+    {
         if (const ImGuiPayload* payload =
-            ImGui::AcceptDragDropPayload(kHierarchyDragPayload)) {
-            auto* hp = (HierarchyDragPayload*)payload->Data;
-            Camera* cam = ide.sm->currentCamera;
-            glm::mat4 view = cam->transform.GetViewMatrix();
-            glm::mat4 proj;
-            if (ide.viewportOrtho) {
-                float aspect = (float)vw / (float)vh;
-                proj = glm::ortho(-ide.orthoSize * aspect, ide.orthoSize * aspect,
-                    -ide.orthoSize, ide.orthoSize, 0.1f, 1000.f);
-            }
-            else {
-                proj = glm::perspective(glm::radians(ide.editorFov),
-                    (float)vw / (float)vh, 0.1f, 1000.f);
-            }
+            ImGui::AcceptDragDropPayload(kAssetDragPayload))
+        {
+            IM_ASSERT(payload->DataSize == sizeof(AssetDragPayload));
+            auto& drop = *static_cast<const AssetDragPayload*>(payload->Data);
 
-            // Build a ray from the camera through the pixel under the mouse.
-            // NDC coords: x in [-1,1] left→right, y in [-1,1] bottom→top.
-            ImVec2 mousePos = ImGui::GetMousePos();
-            float ndcX = (mousePos.x - imagePos.x) / imageSize.x * 2.f - 1.f;
-            float ndcY = 1.f - (mousePos.y - imagePos.y) / imageSize.y * 2.f;
-
-            // Unproject two NDC points (near/far) into world space.
-            glm::mat4 invVP = glm::inverse(proj * view);
-            auto unproject = [&](float nx, float ny, float nz) {
-                glm::vec4 clip(nx, ny, nz, 1.f);
-                glm::vec4 world = invVP * clip;
-                if (std::abs(world.w) > 1e-7f) world /= world.w;
-                return glm::vec3(world);
-                };
-            glm::vec3 rayNear = unproject(ndcX, ndcY, -1.f);
-            glm::vec3 rayFar = unproject(ndcX, ndcY, 1.f);
-            glm::vec3 rayDir = glm::normalize(rayFar - rayNear);
-            glm::vec3 rayOrig = cam->transform.position.ToGLM();
-
-            // Intersect with horizontal ground plane Y = 0.
-            // ray(t) = rayOrig + t * rayDir  →  y=0  →  t = -rayOrig.y / rayDir.y
-            if (std::abs(rayDir.y) > 1e-5f) {
-                float t = -rayOrig.y / rayDir.y;
-                if (t > 0.f) {
-                    glm::vec3 hit = rayOrig + rayDir * t;
-                    char cmd[256];
-                    std::snprintf(cmd, sizeof(cmd), "move %s %.3f %.3f %.3f",
-                        hp->name, hit.x, hit.y, hit.z);
-                    ide.bus.send(cmd);
-                    ide.sceneDirty = true;
-                    RefreshSceneList(ide);
+            ide.importOverlayGUID = drop.guidStr;
+            ide.showImportOverlay = true;
+            ide.importOverlayHasImportBtn = true;
+            // Anchor to the center of the screen as a fallback in case the Inspector
+            // panel hasn't updated its anchor pos yet this frame (e.g. drop fires before
+            // Inspector renders). The Inspector will overwrite this next frame if open.
+            {
+                ImGuiIO& _io = ImGui::GetIO();
+                if (ide.importOverlayAnchorSize.x < 10.f || ide.importOverlayAnchorSize.y < 10.f) {
+                    ide.importOverlayAnchorPos = ImVec2(_io.DisplaySize.x * 0.6f, _io.DisplaySize.y * 0.1f);
+                    ide.importOverlayAnchorSize = ImVec2(_io.DisplaySize.x * 0.22f, _io.DisplaySize.y * 0.5f);
                 }
             }
+            ide.importOverlayOnImport = [&ide, drop]()
+                {
+                    std::string path(drop.path);
+                    std::string ext = std::filesystem::path(path).extension().string();
+                    std::string stem = std::filesystem::path(path).stem().string();
+
+                    int n = 1;
+                    std::string objName = stem;
+                    while (g_namedObjects.count(objName) || g_namedLights.count(objName))
+                        objName = stem + "_" + std::to_string(n++);
+
+                    glm::vec3 spawnPos = GetCameraSpawnPos(ide);
+                    char posBuf[64];
+                    std::snprintf(posBuf, sizeof(posBuf), "%.3f %.3f %.3f",
+                        spawnPos.x, spawnPos.y, spawnPos.z);
+
+                    std::string cmd;
+                    if (ext == ".obj")                  cmd = "obj " + objName + " \"" + path + "\" " + posBuf;
+                    else if (ext == ".gltf" || ext == ".glb") cmd = "gltf " + objName + " \"" + path + "\" " + posBuf;
+
+                    if (!cmd.empty())
+                    {
+                        ide.log.push(ConsoleLog::CMD, "> " + cmd);
+                        ide.bus.send(cmd);
+                        ide.pendingSelection = objName;
+                        ide.sceneDirty = true;
+                        ide.assetBrowser.hasPendingDrop = true;
+                        ide.assetBrowser.pendingDrop = drop;
+                        RefreshSceneList(ide);
+                    }
+                    else if (ext == ".hdr") {
+                        std::string cmd = "loadhdrskybox \"" + path + "\"";
+                        ide.log.push(ConsoleLog::CMD, "> " + cmd);
+                        ide.bus.send(cmd);
+                        ide.toastMgr.Push("HDR skybox loaded", Toast::Success, 2.0f);
+                    }
+
+                    ide.showImportOverlay = false;
+                };
         }
 
-        // ── 2. Asset payload → instantiate or show import overlay ────────────
-        if (const ImGuiPayload* p =
-            ImGui::AcceptDragDropPayload(kAssetDragPayload)) {
-            auto* ap = (AssetDragPayload*)p->Data;
-            std::string path(ap->path);
-            std::string ext = fs::path(path).extension().string();
-            std::string stem = fs::path(path).stem().string();
+        if (const ImGuiPayload* payload =
+            ImGui::AcceptDragDropPayload(kHierarchyDragPayload))
+        {
+            IM_ASSERT(payload->DataSize == sizeof(HierarchyDragPayload));
+            auto& hdp = *static_cast<const HierarchyDragPayload*>(payload->Data);
 
-            // Generate unique name
-            std::string objName = stem;
-            {
-                int n = 1;
-                while (g_namedObjects.count(objName) || g_namedLights.count(objName))
-                    objName = stem + "_" + std::to_string(n++);
-            }
-
-            glm::vec3 dropPos = GetCameraSpawnPos(ide);
-            char posBuf[64];
-            std::snprintf(posBuf, sizeof(posBuf), "%.3f %.3f %.3f",
-                dropPos.x, dropPos.y, dropPos.z);
-
-            if (ap->type == AssetType::Prefab || ext == ".honprefab") {
-                // Prefab: add to scene immediately
-                std::string cmd = "gltf " + objName + " \"" + path + "\" " + posBuf;
-                ide.log.push(ConsoleLog::CMD, "> " + cmd);
-                ide.bus.send(cmd);
-                ide.pendingSelection = objName;
-                ide.sceneDirty = true;
-                if (!ide.assetDb.FindByPath(path))
-                    ide.assetDb.Register(path);
-                ide.assetBrowser.hasPendingDrop = true;
-                ide.assetBrowser.pendingDrop = *ap;
-                RefreshSceneList(ide);
-            }
-            else if (ap->type == AssetType::Model ||
-                ext == ".obj" || ext == ".gltf" || ext == ".glb" ||
-                ext == ".fbx" || ext == ".dae")
-            {
-                // 3-D model: open the Import Settings overlay with an Import button
-                AssetRecord* rec = ide.assetDb.FindByPath(path);
-                if (!rec) rec = &ide.assetDb.Register(path);
-
-                ide.importOverlayGUID = rec->guid.ToString();
-                ide.showImportOverlay = true;
-                ide.importOverlayHasImportBtn = true;
-
-                // Capture everything needed for the deferred import
-                std::string capturedCmd_base = ext == ".obj"
-                    ? "obj " + objName + " \"" + path + "\" " + posBuf
-                    : "gltf " + objName + " \"" + path + "\" " + posBuf;
-                std::string capturedName = objName;
-                std::string capturedPath = path;
-                AssetDragPayload capturedPayload = *ap;
-
-                ide.importOverlayOnImport = [&ide, capturedCmd_base, capturedName,
-                    capturedPath, capturedPayload]() mutable
-                    {
-                        AssetRecord* r = ide.assetDb.FindByPath(capturedPath);
-                        float scale = (r && r->type == AssetType::Model)
-                            ? r->modelSettings.importScale : 1.0f;
-
-                        ide.log.push(ConsoleLog::CMD, "> " + capturedCmd_base);
-                        ide.bus.send(capturedCmd_base);
-                        if (scale != 1.0f) {
-                            char sb[128];
-                            std::snprintf(sb, sizeof(sb), "scale %s %.4f %.4f %.4f",
-                                capturedName.c_str(), scale, scale, scale);
-                            ide.bus.send(sb);
-                        }
-                        ide.pendingSelection = capturedName;
-                        ide.sceneDirty = true;
-                        if (!r) r = &ide.assetDb.Register(capturedPath);
-                        ide.assetBrowser.hasPendingDrop = true;
-                        ide.assetBrowser.pendingDrop = capturedPayload;
-                        RefreshSceneList(ide);
-                    };
-            }
-            else if (ap->type == AssetType::Scene || ext == ".honscene") {
-                ide.bus.send("clearscene");
-                ide.bus.send("loadscene " + path);
-                ide.sceneDirty = false;
-                RefreshSceneList(ide);
-            }
-            // Other types: just focus in the browser for now
-            else {
-                ide.assetBrowser.focusedGUID = std::string(ap->guidStr);
-                ide.assetBrowser.selectedGUIDs = { std::string(ap->guidStr) };
-            }
+            glm::vec3 spawnPos = GetCameraSpawnPos(ide);
+            char buf[256];
+            std::snprintf(buf, sizeof(buf), "move %s %.4f %.4f %.4f",
+                hdp.name, spawnPos.x, spawnPos.y, spawnPos.z);
+            ide.bus.send(buf);
+            ide.selection.SetSingle(hdp.name);
+            ide.sceneDirty = true;
+            RefreshSceneList(ide);
         }
 
         ImGui::EndDragDropTarget();
     }
 
-    // Toolbar overlay
-    DrawViewportToolbar(ide, imagePos, imageSize);
+    ide.viewportHovered = ImGui::IsItemHovered();
+    ImGuiIO& io = ImGui::GetIO();
 
-    // Stats overlay
-    if (ide.showStats || ide.playing) {
-        DrawViewportStats(ide, imagePos, imageSize);
+    // ── NATIVE CUSTOM GIZMO INTERACTION & RENDERING ──────────────────────────
+    bool skipSelection = false;
+
+    if (!ide.selection.Empty() && !ide.playing && cam && ide.toolMode >= 1)
+    {
+        std::string primary = ide.selection.Primary();
+        glm::vec3 objPos(0.0f);
+        glm::quat objRot(1.0f, 0.0f, 0.0f, 0.0f);
+        bool foundTarget = false;
+
+        // Find Object Target
+        {
+            std::shared_lock<std::shared_mutex> lk(g_sceneMutex);
+            auto it = g_namedObjects.find(primary);
+            if (it != g_namedObjects.end() && it->second) {
+                objPos = it->second->transform.position.ToGLM();
+                objRot = it->second->transform.rotation.ToGLM();
+                foundTarget = true;
+            }
+        }
+
+        // Find Light Target
+        if (!foundTarget) {
+            std::shared_lock<std::shared_mutex> lk(g_sceneMutex);
+            auto it = g_namedLights.find(primary);
+            if (it != g_namedLights.end() && it->second) {
+                for (auto& l : ide.lights) {
+                    if (l.name == primary) {
+                        objPos = glm::vec3(l.px, l.py, l.pz);
+                        foundTarget = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (foundTarget) {
+            bool mousePressed = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+            bool mouseReleased = ImGui::IsMouseReleased(ImGuiMouseButton_Left);
+
+            // 1. Logic Update
+            bool isGizmoInteracting = ide.gizmo.Update(
+                ide.toolMode, objPos, objRot, ide.gizmoLocalMode,
+                rendererView, rendererProj, imagePos.x, imagePos.y, imageSize.x, imageSize.y,
+                io.MousePos.x, io.MousePos.y, mousePressed, mouseReleased,
+                ide.snapEnabled, ide.snapPosition, ide.snapRotation, ide.snapScale,
+                primary, ide.bus
+            );
+
+            if (isGizmoInteracting || ide.gizmo.isDragging) {
+                skipSelection = true;
+                ide.sceneDirty = true;
+            }
+
+            // 2. FIXED RENDER: Use ImGui's Window DrawList instead of UIRenderer
+            // This forces the gizmo to respect ImGui's viewport scissor rectangle
+            ImDrawList* drawList = ImGui::GetWindowDrawList();
+
+            ide.gizmo.Render(
+                drawList,
+                ide.toolMode, objPos, objRot, ide.gizmoLocalMode,
+                rendererView, rendererProj,
+                imagePos.x, imagePos.y, imageSize.x, imageSize.y,
+                io.MousePos.x, io.MousePos.y
+            );
+        }
     }
 
-    // Selected object info toast
-    if (!ide.selection.Empty() && !ide.playing) {
-        DrawSelectionToast(ide, imagePos, imageSize);
+    // ── VIEWPORT SELECTION AND MOUSE PICKING RAYCASTS ───────────────────────
+    std::vector<RaycastCandidate> candidates;
+    candidates.reserve(ide.objects.size() + ide.lights.size());
+    for (auto& obj : ide.objects)
+    {
+        RaycastCandidate rc;
+        rc.name = obj.name;
+        rc.center = glm::vec3(obj.px, obj.py, obj.pz);
+        rc.halfSize = glm::vec3(obj.sx * 0.5f, obj.sy * 0.5f, obj.sz * 0.5f);
+        if (rc.halfSize.x < 0.3f) rc.halfSize.x = 0.3f;
+        if (rc.halfSize.y < 0.3f) rc.halfSize.y = 0.3f;
+        if (rc.halfSize.z < 0.3f) rc.halfSize.z = 0.3f;
+        candidates.push_back(rc);
+    }
+    for (auto& lt : ide.lights)
+    {
+        RaycastCandidate rc;
+        rc.name = lt.name;
+        rc.center = glm::vec3(lt.px, lt.py, lt.pz);
+        rc.halfSize = glm::vec3(0.4f, 0.4f, 0.4f);
+        candidates.push_back(rc);
     }
 
-    // Camera position overlay (always visible in edit mode)
-    if (!ide.playing) {
-        DrawCameraPositionOverlay(ide, imagePos, imageSize);
+    if (ide.viewportHovered && !ide.playing && !ide.fpsFlyMode && !skipSelection)
+    {
+        bool leftClicked = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+        bool leftReleased = ImGui::IsMouseReleased(ImGuiMouseButton_Left);
+
+        if (leftClicked)
+            ide.boxSelect.Begin(io.MousePos);
+
+        if (ide.boxSelect.active)
+            ide.boxSelect.Update(io.MousePos);
+
+        if (leftReleased && ide.boxSelect.active)
+        {
+            if (ide.boxSelect.IsSignificant())
+            {
+                auto picked = BoxSelectObjects(
+                    ide.boxSelect, rendererProj, rendererView,
+                    imagePos.x, imagePos.y, imageSize.x, imageSize.y,
+                    candidates);
+
+                if (io.KeyCtrl)
+                    for (auto& n : picked) ide.selection.Toggle(n);
+                else
+                {
+                    ide.selection.Clear();
+                    for (auto& n : picked) ide.selection.Add(n);
+                }
+
+                if (!ide.selection.Empty())
+                {
+                    PushSelectionHistory(ide, ide.selection.Primary());
+                    ide.bus.send("inspect " + ide.selection.Primary());
+                }
+            }
+            else
+            {
+                std::string hit = RaycastObjects(
+                    io.MousePos.x, io.MousePos.y,
+                    imagePos.x, imagePos.y, imageSize.x, imageSize.y,
+                    rendererProj, rendererView, camPos, candidates);
+
+                if (!hit.empty())
+                {
+                    if (io.KeyCtrl)
+                        ide.selection.Toggle(hit);
+                    else
+                        ide.selection.SetSingle(hit);
+
+                    PushSelectionHistory(ide, hit);
+                    ide.bus.send("inspect " + ide.selection.Primary());
+                }
+                else if (!io.KeyCtrl)
+                {
+                    ide.selection.Clear();
+                }
+            }
+            ide.boxSelect.End();
+        }
+    }
+    else if (!ImGui::IsMouseDown(ImGuiMouseButton_Left))
+    {
+        ide.boxSelect.End();
     }
 
-    // Update editor camera (orbite, pan, zoom)
-    UpdateEditorCamera(ide, dt, vw, vh, imagePos, imageSize);
-
-    // FPS fly mode indicator
-    if (ide.fpsFlyMode && !ide.playing) {
+    if (ide.boxSelect.active)
+    {
         ImDrawList* dl = ImGui::GetWindowDrawList();
-        std::string fpsText = " FPS FLY MODE (TAB to exit) ";
-        ImVec2 textSize = ImGui::CalcTextSize(fpsText.c_str());
-        ImVec2 pos = ImVec2(imagePos.x + imageSize.x * 0.5f - textSize.x * 0.5f, imagePos.y + imageSize.y - 50);
-        dl->AddRectFilled(pos, ImVec2(pos.x + textSize.x + 16, pos.y + textSize.y + 8), IM_COL32(200, 100, 50, 200), 8.f);
-        dl->AddText(ImVec2(pos.x + 8, pos.y + 4), IM_COL32(255, 200, 100, 255), fpsText.c_str());
+        ide.boxSelect.Draw(dl);
     }
 
-    ImGui::PopStyleVar();
+    // ── FLOATING OVERLAYS ────────────────────────────────────────────────────
+    DrawViewportToolbar(ide, imagePos, imageSize);
+    DrawViewportStats(ide, imagePos, imageSize);
+
+    if (!ide.selection.Empty() && !ide.playing)
+        DrawSelectionToast(ide, imagePos, imageSize);
+
+    if (!ide.playing)
+        DrawCameraPositionOverlay(ide, imagePos, imageSize);
+
+    // ── FPS FLY MODE INDICATOR ───────────────────────────────────────────────
+    if (ide.fpsFlyMode)
+    {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const char* text = "   FPS FLY MODE — Tab to exit   ";
+        ImVec2 tsz = ImGui::CalcTextSize(text);
+        ImVec2 bgMin{ imagePos.x + imageSize.x * 0.5f - tsz.x * 0.5f - 8,
+                      imagePos.y + 56 };
+        ImVec2 bgMax{ bgMin.x + tsz.x + 16, bgMin.y + tsz.y + 8 };
+        dl->AddRectFilled(bgMin, bgMax, IM_COL32(30, 120, 30, 220), 6.f);
+        dl->AddRect(bgMin, bgMax, IM_COL32(80, 220, 80, 200), 6.f);
+        dl->AddText(ImVec2(bgMin.x + 8, bgMin.y + 4),
+            IM_COL32(180, 255, 180, 255), text);
+    }
+
+    // ── EDITOR-CAMERA ORBIT/PAN/ZOOM ─────────────────────────────────────────
+    UpdateEditorCamera(ide, dt, vpW, vpH, imagePos, imageSize);
+
+    // ── STATS FPS COUNTER ────────────────────────────────────────────────────
+    if (ide.showStats)
+    {
+        ide.statsFrameCount++;
+        ide.statsTimer += dt;
+        if (ide.statsTimer >= 0.5f)
+        {
+            ide.statsFps = (int)(ide.statsFrameCount / ide.statsTimer);
+            ide.statsFrameCount = 0;
+            ide.statsTimer = 0.f;
+        }
+    }
 }
 
 static void DrawConsolePanel(IDEState& ide)
 {
-    ImGui::BeginChild("##console_log", { 0,-70 }, false, ImGuiWindowFlags_HorizontalScrollbar);
+    // Console log display area
+    ImGui::BeginChild("##console_log", { 0,-80 }, false,
+        ImGuiWindowFlags_HorizontalScrollbar);
+    ide.consoleFocused = ImGui::IsWindowFocused();
+
     {
         std::lock_guard<std::mutex> lk(ide.log.mtx);
+
+        // Keep track of the current line index for selection
+        int lineIdx = 0;
+
         for (auto& e : ide.log.entries)
         {
             ImVec4 col;
@@ -4036,46 +5107,160 @@ static void DrawConsolePanel(IDEState& ide)
             case ConsoleLog::REPLY_ERR: col = { 1.00f,0.50f,0.45f,1.f }; break;
             default:                    col = { 0.80f,0.80f,0.80f,1.f }; break;
             }
-            ImGui::TextColored(col, "%s", e.text.c_str());
+
+            // Use Selectable for each line to enable text selection/copy
+            ImGui::PushStyleColor(ImGuiCol_Text, col);
+            ImGui::PushID(lineIdx);
+
+            // Store text in selectable
+            bool selected = false;
+            ImGui::Selectable(e.text.c_str(), &selected, ImGuiSelectableFlags_AllowDoubleClick);
+
+            // Handle double-click to select whole line
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                ide.log.selectedText = e.text;
+                ImGui::SetClipboardText(ide.log.selectedText.c_str());
+                ide.toastMgr.Push("Line copied to clipboard", Toast::Success, 1.5f);
+            }
+
+            ImGui::PopID();
+            ImGui::PopStyleColor();
+            lineIdx++;
         }
+
+        // Auto-scroll to bottom
         if (ide.log.autoScroll && ImGui::GetScrollY() >= ImGui::GetScrollMaxY())
             ImGui::SetScrollHereY(1.0f);
 
+        // Context menu for console
         if (ImGui::BeginPopupContextWindow("ConsoleContext")) {
+            if (ImGui::MenuItem("Copy Selected", "Ctrl+C")) {
+                // Copy any selected text
+                if (!ide.log.selectedText.empty()) {
+                    ImGui::SetClipboardText(ide.log.selectedText.c_str());
+                }
+            }
+            if (ImGui::MenuItem("Copy All", "Ctrl+Shift+C")) {
+                std::string allText;
+                for (auto& e : ide.log.entries) {
+                    allText += e.text + "\n";
+                }
+                ImGui::SetClipboardText(allText.c_str());
+                ide.toastMgr.Push("All console text copied", Toast::Success, 2.0f);
+            }
+            ImGui::Separator();
             if (ImGui::MenuItem("Clear Console")) {
-                std::lock_guard<std::mutex> lk(ide.log.mtx);
-                ide.log.entries.clear();
+                ide.log.clear();
                 ide.logReadIdx = 0;
             }
             ImGui::Separator();
             ImGui::Checkbox("Auto-scroll", &ide.log.autoScroll);
+
+            // Optional: Filter menu
+            ImGui::Separator();
+            if (ImGui::BeginMenu("Filter")) {
+                static bool showCmd = true, showOk = true, showErr = true, showInfo = true;
+                ImGui::MenuItem("Commands", nullptr, &showCmd);
+                ImGui::MenuItem("Success", nullptr, &showOk);
+                ImGui::MenuItem("Errors", nullptr, &showErr);
+                ImGui::MenuItem("Info", nullptr, &showInfo);
+                // TODO: Implement filtering
+                ImGui::EndMenu();
+            }
+
             ImGui::EndPopup();
         }
     }
     ImGui::EndChild();
 
-    // Multi-line input area (3 lines tall)
+    // Command input area
+    ImGui::Separator();
+
+    // Multi-line input buffer - using static buffer for simplicity
+    static char inputBuffer[8192] = "";  // 8KB buffer for multi-line commands
+    static int historyIndex = -1;
+
+    // Input area with 4 lines height
     ImGui::PushItemWidth(-80.f);
-    bool enter = ImGui::InputTextMultiline("##cmdinput", ide.cmdInput, sizeof(ide.cmdInput),
-        ImVec2(-1, 60),
-        ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CtrlEnterForNewLine);
+
+    // Input text with multi-line support
+    bool enterPressed = ImGui::InputTextMultiline("##cmdinput", inputBuffer, sizeof(inputBuffer),
+        ImVec2(-1, 70),
+        ImGuiInputTextFlags_EnterReturnsTrue |
+        ImGuiInputTextFlags_CtrlEnterForNewLine |
+        ImGuiInputTextFlags_AllowTabInput);
+
+    // Handle keyboard shortcuts for copy/paste in input area
+    if (ImGui::IsItemFocused()) {
+        if (ImGui::IsKeyPressed(ImGuiKey_UpArrow) && !ImGui::GetIO().WantCaptureKeyboard) {
+            if (historyIndex > 0) {
+                historyIndex--;
+                strcpy_s(inputBuffer, sizeof(inputBuffer), ide.cmdHistory[historyIndex].c_str());
+                ImGui::SetKeyboardFocusHere(-1);
+            }
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_DownArrow) && !ImGui::GetIO().WantCaptureKeyboard) {
+            if (historyIndex < (int)ide.cmdHistory.size() - 1) {
+                historyIndex++;
+                strcpy_s(inputBuffer, sizeof(inputBuffer), ide.cmdHistory[historyIndex].c_str());
+                ImGui::SetKeyboardFocusHere(-1);
+            }
+            else if (historyIndex == (int)ide.cmdHistory.size() - 1) {
+                historyIndex = (int)ide.cmdHistory.size();
+                inputBuffer[0] = '\0';
+                ImGui::SetKeyboardFocusHere(-1);
+            }
+        }
+    }
+
     ImGui::PopItemWidth();
     ImGui::SameLine();
 
     // Send button
-    bool send = ImGui::Button("Send", ImVec2(60, 60));
+    bool sendClicked = ImGui::Button("Send", ImVec2(70, 70));
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Execute all commands in the input box\nPress Enter to execute");
+        ImGui::SetTooltip("Execute all commands in the input box\nCtrl+Enter = new line\nUp/Down = command history");
     }
 
-    // Process commands when Enter is pressed (without Ctrl) or Send button clicked
-    if (enter || send) {
-        std::string input(ide.cmdInput);
-        if (!input.empty()) {
+    // Clear button
+    ImGui::SameLine();
+    if (ImGui::Button("Clear", ImVec2(50, 70))) {
+        ide.log.clear();
+        ide.logReadIdx = 0;
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Clear console output");
+    }
+
+    // Help button
+    ImGui::SameLine();
+    if (ImGui::Button("?", ImVec2(40, 70))) {
+        ide.bus.send("help");
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Show command list");
+    }
+
+    // Process commands when Enter is pressed or Send button clicked
+    if (enterPressed || sendClicked) {
+        std::string fullInput(inputBuffer);
+
+        if (!fullInput.empty()) {
+            // Store in command history (avoid duplicates)
+            if (ide.cmdHistory.empty() || ide.cmdHistory.back() != fullInput) {
+                ide.cmdHistory.push_back(fullInput);
+                // Keep last 100 commands
+                while (ide.cmdHistory.size() > 100) {
+                    ide.cmdHistory.erase(ide.cmdHistory.begin());
+                }
+            }
+            historyIndex = (int)ide.cmdHistory.size();
+
             // Split by newline and process each command
             std::vector<std::string> commands;
-            std::stringstream ss(input);
+            std::stringstream ss(fullInput);
             std::string line;
+
             while (std::getline(ss, line, '\n')) {
                 // Trim whitespace
                 line.erase(0, line.find_first_not_of(" \t\r\n"));
@@ -4091,36 +5276,17 @@ static void DrawConsolePanel(IDEState& ide)
                 ide.bus.send(cmd);
             }
 
-            // Clear input after execution
-            ide.cmdInput[0] = '\0';
+            // Clear input buffer
+            inputBuffer[0] = '\0';
         }
+
+        // Refocus the input for next command
         ImGui::SetKeyboardFocusHere(-1);
     }
 
-    // Help button
-    ImGui::SameLine();
-    if (ImGui::Button("?", ImVec2(30, 60))) {
-        ide.bus.send("help");
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Show command list");
-    }
-
-    // Clear console button
-    ImGui::SameLine();
-    if (ImGui::Button("Clear", ImVec2(50, 60))) {
-        std::lock_guard<std::mutex> lk(ide.log.mtx);
-        ide.log.entries.clear();
-        ide.logReadIdx = 0;
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Clear console output");
-    }
-
-    // Additional hint text below buttons
-    ImGui::SameLine();
+    // Show helpful hints below input area
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4{ 0.6f, 0.6f, 0.7f, 1.0f });
-    ImGui::TextDisabled("  (Ctrl+Enter = new line)");
+    ImGui::TextDisabled("  Tips: Ctrl+Enter = new line | Up/Down = command history | Right-click console for copy options");
     ImGui::PopStyleColor();
 }
 
@@ -4255,21 +5421,38 @@ static void DrawModals(IDEState& ide)
     {
         ImGui::InputText("Name", ide.newCameraName, sizeof(ide.newCameraName));
         ImGui::DragFloat3("Position", ide.newCameraPos, 0.1f);
+        ImGui::DragFloat("FOV", &ide.editorFov, 0.5f, 10.f, 170.f);
 
         if (ImGui::Button("Add", { 120,0 })) {
-            // Spawn a named camera by moving/duplicating the current editor camera
-            // The engine doesn't expose addcamera over the bus, so we log a note and
-            // register the name in the hierarchy via a lightweight object placeholder.
-            char buf[256];
-            // Use a zero-scale cube as a scene-graph placeholder; real camera spawning
-            // should be wired to your SceneManager's cameras list in a future command.
-            std::snprintf(buf, sizeof(buf), "cube %s %.3f %.3f %.3f 0.001 white",
-                ide.newCameraName, ide.newCameraPos[0], ide.newCameraPos[1], ide.newCameraPos[2]);
-            ide.log.push(ConsoleLog::CMD, std::string("> [camera] ") + ide.newCameraName);
-            ide.bus.send(buf);
-            ide.pendingSelection = ide.newCameraName;
-            ide.sceneDirty = true;
-            RefreshSceneList(ide);
+            // Check for duplicate name among cameras
+            bool dupCam = false;
+            for (auto& c : ide.cameras) if (c.name == ide.newCameraName) { dupCam = true; break; }
+            if (!dupCam) {
+                // Create a real Camera in the scene
+                Camera* newCam = new Camera(
+                    Vector3(ide.newCameraPos[0], ide.newCameraPos[1], ide.newCameraPos[2]),
+                    Quaternion::LookRotation(Vector3(0, 0, -1)));
+                ide.sm->cameras->push_back(newCam);
+
+                // Register in IDE camera list so Hierarchy shows it
+                IDECamera ideCam;
+                ideCam.name = ide.newCameraName;
+                ideCam.px = ide.newCameraPos[0];
+                ideCam.py = ide.newCameraPos[1];
+                ideCam.pz = ide.newCameraPos[2];
+                ideCam.fov = ide.editorFov;
+                ideCam.runtimeCamera = newCam;
+                ide.cameras.push_back(ideCam);
+
+                ide.log.push(ConsoleLog::REPLY_OK,
+                    std::string("[Camera] '") + ide.newCameraName + "' added to scene");
+                ide.sceneDirty = true;
+                RebuildHierarchy(ide);
+            }
+            else {
+                ide.log.push(ConsoleLog::REPLY_ERR,
+                    std::string("[Camera] Name '") + ide.newCameraName + "' already exists");
+            }
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
@@ -4406,27 +5589,209 @@ static void DrawModals(IDEState& ide)
         ImGui::EndPopup();
     }
 
-    // Ship Game modal
+    // ── Ship Game modal (real compile-and-link build) ─────────────────────────
     if (ide.showShipDialog) { ImGui::OpenPopup("Ship Game"); ide.showShipDialog = false; }
-    if (ImGui::BeginPopupModal("Ship Game", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    if (ImGui::BeginPopupModal("Ship Game", nullptr,
+        ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove))
     {
-        ImGui::TextUnformatted("Package your project for distribution.");
+        ImGui::TextColored({ 0.5f,0.85f,1.f,1.f }, ICON_FA_BOXES_PACKING "  Build & Ship");
+        ImGui::TextDisabled("Compiles all scene scripts + a game_entry.cpp into one standalone exe.");
         ImGui::Separator();
-        ImGui::InputText("Source dir", ide.shipSrcDir, sizeof(ide.shipSrcDir));
-        ImGui::InputText("Output dir", ide.shipDstDir, sizeof(ide.shipDstDir));
-        ImGui::Spacing();
-        ImGui::TextDisabled("The build will copy all assets, shaders, and the\n"
-            "compiled binary. A .tar.gz archive is created alongside.");
+
+        // ── Paths ──
+        ImGui::SetNextItemWidth(380.f);
+        ImGui::InputText("Project dir##ship", ide.shipSrcDir, sizeof(ide.shipSrcDir));
+        ImGui::SameLine(); ImGui::TextDisabled("(root of your project)");
+
+        ImGui::SetNextItemWidth(380.f);
+        ImGui::InputText("Output dir##ship", ide.shipDstDir, sizeof(ide.shipDstDir));
+        ImGui::SameLine(); ImGui::TextDisabled("(dist folder, created if missing)");
+
+        // ── Static ship config stored in IDEState ──
+        static char s_gameName[128] = "MyGame";
+        static char s_entryScene[512] = "scene.honscene";
+        static char s_compiler[512] = "";   // auto-detected from ScriptManager
+        static char s_engineLib[512] = "";   // path to GameEngine.a
+        static char s_sdl2LibDir[512] = "";   // dir with SDL2.lib / libSDL2.a
+        static char s_sdl2Dll[512] = "";   // SDL2.dll (Windows copy)
+        static bool s_debugBuild = false;
+        static bool s_createArchive = true;
 
         ImGui::Spacing();
-        if (ImGui::Button("  Build & Ship  ", { 180,0 })) {
+        ImGui::SeparatorText("Build Settings");
+
+        ImGui::SetNextItemWidth(200.f);
+        ImGui::InputText("Game name##ship", s_gameName, sizeof(s_gameName));
+        ImGui::SameLine(); ImGui::TextDisabled("(executable filename, no extension)");
+
+        ImGui::SetNextItemWidth(380.f);
+        ImGui::InputText("Entry scene##ship", s_entryScene, sizeof(s_entryScene));
+        ImGui::SameLine(); ImGui::TextDisabled("(relative path loaded on startup)");
+
+        ImGui::Spacing();
+        ImGui::SeparatorText("Toolchain  (blank = use editor settings automatically)");
+
+        // Show what will actually be used from ScriptManager
+        {
+            std::string smCompiler = ScriptManager::GetCompilerPath().string();
+            std::string smEngLib = ScriptManager::GetEngineLibraryPath().string();
+            std::string smSdl2 = ScriptManager::GetSDL2Path().string();
+            ImGui::PushStyleColor(ImGuiCol_Text, { 0.5f,0.5f,0.5f,1.f });
+            ImGui::Text("  Active compiler : %s", smCompiler.empty() ? "g++ (system)" : smCompiler.c_str());
+            ImGui::Text("  Engine lib      : %s", smEngLib.empty() ? "(not found)" : smEngLib.c_str());
+            ImGui::Text("  SDL2            : %s", smSdl2.empty() ? "(not found)" : smSdl2.c_str());
+            ImGui::PopStyleColor();
+        }
+        ImGui::Spacing();
+
+        ImGui::SetNextItemWidth(380.f);
+        ImGui::InputText("Override compiler##ship", s_compiler, sizeof(s_compiler));
+
+        ImGui::SetNextItemWidth(380.f);
+        ImGui::InputText("Override engine lib##ship", s_engineLib, sizeof(s_engineLib));
+
+        ImGui::SetNextItemWidth(380.f);
+        ImGui::InputText("Override SDL2 lib dir##ship", s_sdl2LibDir, sizeof(s_sdl2LibDir));
+
+#ifdef _WIN32
+        ImGui::SetNextItemWidth(380.f);
+        ImGui::InputText("Override SDL2.dll path##ship", s_sdl2Dll, sizeof(s_sdl2Dll));
+#endif
+
+        ImGui::Spacing();
+        ImGui::Checkbox("Debug build (-g, no optimisations)", &s_debugBuild);
+        ImGui::SameLine(0, 24);
+        ImGui::Checkbox("Create .tar.gz archive", &s_createArchive);
+
+        ImGui::Spacing();
+        ImGui::Separator();
+
+        // ── Validation hint ──
+        bool canBuild = (strlen(ide.shipSrcDir) > 0 && strlen(ide.shipDstDir) > 0
+            && strlen(s_entryScene) > 0 && strlen(s_gameName) > 0);
+        if (!canBuild)
+            ImGui::TextColored({ 1.f,0.5f,0.2f,1.f }, "  Fill in Project dir, Output dir, Game name, Entry scene.");
+
+        ImGui::Spacing();
+        ImGui::BeginDisabled(!canBuild);
+        
+        if (ImGui::Button("  " ICON_FA_HAMMER "  Build & Ship  ", { 220,0 })) {
             ImGui::CloseCurrentPopup();
-            std::string src(ide.shipSrcDir), dst(ide.shipDstDir);
+
+            fs::path savePath = fs::path(ide.shipSrcDir) / s_entryScene;
+            fs::create_directories(savePath.parent_path());
+
+            std::string sceneJson;
+            {
+                std::shared_lock<std::shared_mutex> lock(g_sceneMutex);
+                std::ostringstream oss;
+                oss << "{\"objects\":[";
+                bool firstObj = true;
+                for (auto& [name, obj] : g_namedObjects) {
+                    if (!firstObj) oss << ",";
+                    firstObj = false;
+                    oss << "{\"name\":" << JStr(name)
+                        << ",\"px\":" << obj->transform.position.x
+                        << ",\"py\":" << obj->transform.position.y
+                        << ",\"pz\":" << obj->transform.position.z
+                        << ",\"sx\":" << obj->transform.scale.x
+                        << ",\"sy\":" << obj->transform.scale.y
+                        << ",\"sz\":" << obj->transform.scale.z
+                        << ",\"rw\":" << obj->transform.rotation.w
+                        << ",\"rx\":" << obj->transform.rotation.x
+                        << ",\"ry\":" << obj->transform.rotation.y
+                        << ",\"rz\":" << obj->transform.rotation.z
+                        << ",\"visible\":" << (obj->visible ? "true" : "false")
+                        << ",\"cr\":" << (obj->material ? (int)obj->material->color.r : 255)
+                        << ",\"cg\":" << (obj->material ? (int)obj->material->color.g : 255)
+                        << ",\"cb\":" << (obj->material ? (int)obj->material->color.b : 255)
+                        << ",\"ca\":" << (obj->material ? (int)obj->material->color.a : 255)
+                        << ",\"shader\":" << JStr(obj->render.shaderName)
+                        << ",\"tag\":" << JStr(obj->tag)
+                        << ",\"scripts\":[";
+                    bool firstScript = true;
+                    for (auto& sc : obj->scripts) {
+                        if (!firstScript) oss << ",";
+                        firstScript = false;
+                        oss << JStr(sc.scriptGUID);
+                    }
+                    oss << "]}";
+                }
+                oss << "],\"lights\":[";
+                bool firstLight = true;
+                for (auto& [name, lt] : g_namedLights) {
+                    if (!firstLight) oss << ",";
+                    firstLight = false;
+                    std::string lightType = "point";
+                    float px = 0, py = 0, pz = 0;
+                    if (auto* dl = dynamic_cast<DirectionalLight*>(lt)) {
+                        lightType = "directional";
+                        px = dl->transform.position.x;
+                        py = dl->transform.position.y;
+                        pz = dl->transform.position.z;
+                    }
+                    else if (auto* pl = dynamic_cast<PointLight*>(lt)) {
+                        lightType = "point";
+                        px = pl->transform.position.x;
+                        py = pl->transform.position.y;
+                        pz = pl->transform.position.z;
+                    }
+                    oss << "{\"name\":" << JStr(name)
+                        << ",\"type\":" << JStr(lightType)
+                        << ",\"intensity\":" << lt->intensity
+                        << ",\"r\":" << (int)lt->color.r
+                        << ",\"g\":" << (int)lt->color.g
+                        << ",\"b\":" << (int)lt->color.b
+                        << ",\"px\":" << px
+                        << ",\"py\":" << py
+                        << ",\"pz\":" << pz << "}";
+                }
+                oss << "]}";
+                sceneJson = oss.str();
+            }
+
+            std::ofstream f(savePath);
+            if (f.is_open()) {
+                f << sceneJson;
+                f.close();
+                ide.log.push(ConsoleLog::REPLY_OK, "[Ship] Auto-saved scene to: " + savePath.string());
+            }
+            else {
+                ide.log.push(ConsoleLog::REPLY_ERR, "[Ship] Failed to auto-save scene to: " + savePath.string());
+            }
+
+            HonHengine::ShipConfig cfg;
+            cfg.projectDir = ide.shipSrcDir;
+            cfg.outputDir = ide.shipDstDir;
+            cfg.gameName = s_gameName;
+            cfg.entryScene = savePath.string();
+            cfg.debugBuild = s_debugBuild;
+            cfg.createArchive = s_createArchive;
+
+            cfg.compilerPath = strlen(s_compiler) > 0 ? s_compiler
+                : ScriptManager::GetCompilerPath().string();
+            cfg.engineLibPath = strlen(s_engineLib) > 0 ? s_engineLib
+                : ScriptManager::GetEngineLibraryPath().string();
+
+            {
+                fs::path sm_sdl2 = ScriptManager::GetSDL2Path();
+                cfg.sdl2LibDir = strlen(s_sdl2LibDir) > 0 ? s_sdl2LibDir
+                    : (sm_sdl2.empty() ? "" : sm_sdl2.parent_path().string());
+                cfg.sdl2DllPath = strlen(s_sdl2Dll) > 0 ? s_sdl2Dll
+                    : (sm_sdl2.empty() ? "" : sm_sdl2.string());
+            }
+
+            ide.log.push(ConsoleLog::INFO,
+                "[Ship] Launching build for '" + cfg.gameName + "' ...");
+
             ConsoleLog* logPtr = &ide.log;
-            std::thread([src, dst, logPtr] {
-                ShipGame(src, dst, *logPtr);
+            std::thread([cfg, logPtr] {
+                RunShipBuild(cfg, *logPtr);
                 }).detach();
         }
+        
+        ImGui::EndDisabled();
+
         ImGui::SameLine();
         if (ImGui::Button("Cancel", { 100,0 })) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
@@ -4548,6 +5913,12 @@ static void DrawMenuBar(IDEState& ide, bool& quitRequested)
         if (ImGui::MenuItem("Move", "W", ide.toolMode == 1)) ide.toolMode = 1;
         if (ImGui::MenuItem("Rotate", "E", ide.toolMode == 2)) ide.toolMode = 2;
         if (ImGui::MenuItem("Scale", "R", ide.toolMode == 3)) ide.toolMode = 3;
+        ImGui::Separator();
+        if (ImGui::MenuItem("Scripting Toolchain...")) ide.showToolchainWindow = true;
+        if (ImGui::MenuItem("Create Script..."))       ide.showScriptWizard = true;
+        ImGui::Separator();
+        if (ImGui::MenuItem("Profiler", nullptr, ide.showProfiler))     ide.showProfiler = !ide.showProfiler;
+        if (ImGui::MenuItem("Memory Stats", nullptr, ide.showMemoryWindow)) ide.showMemoryWindow = !ide.showMemoryWindow;
         ImGui::EndMenu();
     }
 
@@ -4560,6 +5931,9 @@ static void DrawMenuBar(IDEState& ide, bool& quitRequested)
         }
         if (ImGui::MenuItem("Stats", nullptr, ide.showStats)) {
             ide.showStats = !ide.showStats;
+        }
+        if (ImGui::MenuItem("  Environment...")) {
+            ide.showEnvironmentWindow = true;
         }
         ImGui::Separator();
         if (ImGui::BeginMenu("Debug Mode")) {
@@ -4616,9 +5990,30 @@ static void DrawMenuBar(IDEState& ide, bool& quitRequested)
     if (ImGui::Button(ide.playing ? " STOP " : " PLAY ", ImVec2(playWidth, 0))) {
         ide.playing = !ide.playing;
         SDL_SetRelativeMouseMode(ide.playing ? SDL_TRUE : SDL_FALSE);
-        // Reset editor camera position when stopping
-        if (!ide.playing && ide.sm->currentCamera) {
-            ide.sm->currentCamera->transform.position = Vector3(0, 5, 15);
+
+        if (ide.playing) {
+            // Save the current editor camera so we can restore it on Stop
+            ide.savedEditorCamera = ide.sm->currentCamera;
+            // Switch to the first scene camera if one exists
+            if (!ide.cameras.empty() && ide.cameras[0].runtimeCamera != nullptr) {
+                ide.sm->currentCamera = ide.cameras[0].runtimeCamera;
+                ide.log.push(ConsoleLog::REPLY_OK,
+                    "[Play] Using scene camera '" + ide.cameras[0].name + "'");
+            }
+            else {
+                ide.log.push(ConsoleLog::INFO,
+                    "[Play] No scene camera found — using editor camera");
+            }
+        }
+        else {
+            // Restore editor camera on Stop
+            if (ide.savedEditorCamera) {
+                ide.sm->currentCamera = ide.savedEditorCamera;
+                ide.savedEditorCamera = nullptr;
+            }
+            else if (ide.sm->currentCamera) {
+                ide.sm->currentCamera->transform.position = Vector3(0, 5, 15);
+            }
         }
         // Delegate Start()/OnDestroy() calls and play-state tracking to the
         // renderer so all game-logic lifecycle is in one place.
@@ -4822,6 +6217,16 @@ void MainScene_Run() {
 
     renderer.RegisterShader("skinned", SKINNED_VERT, SKINNED_FRAG);
 
+    // ── Default procedural skybox ─────────────────────────────────────────────
+    // Gives every new scene a sky immediately; replaceble via Environment window.
+    {
+        Skybox* skybox = new Skybox();
+        if (!skybox->GenerateProcedural()) {
+            std::cerr << "[Main] Failed to generate procedural skybox, creating a simple fallback.\n";
+        }        sm->SetSkybox(skybox);
+        std::cout << "[Main] Default procedural skybox created\n";
+    }
+
 
     BasicMovements player(sm);
     player.eyeHeight = 1.7;
@@ -4840,10 +6245,14 @@ void MainScene_Run() {
     sm->scriptManager = std::make_unique<ScriptManager>(sm);
 
     ScriptManager::SetToolchainPath("./tools/mingw64");
-    ScriptManager::SetEngineLibraryPath("./tools/honhengine/GameEngine.lib");
-    ide.scriptManager = sm->scriptManager.get();
+    ScriptManager::SetSDL2Path("./tools/sdl2/x64/lib/x64");
+    ScriptManager::AddIncludePath("./tools/glm/include");
+    ScriptManager::AddLibraryPath("./tools/glm/lib");
+    ScriptManager::AddIncludePath("./tools/glad/include");
 
-    ImGuizmo::SetRect(0, 0, (float)Settings::canvasWidth, (float)Settings::canvasHeight);
+     ScriptManager::AddLibraryPathAfter("./tools/glad/lib");
+    ScriptManager::AddLinkLibraryAfter("glad");
+    ide.scriptManager = sm->scriptManager.get();
 
     // Load editor settings
     ide.editorSettings.Load("ide_settings.ini");
@@ -4948,10 +6357,51 @@ void MainScene_Run() {
         }
         // -----------------------------------------------------------------------
 
+        // --- Process deferred HDR skybox loads ---------------------------------
+        {
+            std::vector<DeferredHDRTask> tasks;
+            {
+                std::lock_guard<std::mutex> lock(g_deferredHDRMutex);
+                tasks.swap(g_deferredHDRTasks);
+            }
+            for (const auto& task : tasks) {
+                Skybox* newSky = new Skybox();
+                if (newSky->LoadFromHDR(task.path)) {
+                    delete ide.sm->currentSkybox;
+                    ide.sm->SetSkybox(newSky);
+                    ide.log.push(ConsoleLog::REPLY_OK, "[HDR] Skybox loaded from: " + task.path);
+                }
+                else {
+                    delete newSky;
+                    ide.log.push(ConsoleLog::REPLY_ERR, "[HDR] Failed to load: " + task.path);
+                }
+            }
+        }
+        // -----------------------------------------------------------------------
+
+        // --- Process deferred shader registrations -----------------------------
+        {
+            std::vector<DeferredShaderTask> tasks;
+            {
+                std::lock_guard<std::mutex> lock(g_deferredShaderMutex);
+                tasks.swap(g_deferredShaderTasks);
+            }
+            for (const auto& task : tasks) {
+                ide.renderer->RegisterShader(task.name, task.vertSrc.c_str(), task.fragSrc.c_str());
+                ide.log.push(ConsoleLog::REPLY_OK, "[Shader] Registered: " + task.name);
+            }
+        }
+        // -----------------------------------------------------------------------
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
-            ImGui_ImplSDL2_ProcessEvent(&ev);
             if (ev.type == SDL_QUIT) quit = true;
+            if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_ESCAPE && ide.playing) {
+                ide.playing = false;
+                SDL_SetRelativeMouseMode(SDL_FALSE);
+                ide.renderer->SetPlayMode(false);
+                continue;   // Skip ImGui processing for this key
+            }
+            ImGui_ImplSDL2_ProcessEvent(&ev);
         }
 
         // Process keyboard shortcuts after ImGui has captured its own keys
@@ -4963,6 +6413,31 @@ void MainScene_Run() {
             if (mx || my) player.TickMouse(-mx, -my);
             const Uint8* ks = SDL_GetKeyboardState(nullptr);
             player.TickKeys(ks, dt);
+
+            // ── Physics step ─────────────────────────────────────────────────
+            {
+                float fixedDt = ide.project.physics.fixedTimestep > 0.f
+                    ? ide.project.physics.fixedTimestep : 0.02f;
+                static float physAccum = 0.f;
+                physAccum += dt;
+                while (physAccum >= fixedDt) {
+                    ide.physicsWorld.Step(fixedDt);
+                    physAccum -= fixedDt;
+                }
+            }
+
+            // ── Collision trigger polling ─────────────────────────────────────
+            {
+                std::vector<BaseObject*> candidates;
+                {
+                    std::shared_lock<std::shared_mutex> lk(g_sceneMutex);
+                    candidates.reserve(g_namedObjects.size());
+                    for (auto& [n, o] : g_namedObjects) candidates.push_back(o);
+                }
+                for (auto& [obj, trigger] : ide.collisionTriggers) {
+                    if (trigger.enabled) trigger.Poll(candidates);
+                }
+            }
         }
 
         {
@@ -4979,6 +6454,29 @@ void MainScene_Run() {
                         for (auto& o : ide.objects) prevNames.push_back(o.name);
 
                         ParseListReply(e.text, ide);
+
+                        // ── Purge orphaned physics components ────────────────
+                        // After a list refresh, any BaseObject* that no longer
+                        // exists in g_namedObjects must be removed from the
+                        // physics maps and unregistered from the world.
+                        {
+                            std::shared_lock<std::shared_mutex> lk(g_sceneMutex);
+                            for (auto it = ide.rigidBodies.begin(); it != ide.rigidBodies.end(); ) {
+                                bool found = false;
+                                for (auto& [n, o] : g_namedObjects) if (o == it->first) { found = true; break; }
+                                if (!found) {
+                                    ide.physicsWorld.Unregister(&it->second);
+                                    it = ide.rigidBodies.erase(it);
+                                }
+                                else { ++it; }
+                            }
+                            for (auto it = ide.collisionTriggers.begin(); it != ide.collisionTriggers.end(); ) {
+                                bool found = false;
+                                for (auto& [n, o] : g_namedObjects) if (o == it->first) { found = true; break; }
+                                if (!found) it = ide.collisionTriggers.erase(it);
+                                else        ++it;
+                            }
+                        }
 
                         // ── Sub-object population ────────────────────────────
                         // If a model was just dropped, find newly-added objects
@@ -5110,8 +6608,11 @@ void MainScene_Run() {
         ImGui::End();
 
         // ── Open import overlay whenever the browser focuses a new asset ──────
+        // Guard: don't overwrite an overlay that was just opened by a drag-drop
+        // with a pending import callback — that would silently discard the action.
         if (!ide.assetBrowser.focusedGUID.empty() &&
-            ide.assetBrowser.focusedGUID != ide.importOverlayGUID)
+            ide.assetBrowser.focusedGUID != ide.importOverlayGUID &&
+            !(ide.showImportOverlay && ide.importOverlayHasImportBtn))
         {
             AssetRecord* focusedRec = ide.assetDb.FindByGUID(ide.assetBrowser.focusedGUID);
             if (focusedRec) {
@@ -5155,8 +6656,109 @@ void MainScene_Run() {
             RefreshSceneList(ide);
         }
 
+        // ── Environment / Skybox window ───────────────────────────────────────
+        if (ide.showEnvironmentWindow) {
+            ImGui::SetNextWindowSize(ImVec2(480, 340), ImGuiCond_FirstUseEver);
+            if (ImGui::Begin("  Environment##skybox", &ide.showEnvironmentWindow)) {
+
+                ImGui::SeparatorText("Skybox");
+
+                static const char* kSkyboxModes[] = { "Procedural (default)", "Cubemap from files" };
+                ImGui::Combo("Mode", &ide.skyboxMode, kSkyboxModes, 2);
+
+                ImGui::Spacing();
+
+                if (ide.skyboxMode == 0) {
+                    // Procedural — just a button to (re)generate
+                    ImGui::TextDisabled("A gradient sky is generated automatically.");
+                    ImGui::Spacing();
+                    if (ImGui::Button("Reset to Default Procedural", ImVec2(-1, 0))) {
+                        if (ide.sm->currentSkybox) {
+                            delete ide.sm->currentSkybox;
+                            ide.sm->currentSkybox = nullptr;
+                        }
+                        Skybox* sky = new Skybox();
+                        sky->GenerateProcedural();
+                        ide.sm->SetSkybox(sky);
+                        ide.toastMgr.Push("Procedural skybox reset", Toast::Success, 2.f);
+                    }
+                }
+                else {
+                    // Cubemap from files
+                    static const char* kFaceLabels[] = {
+                        "Right (+X)", "Left  (-X)", "Top   (+Y)",
+                        "Bottom(-Y)", "Front (+Z)", "Back  (-Z)"
+                    };
+                    ImGui::TextDisabled("Provide 6 face images (PNG/JPG).");
+                    ImGui::Spacing();
+                    for (int i = 0; i < 6; ++i) {
+                        ImGui::PushID(i);
+                        ImGui::Text("%-12s", kFaceLabels[i]);
+                        ImGui::SameLine();
+                        ImGui::SetNextItemWidth(-1);
+                        ImGui::InputText("##face", ide.skyboxFaces[i], sizeof(ide.skyboxFaces[i]));
+                        // Accept drag-drop from asset browser
+                        if (ImGui::BeginDragDropTarget()) {
+                            if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("ASSET_PATH")) {
+                                const char* droppedPath = static_cast<const char*>(pl->Data);
+                                memcpy(ide.skyboxFaces[i], droppedPath, sizeof(ide.skyboxFaces[i]) - 1);
+                                ide.skyboxFaces[i][sizeof(ide.skyboxFaces[i]) - 1] = '\0';
+                            }
+                            ImGui::EndDragDropTarget();
+                        }
+                        ImGui::PopID();
+                    }
+                    ImGui::Spacing();
+                    if (ImGui::Button("Load Cubemap", ImVec2(-1, 0))) {
+                        std::vector<std::string> faces;
+                        bool allFilled = true;
+                        for (int i = 0; i < 6; ++i) {
+                            if (ide.skyboxFaces[i][0] == '�') { allFilled = false; break; }
+                            faces.push_back(ide.skyboxFaces[i]);
+                        }
+                        if (!allFilled) {
+                            ide.toastMgr.Push("Fill in all 6 face paths first", Toast::Warning, 3.f);
+                        }
+                        else {
+                            Skybox* sky = new Skybox();
+                            if (sky->LoadFromFiles(faces)) {
+                                if (ide.sm->currentSkybox) delete ide.sm->currentSkybox;
+                                ide.sm->SetSkybox(sky);
+                                ide.toastMgr.Push("Cubemap skybox loaded!", Toast::Success, 2.f);
+                            }
+                            else {
+                                delete sky;
+                                ide.toastMgr.Push("Failed to load cubemap — check paths", Toast::Error, 4.f);
+                            }
+                        }
+                    }
+                }
+
+                ImGui::Spacing();
+                ImGui::SeparatorText("Sun Glow");
+                ImGui::TextDisabled("Sun direction is driven by your Directional Light.");
+                if (ide.sm->currentSkybox) {
+                    // Show live sun override controls
+                    static float sunColor[3] = { 1.f, 0.95f, 0.8f };
+                    static float sunIntensity = 0.8f;
+                    if (ImGui::ColorEdit3("Sun Color Override", sunColor)) {
+                        ide.sm->currentSkybox->SetSunColor(glm::vec3(sunColor[0], sunColor[1], sunColor[2]));
+                    }
+                    if (ImGui::SliderFloat("Sun Intensity Override", &sunIntensity, 0.f, 5.f)) {
+                        ide.sm->currentSkybox->SetSunIntensity(sunIntensity);
+                    }
+                    ImGui::TextDisabled("(These are overridden each frame if a Directional Light exists.)");
+                }
+            }
+            ImGui::End();
+        }
+
         DrawMenuBar(ide, quit);
         DrawModals(ide);
+        DrawScriptWizardModal(ide);
+        DrawToolchainWindow(ide);
+        DrawProfilerWindow(ide, dt);
+        DrawMemoryWindow(ide);
         DrawGlobalSearch(ide.globalSearch, ide,
             [&](const std::string& name) {
                 ide.selection.SetSingle(name);
@@ -5178,6 +6780,9 @@ void MainScene_Run() {
         glClearColor(0.07f, 0.075f, 0.08f, 1.f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+        ide.renderer->GetUIRenderer().flush(0);
+
         if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
             SDL_Window* bkWin = SDL_GL_GetCurrentWindow();
             SDL_GLContext bkCtx = SDL_GL_GetCurrentContext();

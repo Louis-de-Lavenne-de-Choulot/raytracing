@@ -217,16 +217,17 @@
     <ClInclude Include="camera.h" />
     <ClInclude Include="collisiontrigger.h" />
     <ClInclude Include="color.h" />
+    <ClInclude Include="commandBus.h" />
     <ClInclude Include="commandSystem.h" />
     <ClInclude Include="directionallight.h" />
     <ClInclude Include="eulerangle.h" />
     <ClInclude Include="exampleScene.h" />
+    <ClInclude Include="gizmo.h" />
     <ClInclude Include="GltfImporter.h" />
     <ClInclude Include="ide_asset_browser.h" />
     <ClInclude Include="ide_asset_database.h" />
     <ClInclude Include="ide_camera_bookmarks.h" />
     <ClInclude Include="ide_editor_settings.h" />
-    <ClInclude Include="ide_gizmo.h" />
     <ClInclude Include="ide_global_search.h" />
     <ClInclude Include="ide_icons.h" />
     <ClInclude Include="ide_layout.h" />
@@ -234,6 +235,7 @@
     <ClInclude Include="ide_progress.h" />
     <ClInclude Include="ide_project.h" />
     <ClInclude Include="ide_selection.h" />
+    <ClInclude Include="ide_ship.h" />
     <ClInclude Include="ide_theme.h" />
     <ClInclude Include="ide_toast.h" />
     <ClInclude Include="ide_undo_history.h" />
@@ -254,6 +256,7 @@
     <ClInclude Include="script_manager.h" />
     <ClInclude Include="skinnedShader.h" />
     <ClInclude Include="skinnedVertex.h" />
+    <ClInclude Include="skybox.h" />
     <ClInclude Include="stb_image.h" />
     <ClInclude Include="texture.h" />
     <ClInclude Include="UIRenderer.h" />
@@ -279,8 +282,10 @@
     <ClCompile Include="color.cpp" />
     <ClCompile Include="defaults.h" />
     <ClCompile Include="exampleScene.cpp" />
+    <ClCompile Include="gizmo.cpp" />
     <ClCompile Include="GltfImporter.cpp" />
     <ClCompile Include="GPURenderer.cpp" />
+    <ClCompile Include="ide_ship.cpp" />
     <ClCompile Include="imgui_impl_sdl2.cpp" />
     <ClCompile Include="Importer.cpp" />
     <ClCompile Include="main.cpp" />
@@ -289,6 +294,7 @@
     <ClCompile Include="quaternion.cpp" />
     <ClCompile Include="rectangle.cpp" />
     <ClCompile Include="script_manager.cpp" />
+    <ClCompile Include="skybox.cpp" />
     <ClCompile Include="UIRenderer.cpp" />
     <ClCompile Include="shaderLibrary.cpp" />
     <ClCompile Include="sphere.cpp" />

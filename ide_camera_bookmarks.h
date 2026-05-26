@@ -117,7 +117,7 @@ struct FocusTransition {
 
         // Calculate new camera position at the desired distance
         // Clamp target distance based on object size (optional - could be passed as parameter)
-        float finalDistance = (std::max)(targetDistance, 2.0f);
+        float finalDistance = (((std::max)))(targetDistance, 2.0f);
         endPos = targetWorldPos + dir * finalDistance;
 
         // Ensure camera doesn't go below ground (optional)

@@ -632,23 +632,21 @@ inline bool DrawImportSettingsPanel(AssetRecord& rec) {
 inline void DrawImportSettingsOverlay(
     AssetRecord* rec,
     bool& showOverlay,
-    ImVec2 anchorPos,       // top-left of the Inspector window
-    ImVec2 anchorSize,      // size  of the Inspector window
-    const std::function<void()>& onImport = nullptr)  // nullptr = no Import button
+    ImVec2 anchorPos,
+    ImVec2 anchorSize,
+    const std::function<void()>& onImport = nullptr)
 {
     if (!showOverlay || !rec) return;
 
-    // Position: above the Inspector panel, right-aligned with it
+    // Position above the Inspector, right-aligned
     const float panelW = (std::min)(anchorSize.x, 380.f);
-    const float panelH = 420.f;   // max height; child scroll handles overflow
+    const float panelH = 420.f;
     ImVec2 panelPos = ImVec2(
-        anchorPos.x + anchorSize.x - panelW,   // right-flush with Inspector
-        anchorPos.y - panelH - 4.f             // just above it
+        anchorPos.x + anchorSize.x - panelW,
+        anchorPos.y - panelH - 4.f
     );
-    // Clamp to screen
-    ImGuiIO& io = ImGui::GetIO();
-    panelPos.x = (std::max)(panelPos.x, 0.f);
-    panelPos.y = (std::max)(panelPos.y, 20.f);   // below menu bar
+    panelPos.x = (((std::max)))(panelPos.x, 0.f);
+    panelPos.y = (((std::max)))(panelPos.y, 20.f);
 
     ImGui::SetNextWindowPos(panelPos, ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(panelW, panelH), ImGuiCond_Always);
@@ -661,64 +659,63 @@ inline void DrawImportSettingsOverlay(
         ImGuiWindowFlags_NoDocking |
         ImGuiWindowFlags_NoSavedSettings;
 
-    if (ImGui::Begin("##import_overlay", nullptr, flags))
+    // Pass &showOverlay so the window's close button works
+    if (!ImGui::Begin("Import Settings", &showOverlay, flags))
     {
-        // ── Header ──────────────────────────────────────────────────────────
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4{ 0.75f, 0.85f, 1.0f, 1.f });
-        ImGui::TextUnformatted("Import Settings");
+        ImGui::End();
+        return;
+    }
+
+    // Header
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4{ 0.75f, 0.85f, 1.0f, 1.f });
+    ImGui::TextUnformatted("Import Settings");
+    ImGui::PopStyleColor();
+    ImGui::SameLine();
+    ImGui::TextDisabled("  |  %s", rec->displayName.c_str());
+    ImGui::SameLine();
+    ImGui::TextDisabled("(%s)", AssetTypeName(rec->type));
+    ImGui::Separator();
+
+    // Scrollable settings body
+    float footerH = onImport ? 56.f : 0.f;
+    ImGui::BeginChild("##import_body", ImVec2(0, -footerH), false);
+    bool changed = DrawImportSettingsPanel(*rec);
+    if (changed) rec->needsReimport = true;
+    ImGui::EndChild();
+
+    // Footer buttons
+    ImGui::Separator();
+    if (rec->needsReimport) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{ 0.6f, 0.35f, 0.05f, 1.f });
+        if (ImGui::Button("Apply Changes", ImVec2(onImport ? -130.f : -1.f, 0))) {
+            rec->needsReimport = false;
+            // (Optional: trigger actual reimport here)
+        }
         ImGui::PopStyleColor();
+    }
+    else {
+        ImGui::BeginDisabled();
+        ImGui::Button("Apply Changes", ImVec2(onImport ? -130.f : -1.f, 0));
+        ImGui::EndDisabled();
+    }
 
-        ImGui::SameLine(ImGui::GetContentRegionAvail().x - 20.f);
-        if (ImGui::SmallButton("X")) { showOverlay = false; ImGui::End(); return; }
-
-        ImGui::TextUnformatted(rec->displayName.c_str());
+    if (onImport) {
         ImGui::SameLine();
-        ImGui::TextDisabled("(%s)", AssetTypeName(rec->type));
-        ImGui::TextDisabled("GUID: %.18s…", rec->guid.ToString().c_str());
-        ImGui::Separator();
-
-        // ── Scrollable settings body ─────────────────────────────────────────
-        float footerH = onImport ? 56.f : 0.f;
-        ImGui::BeginChild("##import_body", ImVec2(0, -footerH), false);
-        bool changed = DrawImportSettingsPanel(*rec);
-        if (changed) rec->needsReimport = true;
-        ImGui::EndChild();
-
-        // ── Footer: Apply / Import ───────────────────────────────────────────
-        ImGui::Separator();
-        if (rec->needsReimport) {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{ 0.6f, 0.35f, 0.05f, 1.f });
-            if (ImGui::Button("Apply Changes##ov", ImVec2(onImport ? -130.f : -1.f, 0))) {
-                rec->needsReimport = false;
-            }
-            ImGui::PopStyleColor();
-        }
-        else {
-            ImGui::BeginDisabled();
-            ImGui::Button("Apply Changes##ov_dis", ImVec2(onImport ? -130.f : -1.f, 0));
-            ImGui::EndDisabled();
-        }
-
-        if (onImport) {
-            ImGui::SameLine();
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{ 0.18f, 0.55f, 0.18f, 1.f });
-            if (ImGui::Button("Import##ov_import", ImVec2(-1.f, 0))) {
-                onImport();
-                showOverlay = false;
-            }
-            ImGui::PopStyleColor();
-        }
-
-        // ── Auto-close when user clicks outside ─────────────────────────────
-        if (!ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) &&
-            ImGui::IsMouseClicked(ImGuiMouseButton_Left))
-        {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{ 0.18f, 0.55f, 0.18f, 1.f });
+        if (ImGui::Button("Import", ImVec2(-1.f, 0))) {
+            onImport();
             showOverlay = false;
         }
+        ImGui::PopStyleColor();
     }
+
+    // Escape key closes the overlay
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        showOverlay = false;
+    }
+
     ImGui::End();
 }
-
 // ─────────────────────────────────────────────────────────────────────────────
 //  DrawBulkOpsPopup — called from asset browser context menu
 //   selectedGUIDs: currently selected assets

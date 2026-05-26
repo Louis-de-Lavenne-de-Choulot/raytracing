@@ -69,6 +69,13 @@ struct EditorSettings {
     float assetRefreshInterval = 3.0f;
     bool  showWelcomeOnStartup = true;
 
+
+    char compilerPath[512] = "";
+    char engineLibPath[512] = "";
+    std::vector<std::string> includePaths;
+    std::vector<std::string> libraryPaths;
+    std::vector<std::string> linkLibraries;
+
     // Window state (layout persistence)
     std::string dockLayoutFile = "ide_layout.ini";
 

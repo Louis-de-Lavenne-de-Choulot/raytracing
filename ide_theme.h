@@ -235,7 +235,7 @@ struct ThemeManager {
             if (line.rfind("current=", 0) == 0) {
                 try { currentIdx = std::stoi(line.substr(8)); }
                 catch (...) {}
-                currentIdx = (std::max)(0, (std::min)(currentIdx, (int)themes.size() - 1));
+                currentIdx = (((std::max)))(0, (std::min)(currentIdx, (int)themes.size() - 1));
             }
             else if (line.rfind("theme_name=", 0) == 0) {
                 themes.push_back(MakeThemeDark());

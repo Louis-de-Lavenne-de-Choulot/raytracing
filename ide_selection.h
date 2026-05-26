@@ -1,12 +1,6 @@
 #pragma once
 // ide_selection.h  —  HonHon Engine IDE  —  Sélection multiple & raycasting
 // =============================================================================
-// Gère :
-//   - Le conteneur de sélection multiple (std::set<std::string>)
-//   - Le raycasting souris contre des bounding boxes AABB (from IDEObject positions)
-//   - La box-sélection dans le plan écran
-//   - Les helpers de sélection (toggle, clear, contains)
-// =============================================================================
 
 #include <string>
 #include <set>
@@ -17,7 +11,7 @@
 #include <imgui.h>
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  MultiSelection — remplace std::string selectedObject
+//  MultiSelection
 // ─────────────────────────────────────────────────────────────────────────────
 struct MultiSelection {
     std::set<std::string> items;
@@ -26,19 +20,16 @@ struct MultiSelection {
     bool Empty() const { return items.empty(); }
     size_t Size() const { return items.size(); }
 
-    // Sélection unique (remplace selectedObject = name)
     void SetSingle(const std::string& name) {
         items.clear();
         if (!name.empty()) items.insert(name);
     }
 
-    // Bascule un élément (Ctrl+clic)
     void Toggle(const std::string& name) {
         if (items.count(name)) items.erase(name);
         else items.insert(name);
     }
 
-    // Ajoute sans effacer
     void Add(const std::string& name) {
         if (!name.empty()) items.insert(name);
     }
@@ -46,13 +37,11 @@ struct MultiSelection {
     void Remove(const std::string& name) { items.erase(name); }
     void Clear() { items.clear(); }
 
-    // Retourne le premier élément (compatibilité avec le code legacy selectedObject)
     std::string Primary() const {
         if (items.empty()) return "";
         return *items.begin();
     }
 
-    // Compatibilité: assigner une string directement
     MultiSelection& operator=(const std::string& name) {
         SetSingle(name);
         return *this;
@@ -70,11 +59,10 @@ struct MultiSelection {
 
 struct RaycastCandidate {
     std::string name;
-    glm::vec3   center;    // position monde
-    glm::vec3   halfSize;  // demi-taille AABB (sx/2, sy/2, sz/2)
+    glm::vec3   center;
+    glm::vec3   halfSize;
 };
 
-// Intersecte rayon vs AABB, retourne la distance (négatif = pas d'intersection)
 static float RayAABB(const glm::vec3& rayOrigin, const glm::vec3& rayDir,
     const glm::vec3& center, const glm::vec3& half)
 {
@@ -97,7 +85,6 @@ static float RayAABB(const glm::vec3& rayOrigin, const glm::vec3& rayDir,
     return tmin > 0.f ? tmin : (tmax > 0.f ? 0.f : -1.f);
 }
 
-// Construit la direction du rayon depuis les coordonnées souris normalisées [-1,1]
 static glm::vec3 UnprojectRayDir(float ndcX, float ndcY,
     const glm::mat4& proj, const glm::mat4& view)
 {
@@ -108,19 +95,22 @@ static glm::vec3 UnprojectRayDir(float ndcX, float ndcY,
     return glm::normalize(glm::vec3(worldCoord));
 }
 
-// Effectue le raycasting et retourne le nom de l'objet touché, ou "" si rien
 static std::string RaycastObjects(
-    float mouseX, float mouseY,              // position souris dans le viewport (pixels)
-    float vpX, float vpY,                    // coin haut-gauche du viewport
-    float vpW, float vpH,                    // taille du viewport
+    float mouseX, float mouseY,              // raw screen coordinates (pixels)
+    float vpX, float vpY,                    // viewport top-left (screen space)
+    float vpW, float vpH,                    // viewport size
     const glm::mat4& projMatrix,
     const glm::mat4& viewMatrix,
     const glm::vec3& cameraPos,
     const std::vector<RaycastCandidate>& candidates)
 {
-    // Coordonnées NDC
+    // Convert raw screen to NDC using viewport rect
     float ndcX = ((mouseX - vpX) / vpW) * 2.f - 1.f;
     float ndcY = 1.f - ((mouseY - vpY) / vpH) * 2.f;
+
+    // Clamp to valid NDC range
+    ndcX = glm::clamp(ndcX, -1.0f, 1.0f);
+    ndcY = glm::clamp(ndcY, -1.0f, 1.0f);
 
     glm::vec3 rayDir = UnprojectRayDir(ndcX, ndcY, projMatrix, viewMatrix);
 
@@ -138,25 +128,23 @@ static std::string RaycastObjects(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  BoxSelectionState — rectangle de sélection à la souris
+//  BoxSelectionState
 // ─────────────────────────────────────────────────────────────────────────────
 struct BoxSelectionState {
     bool    active = false;
-    ImVec2  startPos;      // coin de départ (screen space)
-    ImVec2  currentPos;    // position courante
+    ImVec2  startPos;
+    ImVec2  currentPos;
 
     void Begin(ImVec2 pos) { active = true; startPos = pos; currentPos = pos; }
     void Update(ImVec2 pos) { currentPos = pos; }
     void End() { active = false; }
 
-    // Retourne le rectangle normalisé (min/max)
     std::pair<ImVec2, ImVec2> GetRect() const {
         ImVec2 mn{ (glm::min)(startPos.x, currentPos.x), (glm::min)(startPos.y, currentPos.y) };
         ImVec2 mx{ (glm::max)(startPos.x, currentPos.x), (glm::max)(startPos.y, currentPos.y) };
         return { mn, mx };
     }
 
-    // Dessine le rectangle de sélection
     void Draw(ImDrawList* dl) const {
         if (!active) return;
         auto [mn, mx] = GetRect();
@@ -164,7 +152,6 @@ struct BoxSelectionState {
         dl->AddRect(mn, mx, IM_COL32(120, 180, 255, 200), 0.f, 0, 1.5f);
     }
 
-    // Teste si une position écran est dans le rectangle
     bool ContainsPoint(ImVec2 pt) const {
         auto [mn, mx] = GetRect();
         return pt.x >= mn.x && pt.x <= mx.x && pt.y >= mn.y && pt.y <= mx.y;
@@ -177,9 +164,6 @@ struct BoxSelectionState {
     }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  ProjectToScreen — projette un point 3D en coordonnées écran
-// ─────────────────────────────────────────────────────────────────────────────
 static std::optional<ImVec2> ProjectToScreen(
     const glm::vec3& worldPos,
     const glm::mat4& proj, const glm::mat4& view,
@@ -193,8 +177,6 @@ static std::optional<ImVec2> ProjectToScreen(
     return ImVec2{ sx, sy };
 }
 
-// Exécute la box-sélection : retourne les noms des objets dont la projection
-// tombe dans le rectangle de sélection
 static std::set<std::string> BoxSelectObjects(
     const BoxSelectionState& box,
     const glm::mat4& proj, const glm::mat4& view,

@@ -40,6 +40,9 @@
 #define ICON_FA_CIRCLE      "\xef\x84\x91"   // f111
 #define ICON_FA_SQUARE      "\xef\x83\x88"   // f0c8
 #define ICON_FA_VIDEO       "\xef\x80\xbd"   // f03d
+#define ICON_FA_BOXES_PACKING "\xef\x9e\xbe"   // f7be (packing)
+#define ICON_FA_HAMMER		"\xef\x84\xa7"   // f1e3 (build)
+#define ICON_FA_CIRCLE_CHECK "\xef\x84\x9e"   // f058 (checkmark)
 // Additional icons for tools
 #define ICON_FA_HAND_POINTER "\xef\x89\xa5"   // f2a5 (hand)
 #define ICON_FA_ARROWS       "\xef\x81\x87"   // f047 (arrows for translate)

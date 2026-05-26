@@ -80,7 +80,7 @@ struct ToastManager {
             float a = 1.f;
             if (t.timer > t.duration)
                 a = 1.f - (t.timer - t.duration) / kFadeTime;
-            a = (std::max)(0.f, (std::min)(1.f, a));
+            a = (((std::max)))(0.f, (std::min)(1.f, a));
 
             // Slide-in effect: translate from +40px over 0.2 s
             float slideOffset = 0.f;

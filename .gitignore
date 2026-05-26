@@ -43,3 +43,7 @@ sdl2/*
 # GameEngine.sln
 /tools
 *.ini
+.honassets
+/dist
+/include
+*.honscene

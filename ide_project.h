@@ -622,7 +622,7 @@ inline void DrawProjectSettingsWindow(ProjectUIState& ui, ProjectSettings& proj)
             ImGui::SameLine();
             if (ImGui::SmallButton("-") && proj.qualityLevels.size() > 1) {
                 proj.qualityLevels.erase(proj.qualityLevels.begin() + ui.qualityEditIdx);
-                ui.qualityEditIdx = (std::max)(0, ui.qualityEditIdx - 1);
+                ui.qualityEditIdx = (((std::max)))(0, ui.qualityEditIdx - 1);
                 proj.currentQualityLevel = (std::min)(proj.currentQualityLevel,
                     (int)proj.qualityLevels.size() - 1);
             }
