@@ -16,7 +16,6 @@ namespace HonHengine {
         bool LoadScript(const std::string& scriptGUID, const std::string& sourcePath, ScriptComponent& comp);
         void UnloadScript(ScriptComponent& comp);
         void HotReloadScript(const std::string& scriptGUID);
-        static bool CompileScript(const std::string& sourcePath, const std::string& compileCommand, std::string& outDllPath);
         void ApplyVariables(ScriptComponent& comp);
 
         // Set the path to your bundled toolchain
