@@ -187,6 +187,7 @@ namespace HonHengine
             if (!albedoKey.empty())
                 obj->render.textures = { { "uAlbedo", albedoKey, 0 } };
             obj->render.setMesh(verts, indices);
+			obj->render.cullFace = false;  // glTF models are often single-sided; disable backface culling by default
             obj->animator.skeleton = skel;
             obj->animator.bonePalette.assign(MAX_BONES, glm::mat4(1.0f));
             if (!res.clips.empty()) obj->animator.play(res.clips[0]);

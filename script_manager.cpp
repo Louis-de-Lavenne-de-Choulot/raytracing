@@ -4,7 +4,6 @@
 #include <iostream>
 #include <filesystem>
 #include <fstream>
-#include <sstream>
 #ifdef _WIN32
 #include <windows.h>
 #include <tlhelp32.h>
@@ -23,16 +22,29 @@ namespace HonHengine {
     std::vector<fs::path> ScriptManager::additionalIncludePaths;
     std::vector<fs::path> ScriptManager::additionalLibraryPaths;
     std::vector<std::string> ScriptManager::additionalLibraries;
+    std::vector<std::filesystem::path> ScriptManager::additionalLibraryPathsAfter;
+    std::vector<std::string>           ScriptManager::additionalLibrariesAfter;
     std::string ScriptManager::msvcEnvPrefix;
 
     ScriptManager::ScriptManager(SceneManager* sm) : sceneManager(sm) {
         if (compilerPath.empty()) {
             fs::path exePath = fs::current_path();
+            fs::path bundledCompiler = exePath / "tools" / "mingw64" / "bin" / "g++.exe";
 
             // Use MinGW compiler
             fs::path mingwCompiler = exePath / "tools" / "mingw64" / "bin" / "g++.exe";
             sdl2Path = exePath / "tools" / "sdl2" / "x64" / "SDL2.dll";
-            compiledEnginePath = exePath / "tools" / "honhengine" / "GameEngine.lib";
+
+            // Use MinGW .a library
+            fs::path mingwLib = exePath / "tools" / "honhengine" / "GameEngine.a";
+
+            if (fs::exists(mingwLib)) {
+                compiledEnginePath = mingwLib;
+                std::cout << "Using MinGW engine library: " << compiledEnginePath << std::endl;
+            }
+            else {
+                std::cerr << "Warning: MinGW engine library not found at " << mingwLib << std::endl;
+            }
 
             if (fs::exists(mingwCompiler)) {
                 compilerPath = mingwCompiler;
@@ -52,6 +64,7 @@ namespace HonHengine {
         fs::path fullPath = fs::absolute(toolchainPath);
         compilerPath = fullPath / "bin" / "g++.exe";
 
+        // Normalize for display
         auto normalizePath = [](const fs::path& p) -> std::string {
             std::string path = p.string();
             std::replace(path.begin(), path.end(), '\\', '/');
@@ -60,7 +73,7 @@ namespace HonHengine {
 
         if (!fs::exists(compilerPath)) {
             std::cerr << "Warning: Compiler not found at " << normalizePath(compilerPath) << std::endl;
-            compilerPath = "g++";
+            compilerPath = "g++"; // Fallback to system
         }
         else {
             std::cout << "Toolchain set to: " << normalizePath(compilerPath) << std::endl;
@@ -68,28 +81,39 @@ namespace HonHengine {
     }
 
     void ScriptManager::AddIncludePath(const fs::path& path) {
-        if (fs::exists(path)) {
-            additionalIncludePaths.push_back(path);
-            std::cout << "Added include path: " << path << std::endl;
+
+        fs::path fullPath = fs::absolute(path);
+        if (fs::exists(fullPath)) {
+            additionalIncludePaths.push_back(fullPath);
+            std::cout << "Added include path: " << fullPath << std::endl;
         }
         else {
-            std::cerr << "Warning: Include path does not exist: " << path << std::endl;
+            std::cerr << "Warning: Include path does not exist: " << fullPath << std::endl;
         }
     }
 
     void ScriptManager::AddLibraryPath(const fs::path& path) {
-        if (fs::exists(path)) {
-            additionalLibraryPaths.push_back(path);
-            std::cout << "Added library path: " << path << std::endl;
+        fs::path fullPath = fs::absolute(path);
+        if (fs::exists(fullPath)) {
+            additionalLibraryPaths.push_back(fullPath);
+            std::cout << "Added library path: " << fullPath << std::endl;
         }
         else {
-            std::cerr << "Warning: Library path does not exist: " << path << std::endl;
+            std::cerr << "Warning: Library path does not exist: " << fullPath << std::endl;
         }
     }
 
     void ScriptManager::AddLinkLibrary(const std::string& lib) {
         additionalLibraries.push_back(lib);
         std::cout << "Added link library: " << lib << std::endl;
+    }
+
+    void ScriptManager::AddLibraryPathAfter(const std::filesystem::path& path) {
+        additionalLibraryPathsAfter.push_back(fs::absolute(path));
+    }
+
+    void ScriptManager::AddLinkLibraryAfter(const std::string& lib) {
+        additionalLibrariesAfter.push_back(lib);
     }
 
     void ScriptManager::SetEngineLibraryPath(const fs::path& path) {
@@ -113,12 +137,12 @@ namespace HonHengine {
     }
 
     bool ScriptManager::InitializeToolchain() {
-        if (compilerPath != "g++" && !fs::exists(compilerPath)) {
+        if (!fs::exists(compilerPath)) {
             std::cerr << "Compiler not found: " << compilerPath << std::endl;
             return false;
         }
 
-        // Test the compiler
+        // Test the compiler using CreateProcess
         std::string testCmd = "\"" + compilerPath.string() + "\" --version";
         int result = std::system(testCmd.c_str());
 
@@ -127,7 +151,6 @@ namespace HonHengine {
             return false;
         }
 
-        std::cout << "Toolchain initialized successfully" << std::endl;
         return true;
     }
 
@@ -168,64 +191,69 @@ namespace HonHengine {
         fs::path absOutPath = fs::absolute(outDllPath);
         fs::path absCompilerPath = fs::absolute(compilerPath);
 
-        // Build include paths
+        // Build include paths - ORDER MATTERS! Root first, then engine include, then user paths
         std::string includes;
+
+        // Add engine include folder
         includes += " -I\"" + (engineRoot / "include").string() + "\"";
-        includes += " -I\"" + (engineRoot / "src").string() + "\"";
 
-        // Add vcpkg include path
-        fs::path vcpkgInclude = engineRoot / "vcpkg" / "installed" / "x64-windows" / "include";
-        if (fs::exists(vcpkgInclude)) {
-            includes += " -I\"" + vcpkgInclude.string() + "\"";
-        }
-
-        // Add additional include paths
-        for (const auto& includePath : additionalIncludePaths) {
-            if (fs::exists(includePath)) {
-                includes += " -I\"" + includePath.string() + "\"";
-            }
+        // Add user additional include paths
+        for (const auto& inc : additionalIncludePaths) {
+            std::cout << "Adding include path: " << inc << std::endl;
+            includes += " -I\"" + inc.string() + "\"";
         }
 
         // Build library paths
         std::string libpaths;
 
-        // Add MinGW lib path
-        fs::path mingwLib = engineRoot / "tools" / "mingw64" / "lib";
-        if (fs::exists(mingwLib)) {
-            libpaths += " -L\"" + mingwLib.string() + "\"";
+        for (const auto& libPath : additionalLibraryPaths) {
+            libpaths += " -L\"" + libPath.string() + "\"";
         }
 
-        // Add additional library paths
-        for (const auto& libPath : additionalLibraryPaths) {
-            if (fs::exists(libPath)) {
-                libpaths += " -L\"" + libPath.string() + "\"";
-            }
+        // Add the directory containing GameEngine.a
+        if (!compiledEnginePath.empty() && fs::exists(compiledEnginePath)) {
+            fs::path libDir = compiledEnginePath.parent_path();
+            libpaths += " -L\"" + libDir.string() + "\"";
         }
 
         // Build link libraries
         std::string linkLibs;
-
-        // Link against engine library
-        if (!compiledEnginePath.empty() && fs::exists(compiledEnginePath)) {
-            linkLibs += " \"" + compiledEnginePath.string() + "\"";
-        }
 
         // Add additional libraries
         for (const auto& lib : additionalLibraries) {
             linkLibs += " -l" + lib;
         }
 
-        // Build command line for MinGW
+        // Build command line
         std::string cmdLine;
         if (compileCommand.empty()) {
 #ifdef _WIN32
+            // CRITICAL FIX: Engine library MUST come AFTER the source file
+            // This allows the linker to resolve symbols from the script first,
+            // then pull in required object files from the static library
             cmdLine = "\"" + absCompilerPath.string() + "\" -std=c++20 -shared" +
-                includes + libpaths + linkLibs +
+                includes + libpaths +
                 " -o \"" + absOutPath.string() + "\" \"" + absSourcePath.string() + "\"";
+
+            // Add engine library AFTER the source file (critical for symbol resolution)
+            if (!compiledEnginePath.empty() && fs::exists(compiledEnginePath)) {
+                cmdLine += " \"" + compiledEnginePath.string() + "\"";
+            }
+
+            // Add other link libraries
+            cmdLine += linkLibs;
 #else
             cmdLine = "\"" + absCompilerPath.string() + "\" -std=c++20 -shared -fPIC" +
-                includes + libpaths + linkLibs +
+                includes + libpaths +
                 " -o \"" + absOutPath.string() + "\" \"" + absSourcePath.string() + "\"";
+
+            // Add engine library AFTER the source file (critical for symbol resolution)
+            if (!compiledEnginePath.empty() && fs::exists(compiledEnginePath)) {
+                cmdLine += " \"" + compiledEnginePath.string() + "\"";
+            }
+
+            // Add other link libraries
+            cmdLine += linkLibs;
 #endif
         }
         else {
@@ -234,7 +262,7 @@ namespace HonHengine {
 
         std::cout << "Compilation command: " << cmdLine << std::endl;
 
-        if (compilerPath != "g++" && !fs::exists(absCompilerPath)) {
+        if (!fs::exists(absCompilerPath)) {
             std::cerr << "Compiler does not exist: " << absCompilerPath << std::endl;
             return false;
         }
@@ -270,12 +298,13 @@ namespace HonHengine {
             NULL,
             cmdBuffer.data(),
             NULL, NULL,
-            TRUE,
+            TRUE,                   // bInheritHandles - important for pipe
             CREATE_NO_WINDOW,
             NULL, NULL,
             &si, &pi
         );
 
+        // Close the write end of the pipe in the parent process
         CloseHandle(hWritePipe);
 
         if (!success) {
@@ -315,6 +344,7 @@ namespace HonHengine {
             return false;
         }
 #else
+        // On non-Windows, use system()
         int result = std::system(cmdLine.c_str());
         if (result != 0) {
             std::cerr << "Compilation failed with code: " << result << std::endl;
@@ -330,7 +360,7 @@ namespace HonHengine {
         std::string dllPath;
         if (!CompileScript(sourcePath, "", dllPath)) return false;
         comp.compiledPath = dllPath;
-        comp.scriptGUID = sourcePath;
+        comp.scriptGUID = sourcePath; // Store the source path for hot reload
 
 #ifdef _WIN32
         HMODULE lib = LoadLibraryA(dllPath.c_str());
@@ -367,6 +397,7 @@ namespace HonHengine {
 
         ApplyVariables(comp);
 
+        // Call Start() after everything is set up
         if (comp.instance) {
             comp.instance->Start();
         }
@@ -382,6 +413,7 @@ namespace HonHengine {
             comp.instance = nullptr;
         }
         if (comp.libHandle) {
+            // Remove from activeScripts map
             for (auto it = activeScripts.begin(); it != activeScripts.end(); ) {
                 if (it->second == &comp) {
                     it = activeScripts.erase(it);
@@ -405,9 +437,11 @@ namespace HonHengine {
     void ScriptManager::ApplyVariables(ScriptComponent& comp) {
         if (!comp.instance) return;
 
+        // Apply all exposed variables to the script instance
         for (auto& var : comp.exposedVars) {
             if (var.dirty) {
-                // TODO: Apply variable values to script instance
+                // TODO: Actually apply the variable values to the script instance
+                // This requires reflection or a way to set variables by name
                 var.dirty = false;
             }
         }
@@ -437,6 +471,7 @@ namespace HonHengine {
             return;
         }
 
+        // Get the source path from the first script component
         const ScriptComponent* first = range.first->second;
         const std::string sourcePath = first->scriptGUID;
 
@@ -446,14 +481,18 @@ namespace HonHengine {
             return;
         }
 
+        // Collect all components to reload
         std::vector<ScriptComponent*> toReload;
         for (auto it = range.first; it != range.second; ++it) {
             toReload.push_back(it->second);
         }
 
+        // Reload each component
         for (ScriptComponent* comp : toReload) {
+            // Save exposed variables
             std::vector<ScriptVariable> savedVars = comp->exposedVars;
 
+            // Find the owner object
             BaseObject* owner = nullptr;
             if (sceneManager && sceneManager->objects) {
                 auto& objs = *sceneManager->objects;
@@ -475,12 +514,16 @@ namespace HonHengine {
                 continue;
             }
 
+            // Unload old script
             UnloadScript(*comp);
 
+            // Load new script
             if (LoadScript(scriptGUID, sourcePath, *comp)) {
+                // Restore saved variables
                 comp->exposedVars = std::move(savedVars);
                 ApplyVariables(*comp);
 
+                // Notify script of reload
                 if (comp->instance) {
                     comp->instance->OnReload();
                 }

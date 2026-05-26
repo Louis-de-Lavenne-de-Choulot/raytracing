@@ -43,7 +43,7 @@ namespace HonHengine {
         Vector3 up() {
             Vector3 fwd = forward();
             Vector3 rgt = right();
-            return fwd.cross(rgt);
+            return rgt.cross(fwd);
         }
 
         void Rotate(Vector3 axis, double angle) {
@@ -56,20 +56,13 @@ namespace HonHengine {
             rotation = Quaternion::LookRotation(target.position - position);
         }
 
-        glm::mat4 GetViewMatrix() const {
-            // Convert to GLM types
+        glm::mat4 GetViewMatrix() {
             glm::vec3 pos(position.x, position.y, position.z);
-            glm::quat rot(rotation.w, rotation.x, rotation.y, rotation.z);
-
-            // Build world matrix
-            glm::mat4 world = glm::translate(glm::mat4(1.0f), pos) * glm::mat4_cast(rot);
-
-            // View matrix is inverse of world matrix
-            glm::mat4 view = glm::inverse(world);
-            return view;
+            glm::vec3 fwd = forward().ToGLM();
+            glm::vec3 up = this->up().ToGLM();
+            return glm::lookAt(pos, pos + fwd, up);
         }
 
-        // NEW: Get world matrix for objects
         glm::mat4 GetWorldMatrix() const {
             glm::vec3 pos(position.x, position.y, position.z);
             glm::vec3 sc(scale.x, scale.y, scale.z);

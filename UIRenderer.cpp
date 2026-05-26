@@ -78,6 +78,56 @@ namespace HonHengine
             r, g, b, a);
     }
 
+    void UIRenderer::pushRotatedQuad(float cx, float cy, float w, float h, float angleRad, float r, float g, float b, float a)
+    {
+        float cosA = std::cos(angleRad);
+        float sinA = std::sin(angleRad);
+        float hx = w * 0.5f;
+        float hy = h * 0.5f;
+
+        auto localRot = [&](float lx, float ly) {
+            return UIVertex{
+                cx + (lx * cosA - ly * sinA),
+                cy + (lx * sinA + ly * cosA),
+                0.0f, 0.0f, r, g, b, a
+            };
+            };
+
+        UIVertex v0 = localRot(-hx, -hy);
+        UIVertex v1 = localRot(hx, -hy);
+        UIVertex v2 = localRot(hx, hy);
+        UIVertex v3 = localRot(-hx, hy);
+
+        verts.push_back(v0); verts.push_back(v1); verts.push_back(v2);
+        verts.push_back(v0); verts.push_back(v2); verts.push_back(v3);
+    }
+
+    void UIRenderer::pushLine(float x1, float y1, float x2, float y2, float thickness, float r, float g, float b, float a)
+    {
+        float dx = x2 - x1;
+        float dy = y2 - y1;
+        float len = std::sqrt(dx * dx + dy * dy);
+        if (len < 0.0001f) return;
+
+        float nx = -dy / len * (thickness * 0.5f);
+        float ny = dx / len * (thickness * 0.5f);
+
+        verts.push_back({ x1 + nx, y1 + ny, 0.0f, 0.0f, r, g, b, a });
+        verts.push_back({ x2 + nx, y2 + ny, 0.0f, 0.0f, r, g, b, a });
+        verts.push_back({ x2 - nx, y2 - ny, 0.0f, 0.0f, r, g, b, a });
+
+        verts.push_back({ x1 + nx, y1 + ny, 0.0f, 0.0f, r, g, b, a });
+        verts.push_back({ x2 - nx, y2 - ny, 0.0f, 0.0f, r, g, b, a });
+        verts.push_back({ x1 - nx, y1 - ny, 0.0f, 0.0f, r, g, b, a });
+    }
+
+    void UIRenderer::pushTriangle(float x1, float y1, float x2, float y2, float x3, float y3, float r, float g, float b, float a)
+    {
+        verts.push_back({ x1, y1, 0.0f, 0.0f, r, g, b, a });
+        verts.push_back({ x2, y2, 0.0f, 0.0f, r, g, b, a });
+        verts.push_back({ x3, y3, 0.0f, 0.0f, r, g, b, a });
+    }
+
     void UIRenderer::flush(GLuint atlasID)
     {
         if (verts.empty()) return;

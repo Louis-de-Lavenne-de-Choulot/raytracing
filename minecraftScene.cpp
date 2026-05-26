@@ -105,7 +105,7 @@ namespace HonHengine
     {
         float base = FBM(x * 0.04f, z * 0.04f) * 12.f;
         float mountain = FBM(x * 0.015f, z * 0.015f);
-        float ridge = (std::max)(0.f, mountain) * (std::max)(0.f, mountain) * 18.f;
+        float ridge = (((std::max)))(0.f, mountain) * (((std::max)))(0.f, mountain) * 18.f;
         return static_cast<int>(std::round(base + ridge));
     }
 
@@ -648,7 +648,7 @@ namespace HonHengine
         ui.pushQuad(leftX, baseY, BAR_W, BAR_H,
             0.f, 0.f, 1.f, 1.f, 0.1f, 0.05f, 0.05f, 0.8f);
         // Health fill - green → red gradient via alpha blend
-        float hf = (std::max)(0.f, (std::min)(health, 1.f));
+        float hf = (((std::max)))(0.f, (std::min)(health, 1.f));
         float hr = 1.f - hf * 0.5f;
         float hg = hf * 0.85f;
         ui.pushQuad(leftX, baseY, BAR_W * hf, BAR_H,
@@ -660,7 +660,7 @@ namespace HonHengine
         // Hunger bar
         ui.pushQuad(rightX, baseY, BAR_W, BAR_H,
             0.f, 0.f, 1.f, 1.f, 0.1f, 0.07f, 0.02f, 0.8f);
-        float hnf = (std::max)(0.f, (std::min)(hunger, 1.f));
+        float hnf = (((std::max)))(0.f, (std::min)(hunger, 1.f));
         ui.pushQuad(rightX, baseY, BAR_W * hnf, BAR_H,
             0.f, 0.f, 1.f, 1.f, 0.85f, 0.55f, 0.15f, 0.92f);
         ui.pushQuad(rightX, baseY, BAR_W * hnf, 2.f,
@@ -669,7 +669,7 @@ namespace HonHengine
         // Oxygen bar (only visible when < 1)
         if (oxygen < 0.999f)
         {
-            float oxy = (std::max)(0.f, oxygen);
+            float oxy = (((std::max)))(0.f, oxygen);
             float oy = baseY - BAR_H - 4.f;
             ui.pushQuad(leftX, oy, BAR_W * 2.f + SPACING, BAR_H,
                 0.f, 0.f, 1.f, 1.f, 0.04f, 0.08f, 0.25f, 0.8f);
@@ -1088,7 +1088,7 @@ namespace HonHengine
                     1.0 - 2.0 * (q.y * q.y + q.z * q.z)));
                 float yawDeg = yawR * (180.f / 3.14159265f);
 
-                UIRenderer& ui = renderer.getUI();
+                UIRenderer& ui = renderer.GetUIRenderer();
                 ui.beginFrame();
 
                 DrawVignette(ui, static_cast<float>(W), static_cast<float>(H));

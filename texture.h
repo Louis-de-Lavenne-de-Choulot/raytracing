@@ -105,6 +105,7 @@ namespace HonHengine
     // ─────────────────────────────────────────────────────────────────────────
     struct TextureLayer
     {
+        TextureLayer() = default;
         Texture         texture;                            // which texture + its sampler params
         LayerBlendMode  blendMode = LayerBlendMode::Mix; // how to composite with layers below
         float           blendWeight = 1.0f;                // constant weight [0..1]

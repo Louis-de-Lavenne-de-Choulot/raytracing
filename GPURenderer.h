@@ -66,9 +66,13 @@ namespace HonHengine
         glm::mat4 buildViewMatrix()       const;
         glm::mat4 buildProjectionMatrix() const;
 
-        UIRenderer& getUI() { return uiRenderer; }
+        UIRenderer& GetUIRenderer() { return uiRenderer; }
+        const glm::mat4& GetLastViewMatrix() const { return m_lastView; }
+        const glm::mat4& GetLastProjMatrix() const { return m_lastProj; }
 
     private:
+        glm::mat4 m_lastView = glm::mat4(1.0f);
+        glm::mat4 m_lastProj = glm::mat4(1.0f);
         bool ownContext;
         // ── Internal helpers ──────────────────────────────────────────────────
         void uploadLights(GLuint program)                              const;
