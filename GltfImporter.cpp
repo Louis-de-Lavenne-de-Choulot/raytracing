@@ -87,9 +87,9 @@ namespace HonHengine
         {
         case GL_FLOAT_: { float    v; std::memcpy(&v, ptr, 4); return v; }
         case GL_UNSIGNED_SHORT_: { uint16_t v; std::memcpy(&v, ptr, 2); return static_cast<float>(v) / 65535.0f; }
-        case GL_SHORT_: { int16_t  v; std::memcpy(&v, ptr, 2); return (std::max)(static_cast<float>(v) / 32767.0f, -1.0f); }
+        case GL_SHORT_: { int16_t  v; std::memcpy(&v, ptr, 2); return (((std::max)))(static_cast<float>(v) / 32767.0f, -1.0f); }
         case GL_UNSIGNED_BYTE_:  return static_cast<float>(*ptr) / 255.0f;
-        case GL_BYTE_:           return (std::max)(static_cast<float>(static_cast<int8_t>(*ptr)) / 127.0f, -1.0f);
+        case GL_BYTE_:           return (((std::max)))(static_cast<float>(static_cast<int8_t>(*ptr)) / 127.0f, -1.0f);
         case GL_UNSIGNED_INT_: { uint32_t v; std::memcpy(&v, ptr, 4); return static_cast<float>(v); }
         default:                 return 0.0f;
         }
@@ -429,7 +429,7 @@ namespace HonHengine
                 auto& raw = rawAnimData[boneIdx];
                 for (size_t ki = 0; ki < avTime.count; ++ki) {
                     float t; std::memcpy(&t, avTime.data + ki * avTime.stride, 4);
-                    clip->duration = (std::max)(clip->duration, t);
+                    clip->duration = (((std::max)))(clip->duration, t);
                     const uint8_t* vp = avVal.data + ki * avVal.stride;
 
                     if (path == "translation") {

@@ -17,15 +17,38 @@ namespace HonHengine {
     // Static member initialization
     fs::path ScriptManager::toolchainPath;
     fs::path ScriptManager::compilerPath;
+    fs::path ScriptManager::sdl2Path;
+    fs::path ScriptManager::compiledEnginePath;
+    std::vector<fs::path> ScriptManager::additionalIncludePaths;
+    std::vector<fs::path> ScriptManager::additionalLibraryPaths;
+    std::vector<std::string> ScriptManager::additionalLibraries;
+    std::vector<std::filesystem::path> ScriptManager::additionalLibraryPathsAfter;
+    std::vector<std::string>           ScriptManager::additionalLibrariesAfter;
+    std::string ScriptManager::msvcEnvPrefix;
 
     ScriptManager::ScriptManager(SceneManager* sm) : sceneManager(sm) {
         if (compilerPath.empty()) {
             fs::path exePath = fs::current_path();
             fs::path bundledCompiler = exePath / "tools" / "mingw64" / "bin" / "g++.exe";
 
-            if (fs::exists(bundledCompiler)) {
-                compilerPath = bundledCompiler;
-                std::cout << "Using bundled compiler: " << compilerPath << std::endl;
+            // Use MinGW compiler
+            fs::path mingwCompiler = exePath / "tools" / "mingw64" / "bin" / "g++.exe";
+            sdl2Path = exePath / "tools" / "sdl2" / "x64" / "SDL2.dll";
+
+            // Use MinGW .a library
+            fs::path mingwLib = exePath / "tools" / "honhengine" / "GameEngine.a";
+
+            if (fs::exists(mingwLib)) {
+                compiledEnginePath = mingwLib;
+                std::cout << "Using MinGW engine library: " << compiledEnginePath << std::endl;
+            }
+            else {
+                std::cerr << "Warning: MinGW engine library not found at " << mingwLib << std::endl;
+            }
+
+            if (fs::exists(mingwCompiler)) {
+                compilerPath = mingwCompiler;
+                std::cout << "Using MinGW compiler: " << compilerPath << std::endl;
             }
             else {
                 compilerPath = "g++";
@@ -54,6 +77,62 @@ namespace HonHengine {
         }
         else {
             std::cout << "Toolchain set to: " << normalizePath(compilerPath) << std::endl;
+        }
+    }
+
+    void ScriptManager::AddIncludePath(const fs::path& path) {
+
+        fs::path fullPath = fs::absolute(path);
+        if (fs::exists(fullPath)) {
+            additionalIncludePaths.push_back(fullPath);
+            std::cout << "Added include path: " << fullPath << std::endl;
+        }
+        else {
+            std::cerr << "Warning: Include path does not exist: " << fullPath << std::endl;
+        }
+    }
+
+    void ScriptManager::AddLibraryPath(const fs::path& path) {
+        fs::path fullPath = fs::absolute(path);
+        if (fs::exists(fullPath)) {
+            additionalLibraryPaths.push_back(fullPath);
+            std::cout << "Added library path: " << fullPath << std::endl;
+        }
+        else {
+            std::cerr << "Warning: Library path does not exist: " << fullPath << std::endl;
+        }
+    }
+
+    void ScriptManager::AddLinkLibrary(const std::string& lib) {
+        additionalLibraries.push_back(lib);
+        std::cout << "Added link library: " << lib << std::endl;
+    }
+
+    void ScriptManager::AddLibraryPathAfter(const std::filesystem::path& path) {
+        additionalLibraryPathsAfter.push_back(fs::absolute(path));
+    }
+
+    void ScriptManager::AddLinkLibraryAfter(const std::string& lib) {
+        additionalLibrariesAfter.push_back(lib);
+    }
+
+    void ScriptManager::SetEngineLibraryPath(const fs::path& path) {
+        compiledEnginePath = path;
+        if (fs::exists(compiledEnginePath)) {
+            std::cout << "Engine library set to: " << compiledEnginePath << std::endl;
+        }
+        else {
+            std::cerr << "Warning: Engine library not found at: " << compiledEnginePath << std::endl;
+        }
+    }
+
+    void ScriptManager::SetSDL2Path(const fs::path& path) {
+        sdl2Path = path;
+        if (fs::exists(sdl2Path)) {
+            std::cout << "SDL2 path set to: " << sdl2Path << std::endl;
+        }
+        else {
+            std::cerr << "Warning: SDL2 not found at: " << sdl2Path << std::endl;
         }
     }
 
@@ -112,18 +191,74 @@ namespace HonHengine {
         fs::path absOutPath = fs::absolute(outDllPath);
         fs::path absCompilerPath = fs::absolute(compilerPath);
 
-        // Build include paths
+        // Build include paths - ORDER MATTERS! Root first, then engine include, then user paths
         std::string includes;
-        includes += " -I\"" + engineRoot.string() + "\"";
 
-        fs::path vcpkgInclude = engineRoot / "vcpkg" / "installed" / "x64-windows" / "include";
-        if (fs::exists(vcpkgInclude)) {
-            includes += " -I\"" + vcpkgInclude.string() + "\"";
+        // Add engine include folder
+        includes += " -I\"" + (engineRoot / "include").string() + "\"";
+
+        // Add user additional include paths
+        for (const auto& inc : additionalIncludePaths) {
+            std::cout << "Adding include path: " << inc << std::endl;
+            includes += " -I\"" + inc.string() + "\"";
         }
 
-        // Build command line - NO shell redirections
-        std::string cmdLine = "\"" + absCompilerPath.string() + "\" -std=c++2a -shared" + includes +
-            " -o \"" + absOutPath.string() + "\" \"" + absSourcePath.string() + "\"";
+        // Build library paths
+        std::string libpaths;
+
+        for (const auto& libPath : additionalLibraryPaths) {
+            libpaths += " -L\"" + libPath.string() + "\"";
+        }
+
+        // Add the directory containing GameEngine.a
+        if (!compiledEnginePath.empty() && fs::exists(compiledEnginePath)) {
+            fs::path libDir = compiledEnginePath.parent_path();
+            libpaths += " -L\"" + libDir.string() + "\"";
+        }
+
+        // Build link libraries
+        std::string linkLibs;
+
+        // Add additional libraries
+        for (const auto& lib : additionalLibraries) {
+            linkLibs += " -l" + lib;
+        }
+
+        // Build command line
+        std::string cmdLine;
+        if (compileCommand.empty()) {
+#ifdef _WIN32
+            // CRITICAL FIX: Engine library MUST come AFTER the source file
+            // This allows the linker to resolve symbols from the script first,
+            // then pull in required object files from the static library
+            cmdLine = "\"" + absCompilerPath.string() + "\" -std=c++20 -shared" +
+                includes + libpaths +
+                " -o \"" + absOutPath.string() + "\" \"" + absSourcePath.string() + "\"";
+
+            // Add engine library AFTER the source file (critical for symbol resolution)
+            if (!compiledEnginePath.empty() && fs::exists(compiledEnginePath)) {
+                cmdLine += " \"" + compiledEnginePath.string() + "\"";
+            }
+
+            // Add other link libraries
+            cmdLine += linkLibs;
+#else
+            cmdLine = "\"" + absCompilerPath.string() + "\" -std=c++20 -shared -fPIC" +
+                includes + libpaths +
+                " -o \"" + absOutPath.string() + "\" \"" + absSourcePath.string() + "\"";
+
+            // Add engine library AFTER the source file (critical for symbol resolution)
+            if (!compiledEnginePath.empty() && fs::exists(compiledEnginePath)) {
+                cmdLine += " \"" + compiledEnginePath.string() + "\"";
+            }
+
+            // Add other link libraries
+            cmdLine += linkLibs;
+#endif
+        }
+        else {
+            cmdLine = compileCommand;
+        }
 
         std::cout << "Compilation command: " << cmdLine << std::endl;
 

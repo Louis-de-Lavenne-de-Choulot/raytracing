@@ -912,13 +912,64 @@ namespace HonHengine
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
         glViewport(0, 0, Settings::canvasWidth, Settings::canvasHeight);
 
-        glClearColor(0.60f, 0.70f, 0.78f, 1.0f);
+        // ── Debug render mode ─────────────────────────────────────────────────
+        // debugMode: 0=Shaded, 1=Wireframe, 2=Overdraw, 3=Depth, 4=Normals
+        if (debugMode == 1) {
+            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+        }
+        else {
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+        }
+
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+        // Build matrices first — the skybox needs them.
         glm::mat4 view = buildViewMatrix();
         glm::mat4 proj = buildProjectionMatrix();
+        m_lastView = view;
+        m_lastProj = proj;
         glm::vec3 camPos = toGLM(sceneManager->currentCamera->transform.position);
         float uTime = SDL_GetTicks() / 1000.0f;
+
+        // ── RENDER SKYBOX FIRST ──────────────────────────────────────────────────
+        if (sceneManager->currentSkybox) {
+            // Strip translation so the skybox is always centered on the camera.
+            glm::mat4 viewNoTranslate = glm::mat4(glm::mat3(view));
+
+            // Push the scene's directional light into the skybox so the sun glow
+            // tracks the actual light rather than using hardcoded default values.
+            bool hasDirectionalLight = false;
+            for (BaseLight* bl : *sceneManager->lights) {
+                if (bl && bl->type == DIRECTIONAL_LIGHT) {
+                    DirectionalLight* dl = static_cast<DirectionalLight*>(bl);
+                    Vector3 d = dl->transform.forward();
+                    glm::vec3 sunDir = glm::normalize(glm::vec3(
+                        static_cast<float>(d.x),
+                        static_cast<float>(d.y),
+                        static_cast<float>(d.z)));
+                    glm::vec3 sunColor = glm::vec3(
+                        bl->color.r / 255.0f,
+                        bl->color.g / 255.0f,
+                        bl->color.b / 255.0f);
+                    sceneManager->currentSkybox->SetSunDirection(sunDir);
+                    sceneManager->currentSkybox->SetSunColor(sunColor);
+                    sceneManager->currentSkybox->SetSunIntensity(static_cast<float>(bl->intensity));
+                    hasDirectionalLight = true;
+                    break;
+                }
+            }
+
+            // If no directional light exists, set default sun values so the skybox
+            // still has a visible sun glow
+            if (!hasDirectionalLight) {
+                sceneManager->currentSkybox->SetSunDirection(glm::normalize(glm::vec3(0.5f, 0.8f, 0.2f)));
+                sceneManager->currentSkybox->SetSunColor(glm::vec3(1.0f, 0.95f, 0.8f));
+                sceneManager->currentSkybox->SetSunIntensity(0.8f);
+            }
+
+            sceneManager->currentSkybox->Render(viewNoTranslate, proj);
+        }
 
         {
             auto buildVerts = [&](BaseObject* obj)->std::vector<GPUVertex>

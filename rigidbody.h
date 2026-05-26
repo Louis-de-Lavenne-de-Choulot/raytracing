@@ -76,9 +76,9 @@ namespace HonHengine {
         {
             if (!Overlaps(other)) return Vector3(0, 0, 0);
 
-            double ox = (std::min)(max.x, other.max.x) - (std::max)(min.x, other.min.x);
-            double oy = (std::min)(max.y, other.max.y) - (std::max)(min.y, other.min.y);
-            double oz = (std::min)(max.z, other.max.z) - (std::max)(min.z, other.min.z);
+            double ox = (std::min)(max.x, other.max.x) - (((std::max)))(min.x, other.min.x);
+            double oy = (std::min)(max.y, other.max.y) - (((std::max)))(min.y, other.min.y);
+            double oz = (std::min)(max.z, other.max.z) - (((std::max)))(min.z, other.min.z);
 
             // Pick smallest axis
             if (ox <= oy && ox <= oz)
@@ -95,6 +95,7 @@ namespace HonHengine {
     class RigidBody
     {
     public:
+        RigidBody() = default;
         // ── Host ─────────────────────────────────────────────────────────────
         BaseObject* object = nullptr;   // non-owning
 

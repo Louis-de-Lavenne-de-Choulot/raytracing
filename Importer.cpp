@@ -236,6 +236,7 @@ namespace HonHengine {
             << indices.size() / 3 << " triangles."
             << std::endl;
 
+        obj->render.cullFace = false;
         return obj;
     }
 

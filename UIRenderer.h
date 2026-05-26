@@ -30,6 +30,9 @@ namespace HonHengine
             float r, float g, float b, float a);
         void pushCrosshair(float cx, float cy, float halfLen, float thickness,
             float r, float g, float b, float a);
+        void pushRotatedQuad(float cx, float cy, float w, float h, float angleRad, float r, float g, float b, float a);
+        void pushLine(float x1, float y1, float x2, float y2, float thickness, float r, float g, float b, float a);
+        void pushTriangle(float x1, float y1, float x2, float y2, float x3, float y3, float r, float g, float b, float a);
         void flush(GLuint atlasID);
         void cleanup();
 

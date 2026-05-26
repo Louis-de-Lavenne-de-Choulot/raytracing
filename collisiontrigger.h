@@ -74,6 +74,7 @@ namespace HonHengine {
     class CollisionTrigger
     {
     public:
+        CollisionTrigger() = default;
         using Callback = std::function<void(const CollisionEvent&)>;
 
         // ── Configuration ─────────────────────────────────────────────────────
