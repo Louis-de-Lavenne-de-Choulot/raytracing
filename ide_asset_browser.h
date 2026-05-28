@@ -1,17 +1,21 @@
-#pragma once
 // ide_asset_browser.h  —  HonHon Engine IDE  —  Asset Browser Panel
 // =============================================================================
 // Covers:
 //   - List / Grid view toggle
 //   - Search (name, type filter), favorites filter
-//   - Breadcrumb navigation + back button
+//   - Breadcrumb navigation + back button, clamped to project asset folder
 //   - Thumbnail display (checkerboard fallback, type-icon overlay)
 //   - Drag & drop payload from browser → scene (auto-imports as command)
 //   - Context menu: open, rename, duplicate, delete, show in explorer
 //   - Sub-objects expandable under compound assets
 //   - Import settings inline in browser inspector strip
 //   - Status bar: selected count, total size
+//   - Navigation restricted to project asset root (never above)
+//   - Folder and Scene icons improved
+//   - Right-click empty area to create new assets (script, scene, material, folder)
 // =============================================================================
+
+#pragma once
 
 #include "ide_asset_database.h"
 #include <vector>
@@ -21,6 +25,11 @@
 #include <imgui.h>
 #include <glad/glad.h>
 #include <filesystem>
+#include <fstream>
+#if defined(_WIN32)
+#include <windows.h>    // for ShellExecuteA
+#include <shellapi.h>   // for SW_SHOWNORMAL
+#endif
 
 namespace fs = std::filesystem;
 
@@ -62,11 +71,54 @@ inline void EnsureCheckerTex() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  Open a file with the OS default application
+// ─────────────────────────────────────────────────────────────────────────────
+static void OpenWithDefaultProgram(const std::string& path) {
+#if defined(_WIN32)
+    ShellExecuteA(nullptr, "open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#elif defined(__APPLE__)
+    std::string cmd = "open \"" + path + "\"";
+    system(cmd.c_str());
+#else
+    // Linux / freedesktop
+    std::string cmd = "xdg-open \"" + path + "\" &";
+    system(cmd.c_str());
+#endif
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Helper: ensure path stays inside project asset root
+// ─────────────────────────────────────────────────────────────────────────────
+static bool IsPathInsideRoot(const std::string& path, const std::string& root) {
+    if (root.empty()) return true;
+    fs::path normalizedPath = fs::weakly_canonical(fs::path(path));
+    fs::path normalizedRoot = fs::weakly_canonical(fs::path(root));
+
+    // Walk up the path tree looking for root — fully cross-platform
+    fs::path p = normalizedPath;
+    while (true) {
+        if (p == normalizedRoot) return true;
+        fs::path parent = p.parent_path();
+        if (parent == p) break;  // reached filesystem root
+        p = parent;
+    }
+    return false;
+}
+
+static std::string ClampToRoot(const std::string& path, const std::string& root) {
+    if (root.empty()) return path;
+    if (IsPathInsideRoot(path, root))
+        return path;
+    return root;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  AssetBrowserState  — per-panel UI state
 // ─────────────────────────────────────────────────────────────────────────────
 struct AssetBrowserState {
-    // Navigation
-    std::string currentDir = "./assets/";
+    // Navigation – rootPath must be set from IDE (project asset folder)
+    std::string currentDir;          // will be clamped to rootPath
+    std::string rootPath;            // immutable root – no navigation above this
     std::vector<std::string> navStack;   // breadcrumb back-stack
 
     // View
@@ -87,6 +139,11 @@ struct AssetBrowserState {
     char  renameTargetGUID[40] = {};
     char  renameNewName[128] = {};
 
+    // Script wizard modal
+    bool  showScriptWizard = false;
+    char  wizardScriptName[128] = "NewScript";
+    int   wizardScriptTemplate = 0;   // 0=Empty, 1=Start/Update, 2=Full Example
+
     // Import settings panel (shown when exactly one asset is selected)
     bool  showImportSettings = true;
 
@@ -101,10 +158,18 @@ struct AssetBrowserState {
 
     // Status
     std::string statusMsg;
+
+    // Helper to set the project asset root (must be called before any navigation)
+    void SetRootPath(const std::string& path) {
+        rootPath = path;
+        if (currentDir.empty()) currentDir = rootPath;
+        else currentDir = ClampToRoot(currentDir, rootPath);
+        dirDirty = true;
+    }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Helper: get background color tint per type
+//  Helper: get background color tint per type (for non-folder assets)
 // ─────────────────────────────────────────────────────────────────────────────
 static ImVec4 AssetTypeTint(AssetType t) {
     switch (t) {
@@ -113,6 +178,7 @@ static ImVec4 AssetTypeTint(AssetType t) {
     case AssetType::Audio:        return { 0.9f, 0.6f, 0.3f, 0.25f };
     case AssetType::Script:       return { 0.8f, 0.5f, 0.9f, 0.25f };
     case AssetType::Scene:        return { 1.0f, 0.85f, 0.2f, 0.25f };
+    case AssetType::Prefab:       return { 0.2f, 0.9f, 0.85f, 0.30f };  // cyan-teal
     case AssetType::ShaderSource: return { 0.9f, 0.3f, 0.3f, 0.25f };
     default:                      return { 0.5f, 0.5f, 0.5f, 0.20f };
     }
@@ -129,24 +195,77 @@ static std::string FormatBytes(int64_t bytes) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Rescan the current directory
+//  Create new file helpers (right-click create)
 // ─────────────────────────────────────────────────────────────────────────────
-inline void AssetBrowserRescan(AssetBrowserState& ab, AssetDatabase& db) {
-    ab.dirEntries.clear();
-    try {
-        for (auto& e : fs::directory_iterator(ab.currentDir))
-            ab.dirEntries.push_back(e);
-        std::sort(ab.dirEntries.begin(), ab.dirEntries.end(),
-            [](const fs::directory_entry& a, const fs::directory_entry& b) {
-                if (a.is_directory() != b.is_directory())
-                    return a.is_directory() > b.is_directory();
-                return a.path().filename() < b.path().filename();
-            });
+static bool CreateNewScript(const std::string& dir, const std::string& name, int templateIdx = 0) {
+    fs::path filepath = fs::path(dir) / (name + ".cpp");
+    if (fs::exists(filepath)) return false;
+    std::ofstream f(filepath);
+    if (!f) return false;
+
+    f << "#include \"iscript.h\"\n";
+    f << "#include \"baseobject.h\"\n\n";
+    f << "class " << name << " : public IScript {\n";
+    f << "public:\n";
+    if (templateIdx >= 1) {
+        f << "    void Start() override {}\n";
+        f << "    void Update(float dt) override {}\n";
     }
-    catch (...) {}
-    // Register any new files in the database
-    db.ScanDirectory(ab.currentDir);
-    ab.dirDirty = false;
+    if (templateIdx == 2) {
+        f << "    void OnDestroy() override {}\n";
+        f << "    void OnCollision(BaseObject* other) {}\n";
+    }
+    f << "};\n\n";
+    f << "extern \"C\" IScript* CreateScript() { return new " << name << "(); }\n";
+    f << "extern \"C\" void DestroyScript(IScript* s) { delete s; }\n";
+    f.close();
+    return true;
+}
+
+static bool CreateNewScene(const std::string& dir, const std::string& name) {
+    fs::path filepath = fs::path(dir) / (name + ".honscene");
+    if (fs::exists(filepath)) return false;
+    std::ofstream f(filepath);
+    if (!f) return false;
+    f << "# HonHon Scene File\n";
+    f << "version=1\n";
+    f.close();
+    return true;
+}
+
+static bool CreateNewMaterial(const std::string& dir, const std::string& name) {
+    fs::path filepath = fs::path(dir) / (name + ".honmat");
+    if (fs::exists(filepath)) return false;
+    std::ofstream f(filepath);
+    if (!f) return false;
+    f << "material\n{\n";
+    f << "    shader = \"default\";\n";
+    f << "    albedo = [1,1,1,1];\n";
+    f << "    roughness = 0.5;\n";
+    f << "    metalness = 0.0;\n";
+    f << "}\n";
+    f.close();
+    return true;
+}
+
+static bool CreateNewFolder(const std::string& dir, const std::string& name) {
+    fs::path folderpath = fs::path(dir) / name;
+    if (fs::exists(folderpath)) return false;
+    return fs::create_directory(folderpath);
+}
+
+// Creates an empty .honprefab stub that can be filled in later
+static bool CreateNewPrefab(const std::string& dir, const std::string& name) {
+    fs::path filepath = fs::path(dir) / (name + ".honprefab");
+    if (fs::exists(filepath)) return false;
+    std::ofstream f(filepath);
+    if (!f) return false;
+    f << "{\n"
+        << "  \"name\": \"" << name << "\",\n"
+        << "  \"objects\": []\n"
+        << "}\n";
+    f.close();
+    return true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -154,21 +273,53 @@ inline void AssetBrowserRescan(AssetBrowserState& ab, AssetDatabase& db) {
 // ─────────────────────────────────────────────────────────────────────────────
 static void DrawAssetContextMenu(AssetBrowserState& ab, AssetDatabase& db,
     const std::string& guidStr,
-    const fs::directory_entry* entry)
+    const fs::directory_entry* entry,
+    const std::function<void(const std::string& path, AssetType t)>& onImportAsset = nullptr)
 {
     // NOTE: caller must have already opened the popup via BeginPopupContextItem.
     // This function only draws the menu body and calls EndPopup.
 
     AssetRecord* rec = guidStr.empty() ? nullptr : db.FindByGUID(guidStr);
     if (entry) {
-        ImGui::TextDisabled("%s", entry->path().filename().string().c_str());
+        // Show prefab-specific header
+        bool isPrefab = !entry->is_directory() &&
+            ExtToAssetType(entry->path().extension().string()) == AssetType::Prefab;
+        if (isPrefab) {
+            ImGui::PushStyleColor(ImGuiCol_Text, { 0.2f, 0.9f, 0.85f, 1.f });
+            ImGui::TextUnformatted("\xef\x86\xb2  ");  // cubes icon
+            ImGui::SameLine();
+            ImGui::TextUnformatted(entry->path().filename().string().c_str());
+            ImGui::PopStyleColor();
+            ImGui::TextDisabled("  Prefab");
+        }
+        else {
+            ImGui::TextDisabled("%s", entry->path().filename().string().c_str());
+        }
         ImGui::Separator();
     }
 
     bool isDir = entry && entry->is_directory();
+    bool isPrefabEntry = entry && !isDir &&
+        ExtToAssetType(entry->path().extension().string()) == AssetType::Prefab;
 
     if (!isDir) {
-        if (ImGui::MenuItem("Open")) { /* placeholder: system open */ }
+        // "Edit Prefab" + "Instantiate in Scene" for prefabs — surfaces at the top
+        if (isPrefabEntry) {
+            ImGui::PushStyleColor(ImGuiCol_Text, { 0.3f, 1.f, 0.9f, 1.f });
+            if (ImGui::MenuItem("\xef\x86\xb2  Edit Prefab")) {
+                if (entry && onImportAsset)
+                    onImportAsset(entry->path().string(), AssetType::Prefab);  // triggers EnterPrefabEditMode
+            }
+            ImGui::PopStyleColor();
+            if (ImGui::MenuItem("Instantiate in Scene")) {
+                if (entry && onImportAsset)
+                    onImportAsset(entry->path().string() + "?instantiate", AssetType::Prefab);
+            }
+            ImGui::Separator();
+        }
+        if (ImGui::MenuItem("Open")) {
+            if (entry) OpenWithDefaultProgram(entry->path().string());
+        }
         if (rec && ImGui::MenuItem("Reimport")) { rec->needsReimport = true; }
         ImGui::Separator();
     }
@@ -231,13 +382,14 @@ static void DrawAssetContextMenu(AssetBrowserState& ab, AssetDatabase& db,
     ImGui::EndPopup();
 }
 
-
 // ─────────────────────────────────────────────────────────────────────────────
 //  Draw a single grid cell; returns true if double-clicked (open dir / import)
+//  Improved: folders show folder icon, scenes show scene icon
 // ─────────────────────────────────────────────────────────────────────────────
 static bool DrawGridCell(AssetBrowserState& ab, AssetDatabase& db,
     const fs::directory_entry& entry,
-    float cellSize, bool& ctxOpen)
+    float cellSize, bool& ctxOpen,
+    const std::function<void(const std::string& path, AssetType t)>& onImportAsset = nullptr)
 {
     bool dblClicked = false;
     std::string name = entry.path().filename().string();
@@ -255,7 +407,7 @@ static bool DrawGridCell(AssetBrowserState& ab, AssetDatabase& db,
     // Outer cell frame
     ImVec2 cellStart = ImGui::GetCursorScreenPos();
     ImVec4 bg = selected ? ImVec4{ 0.22f,0.47f,0.80f,0.45f }
-        : (isDir ? ImVec4{ 0.3f,0.3f,0.1f,0.15f }
+        : (isDir ? ImVec4{ 0.25f,0.20f,0.15f,0.25f }   // warm tint for folders
     : AssetTypeTint(atype));
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(cellStart,
@@ -265,6 +417,11 @@ static bool DrawGridCell(AssetBrowserState& ab, AssetDatabase& db,
         dl->AddRect(cellStart,
             { cellStart.x + cellSize, cellStart.y + cellSize + 20.f },
             IM_COL32(80, 140, 220, 200), 6.f, 0, 2.f);
+    // Prefab gets a distinctive cyan border even when not selected
+    else if (atype == AssetType::Prefab)
+        dl->AddRect(cellStart,
+            { cellStart.x + cellSize, cellStart.y + cellSize + 20.f },
+            IM_COL32(50, 220, 200, 180), 6.f, 0, 1.5f);
 
     // Invisible button for interaction
     ImGui::PushID(name.c_str());
@@ -274,7 +431,7 @@ static bool DrawGridCell(AssetBrowserState& ab, AssetDatabase& db,
     dblClicked = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
     if (ImGui::BeginPopupContextItem("##assetctx")) {
         ctxOpen = true;
-        DrawAssetContextMenu(ab, db, gstr, &entry);   // calls EndPopup() internally
+        DrawAssetContextMenu(ab, db, gstr, &entry, onImportAsset);   // calls EndPopup() internally
     }
 
     // Favorite star
@@ -292,17 +449,52 @@ static bool DrawGridCell(AssetBrowserState& ab, AssetDatabase& db,
     float iconY = cellStart.y + 8.f;
     float iconX = cellStart.x + (cellSize - 48.f) * 0.5f;
     EnsureCheckerTex();
-    GLuint thumbTex = (rec && rec->thumbnailTex) ? rec->thumbnailTex : g_checkerTex;
-    if (rec && !rec->thumbnailTex) {
-        // Draw type icon text centred
+
+    if (isDir) {
+        // Folder icon with nice background
+        dl->AddRectFilled({ iconX, iconY }, { iconX + 48.f, iconY + 48.f },
+            IM_COL32(70, 65, 55, 220), 8.f);
         dl->AddText(ImGui::GetFont(), 32.f,
-            { cellStart.x + (cellSize - 20.f) * 0.5f, cellStart.y + 18.f },
-            IM_COL32(200, 210, 230, 200),
-            isDir ? "\xef\x81\xbb" : AssetTypeIcon(atype));
+            { iconX + (48.f - ImGui::CalcTextSize("\xef\x81\xbb").x) * 0.5f,
+              iconY + (48.f - ImGui::GetFontSize()) * 0.5f },
+            IM_COL32(210, 190, 140, 255), "\xef\x81\xbb");  // fa-folder
+    }
+    else if (atype == AssetType::Prefab) {
+        // Prefab: dark teal background + cubes icon in bright cyan + "P" badge
+        dl->AddRectFilled({ iconX, iconY }, { iconX + 48.f, iconY + 48.f },
+            IM_COL32(20, 60, 65, 230), 8.f);
+        // Outer cube outline ring
+        dl->AddRect({ iconX + 2.f, iconY + 2.f }, { iconX + 46.f, iconY + 46.f },
+            IM_COL32(50, 210, 200, 80), 6.f, 0, 1.f);
+        // Cubes icon centered
+        const char* prefabIcon = "\xef\x86\xb2";  // fa-cubes
+        ImVec2 iconSz = ImGui::CalcTextSize(prefabIcon);
+        dl->AddText(ImGui::GetFont(), 28.f,
+            { iconX + (48.f - iconSz.x) * 0.5f,
+              iconY + (48.f - 28.f) * 0.5f },
+            IM_COL32(50, 220, 210, 255), prefabIcon);
+        // Small "P" badge in bottom-right corner
+        dl->AddRectFilled({ iconX + 32.f, iconY + 32.f }, { iconX + 47.f, iconY + 47.f },
+            IM_COL32(30, 160, 150, 230), 3.f);
+        dl->AddText(ImGui::GetFont(), 11.f,
+            { iconX + 35.f, iconY + 35.f },
+            IM_COL32(220, 255, 252, 255), "P");
     }
     else {
-        dl->AddImage((ImTextureID)(uintptr_t)thumbTex,
-            { iconX, iconY }, { iconX + 48.f, iconY + 48.f });
+        GLuint thumbTex = (rec && rec->thumbnailTex) ? rec->thumbnailTex : g_checkerTex;
+        if (rec && !rec->thumbnailTex) {
+            // Draw type icon text centred
+            const char* iconChar = AssetTypeIcon(atype);
+            // Override scene icon to a more distinctive one
+            if (atype == AssetType::Scene) iconChar = "\xef\x86\xbb";  // fa-tree (scene)
+            dl->AddText(ImGui::GetFont(), 32.f,
+                { cellStart.x + (cellSize - 20.f) * 0.5f, cellStart.y + 18.f },
+                IM_COL32(200, 210, 230, 200), iconChar);
+        }
+        else {
+            dl->AddImage((ImTextureID)(uintptr_t)thumbTex,
+                { iconX, iconY }, { iconX + 48.f, iconY + 48.f });
+        }
     }
 
     // Reimport badge
@@ -343,7 +535,7 @@ static bool DrawGridCell(AssetBrowserState& ab, AssetDatabase& db,
         }
     }
 
-    // Drag source
+    // Drag source (only for non-folders)
     if (!isDir && !gstr.empty() && ImGui::BeginDragDropSource(ImGuiDragDropFlags_None)) {
         AssetDragPayload payload;
         strncpy_s(payload.guidStr, sizeof(payload.guidStr), gstr.c_str(), sizeof(payload.guidStr) - 1);
@@ -382,34 +574,54 @@ inline void DrawAssetBrowserContent(
     AssetBrowserState& ab,
     AssetDatabase& db,
     float dt,
-    const std::function<void(const std::string& path, AssetType t)>& onImportAsset)
+    const std::function<void(const std::string& path, AssetType t)>& onImportAsset,
+    const std::function<void(const std::string& scenePath)>& onOpenScene = nullptr)
 {
+    // Clamp currentDir to root at start (safety)
+    if (ab.rootPath.empty()) {
+        IM_ASSERT(false && "AssetBrowserState::rootPath not set! Call SetRootPath() before using asset browser.");
+        return;
+    }
+
+    // Normalize currentDir to ensure it has a trailing slash for consistency
+    if (!ab.currentDir.empty() && ab.currentDir.back() != '/' && ab.currentDir.back() != '\\')
+        ab.currentDir += '/';
+
+    ab.currentDir = ClampToRoot(ab.currentDir, ab.rootPath);
+
     // ── Toolbar ─────────────────────────────────────────────────────────────
     // Navigation: back
     bool canGoBack = !ab.navStack.empty();
     if (!canGoBack) ImGui::BeginDisabled();
     if (ImGui::Button("\xef\x81\x87")) {  // fa-arrows (back)
-        ab.currentDir = ab.navStack.back();
-        ab.navStack.pop_back();
-        ab.dirDirty = true;
-        ab.selectedGUIDs.clear();
+        if (!ab.navStack.empty()) {
+            std::string backDir = ab.navStack.back();
+            backDir = ClampToRoot(backDir, ab.rootPath);
+            ab.currentDir = backDir;
+            ab.navStack.pop_back();
+            ab.dirDirty = true;
+            ab.selectedGUIDs.clear();
+        }
     }
     if (!canGoBack) ImGui::EndDisabled();
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Go back");
 
     ImGui::SameLine();
 
-    // Path input
-    ImGui::SetNextItemWidth(240.f);
-    char pathBuf[512]; strncpy_s(pathBuf, sizeof(pathBuf), ab.currentDir.c_str(), sizeof(pathBuf) - 1);
-    pathBuf[sizeof(pathBuf) - 1] = '\0';
-    if (ImGui::InputText("##abpath", pathBuf, sizeof(pathBuf),
-        ImGuiInputTextFlags_EnterReturnsTrue)) {
-        ab.navStack.push_back(ab.currentDir);
-        ab.currentDir = pathBuf;
+    // Refresh button
+    if (ImGui::Button("\xef\x81\x9e")) {  // fa-sync
         ab.dirDirty = true;
-        ab.selectedGUIDs.clear();
     }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Refresh");
+
+    ImGui::SameLine();
+
+    // Path display (read-only to show current location)
+    ImGui::SetNextItemWidth(300.f);
+    char pathBuf[512];
+    strncpy_s(pathBuf, sizeof(pathBuf), ab.currentDir.c_str(), sizeof(pathBuf) - 1);
+    pathBuf[sizeof(pathBuf) - 1] = '\0';
+    ImGui::InputText("##abpath", pathBuf, sizeof(pathBuf), ImGuiInputTextFlags_ReadOnly);
 
     ImGui::SameLine();
 
@@ -417,7 +629,6 @@ inline void DrawAssetBrowserContent(
     ImGui::SetNextItemWidth(140.f);
     ImGui::InputTextWithHint("##absearch", "\xef\x80\x82 Search...",
         ab.searchBuf, sizeof(ab.searchBuf));
-    bool hasSearch = (ab.searchBuf[0] != '\0');
 
     ImGui::SameLine();
 
@@ -434,27 +645,34 @@ inline void DrawAssetBrowserContent(
 
     ImGui::SameLine();
 
-    // Favorites toggle
-    if (ab.showFavoritesOnly)
-        ImGui::PushStyleColor(ImGuiCol_Button, { 0.6f, 0.5f, 0.1f, 1.f });
-    if (ImGui::Button("\xef\x80\x85")) ab.showFavoritesOnly = !ab.showFavoritesOnly;  // fa-star
-    if (ab.showFavoritesOnly) ImGui::PopStyleColor();
+    // Favorites toggle — capture state BEFORE the button so Push/Pop always match
+    {
+        bool favWasOn = ab.showFavoritesOnly;
+        if (favWasOn) ImGui::PushStyleColor(ImGuiCol_Button, { 0.6f, 0.5f, 0.1f, 1.f });
+        if (ImGui::Button("\xef\x80\x85")) ab.showFavoritesOnly = !ab.showFavoritesOnly;  // fa-star
+        if (favWasOn) ImGui::PopStyleColor();
+    }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Show favorites only");
 
     ImGui::SameLine();
 
     // View toggle
-    if (ab.viewMode == AssetBrowserState::Grid)
-        ImGui::PushStyleColor(ImGuiCol_Button, { 0.22f, 0.47f, 0.80f, 0.75f });
-    if (ImGui::Button("\xef\x84\xa7")) ab.viewMode = AssetBrowserState::Grid;  // fa-th-large
-    if (ab.viewMode == AssetBrowserState::Grid) ImGui::PopStyleColor();
+    // View toggle — capture mode before button to keep Push/Pop balanced
+    {
+        bool isGrid = (ab.viewMode == AssetBrowserState::Grid);
+        if (isGrid) ImGui::PushStyleColor(ImGuiCol_Button, { 0.22f, 0.47f, 0.80f, 0.75f });
+        if (ImGui::Button("\xef\x84\xa7")) ab.viewMode = AssetBrowserState::Grid;  // fa-th-large
+        if (isGrid) ImGui::PopStyleColor();
+    }
 
     ImGui::SameLine();
 
-    if (ab.viewMode == AssetBrowserState::List)
-        ImGui::PushStyleColor(ImGuiCol_Button, { 0.22f, 0.47f, 0.80f, 0.75f });
-    if (ImGui::Button("\xef\x80\xba")) ab.viewMode = AssetBrowserState::List;  // fa-list
-    if (ab.viewMode == AssetBrowserState::List) ImGui::PopStyleColor();
+    {
+        bool isList = (ab.viewMode == AssetBrowserState::List);
+        if (isList) ImGui::PushStyleColor(ImGuiCol_Button, { 0.22f, 0.47f, 0.80f, 0.75f });
+        if (ImGui::Button("\xef\x80\xba")) ab.viewMode = AssetBrowserState::List;  // fa-list
+        if (isList) ImGui::PopStyleColor();
+    }
 
     ImGui::SameLine();
 
@@ -466,111 +684,94 @@ inline void DrawAssetBrowserContent(
 
     ImGui::Separator();
 
-    // ── Breadcrumb with Home button and sibling dropdowns ──────────────────
+    // ── Breadcrumb navigation ──────────────────────────────────────────────
     {
         // Home button
-        ImVec2 bcPos = ImGui::GetCursorPos();
-        if (ImGui::Button("\xef\x80\x95", { 24, 24 })) {  // fa-home
-            ab.currentDir = "./assets/";
+        if (ImGui::Button("\xef\x80\x95", { 28, 24 })) {  // fa-home
+            ab.navStack.push_back(ab.currentDir);
+            ab.currentDir = ab.rootPath;
             ab.dirDirty = true;
             ab.selectedGUIDs.clear();
         }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Go to root assets folder");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Go to project asset folder");
 
         ImGui::SameLine();
         ImGui::TextDisabled("/");
         ImGui::SameLine();
 
-        fs::path p(ab.currentDir);
-        std::string cumulative;
-        int idx = 0;
+        // Build breadcrumb from rootPath
+        fs::path current(ab.currentDir);
+        fs::path root(ab.rootPath);
 
-        // Build path parts
-        std::vector<std::string> parts;
-        for (auto& part : p) {
-            std::string partStr = part.string();
-            if (!partStr.empty() && partStr != ".") {
-                parts.push_back(partStr);
-            }
-        }
-
-        for (size_t i = 0; i < parts.size(); ++i) {
-            cumulative += parts[i] + "/";
-
-            if (i > 0) {
-                ImGui::SameLine(0, 2);
-                ImGui::TextDisabled("/");
-                ImGui::SameLine(0, 2);
-            }
-
-            ImGui::PushID(idx++);
-
-            // Highlight current directory
-            bool isLast = (i == parts.size() - 1);
-            if (isLast) {
-                ImGui::PushStyleColor(ImGuiCol_Button, { 0.3f, 0.5f, 0.8f, 0.5f });
-            }
-
-            if (ImGui::SmallButton(parts[i].c_str())) {
-                ab.navStack.push_back(ab.currentDir);
-                ab.currentDir = cumulative;
-                ab.dirDirty = true;
-                ab.selectedGUIDs.clear();
-            }
-
-            if (isLast) {
+        // Get relative path from root to current
+        std::string relPathStr;
+        try {
+            fs::path rel = fs::relative(current, root);
+            if (rel.empty() || rel.string() == ".") {
+                // At root - just show "Assets"
+                ImGui::PushStyleColor(ImGuiCol_Text, { 0.8f, 0.8f, 0.5f, 1.f });
+                ImGui::TextUnformatted("Assets");
                 ImGui::PopStyleColor();
             }
-
-            // Hover tooltip
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("%s", cumulative.c_str());
-            }
-
-            // Right-click dropdown for siblings
-            if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
-                ImGui::OpenPopup(("breadcrumb_" + cumulative).c_str());
-            }
-
-            if (ImGui::BeginPopup(("breadcrumb_" + cumulative).c_str())) {
-                ImGui::TextDisabled("Navigate to:");
-                ImGui::Separator();
-                try {
-                    fs::path parent = fs::path(cumulative).parent_path();
-                    if (parent.empty()) parent = ".";
-                    if (fs::exists(parent)) {
-                        std::vector<fs::directory_entry> dirs;
-                        for (auto& entry : fs::directory_iterator(parent)) {
-                            if (entry.is_directory()) {
-                                dirs.push_back(entry);
-                            }
-                        }
-                        std::sort(dirs.begin(), dirs.end(),
-                            [](const fs::directory_entry& a, const fs::directory_entry& b) {
-                                return a.path().filename() < b.path().filename();
-                            });
-
-                        for (auto& entry : dirs) {
-                            bool isCurrent = (entry.path().string() + "/" == cumulative);
-                            if (ImGui::MenuItem(entry.path().filename().string().c_str(), nullptr, isCurrent)) {
-                                ab.navStack.push_back(ab.currentDir);
-                                ab.currentDir = entry.path().string() + "/";
-                                ab.dirDirty = true;
-                                ab.selectedGUIDs.clear();
-                            }
-                        }
-                    }
+            else {
+                // Build clickable breadcrumb
+                fs::path cumulative = root;
+                std::vector<std::string> parts;
+                for (const auto& part : rel) {
+                    parts.push_back(part.string());
                 }
-                catch (...) {}
-                ImGui::EndPopup();
-            }
 
-            ImGui::PopID();
+                // Root button
+                ImGui::PushID(0);
+                ImGui::PushStyleColor(ImGuiCol_Button, { 0.25f, 0.25f, 0.3f, 0.8f });
+                if (ImGui::SmallButton("Assets")) {
+                    ab.navStack.push_back(ab.currentDir);
+                    ab.currentDir = ab.rootPath;
+                    ab.dirDirty = true;
+                    ab.selectedGUIDs.clear();
+                }
+                ImGui::PopStyleColor();
+                ImGui::PopID();
+
+                cumulative = ab.rootPath;
+                for (size_t i = 0; i < parts.size(); ++i) {
+                    cumulative += parts[i];
+                    if (!cumulative.empty() && cumulative.string().back() != '/') cumulative += '/';
+
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("/");
+                    ImGui::SameLine();
+
+                    ImGui::PushID((int)(i + 1));
+                    bool isLast = (i == parts.size() - 1);
+                    if (isLast) {
+                        ImGui::PushStyleColor(ImGuiCol_Text, { 0.8f, 0.8f, 0.5f, 1.f });
+                        ImGui::TextUnformatted(parts[i].c_str());
+                        ImGui::PopStyleColor();
+                    }
+                    else {
+                        ImGui::PushStyleColor(ImGuiCol_Button, { 0.25f, 0.25f, 0.3f, 0.8f });
+                        if (ImGui::SmallButton(parts[i].c_str())) {
+                            ab.navStack.push_back(ab.currentDir);
+                            ab.currentDir = cumulative.string();
+                            ab.dirDirty = true;
+                            ab.selectedGUIDs.clear();
+                        }
+                        ImGui::PopStyleColor();
+                    }
+                    ImGui::PopID();
+                }
+            }
+        }
+        catch (...) {
+            // Fallback - just show the path as text
+            ImGui::TextDisabled("%s", ab.currentDir.c_str());
         }
     }
+
     ImGui::Separator();
 
-    // ── Main content area (file listing only – import settings moved to Inspector) ──
+    // ── Main content area (file listing) ───────────────────────────────────
     const ImGuiStyle& style = ImGui::GetStyle();
     float statusBarH = ImGui::GetTextLineHeightWithSpacing()
         + style.ItemSpacing.y + 1.f;
@@ -587,6 +788,50 @@ inline void DrawAssetBrowserContent(
             ab.hasPendingDrop = true;
         }
         ImGui::EndDragDropTarget();
+    }
+
+    // ── Context menu for empty area (right-click background) ──────────────
+    if (ImGui::BeginPopupContextWindow(nullptr, ImGuiPopupFlags_NoOpenOverItems)) {
+        ImGui::TextDisabled("Create new...");
+        ImGui::Separator();
+        if (ImGui::MenuItem("Script (.cpp)")) {
+            strncpy_s(ab.wizardScriptName, sizeof(ab.wizardScriptName), "NewScript", sizeof(ab.wizardScriptName) - 1);
+            ab.wizardScriptTemplate = 0;
+            ab.showScriptWizard = true;
+        }
+        if (ImGui::MenuItem("Scene (.honscene)")) {
+            static int sceneCounter = 1;
+            std::string name = "NewScene" + std::to_string(sceneCounter++);
+            if (CreateNewScene(ab.currentDir, name)) {
+                ab.dirDirty = true;
+            }
+        }
+        if (ImGui::MenuItem("Material (.honmat)")) {
+            static int matCounter = 1;
+            std::string name = "NewMaterial" + std::to_string(matCounter++);
+            if (CreateNewMaterial(ab.currentDir, name)) {
+                ab.dirDirty = true;
+            }
+        }
+        // Prefab entry — with cyan text to match the grid icon color
+        ImGui::PushStyleColor(ImGuiCol_Text, { 0.3f, 1.f, 0.9f, 1.f });
+        if (ImGui::MenuItem("\xef\x86\xb2  Empty Prefab (.honprefab)")) {
+            static int prefabCounter = 1;
+            std::string name = "NewPrefab" + std::to_string(prefabCounter++);
+            if (CreateNewPrefab(ab.currentDir, name)) {
+                ab.dirDirty = true;
+            }
+        }
+        ImGui::PopStyleColor();
+        ImGui::Separator();
+        if (ImGui::MenuItem("Folder")) {
+            static int folderCounter = 1;
+            std::string name = "NewFolder" + std::to_string(folderCounter++);
+            if (CreateNewFolder(ab.currentDir, name)) {
+                ab.dirDirty = true;
+            }
+        }
+        ImGui::EndPopup();
     }
 
     // ── Apply filters to dirEntries ──────────────────────────────────────────
@@ -608,18 +853,24 @@ inline void DrawAssetBrowserContent(
         return true;
         };
 
+    // Check if we have entries to display
+    if (ab.dirEntries.empty()) {
+        ImGui::TextDisabled("  This folder is empty.");
+        ImGui::TextDisabled("  Right-click to create new assets.");
+    }
+
     // ── GRID VIEW ────────────────────────────────────────────────────────────
     if (ab.viewMode == AssetBrowserState::Grid) {
         float cellW = ab.iconSize + 8.f;
         float availX = ImGui::GetContentRegionAvail().x;
-        int   cols = (((std::max)))(1, (int)(availX / cellW));
+        int cols = (std::max)(1, (int)(availX / cellW));
 
         int col = 0;
         for (auto& entry : ab.dirEntries) {
             if (!matchesFilter(entry)) continue;
 
             bool ctxOpen = false;
-            bool dblClick = DrawGridCell(ab, db, entry, ab.iconSize, ctxOpen);
+            bool dblClick = DrawGridCell(ab, db, entry, ab.iconSize, ctxOpen, onImportAsset);
 
             std::string path = entry.path().string();
             AssetRecord* rec = entry.is_directory() ? nullptr : db.FindByPath(path);
@@ -627,15 +878,25 @@ inline void DrawAssetBrowserContent(
 
             if (dblClick) {
                 if (entry.is_directory()) {
+                    // Navigate into folder
+                    std::string newDir = entry.path().string();
+                    // Ensure trailing slash
+                    if (!newDir.empty() && newDir.back() != '/' && newDir.back() != '\\')
+                        newDir += '/';
                     ab.navStack.push_back(ab.currentDir);
-                    ab.currentDir = entry.path().string() + "/";
+                    ab.currentDir = newDir;
                     ab.dirDirty = true;
                     ab.selectedGUIDs.clear();
                     break;
                 }
-                else if (onImportAsset) {
+                else {
                     AssetType t = ExtToAssetType(entry.path().extension().string());
-                    onImportAsset(path, t);
+                    if (t == AssetType::Scene && onOpenScene) {
+                        onOpenScene(path);
+                    }
+                    else if (onImportAsset) {
+                        onImportAsset(path, t);
+                    }
                 }
             }
 
@@ -673,7 +934,13 @@ inline void DrawAssetBrowserContent(
                 ImGui::TableSetColumnIndex(0);
 
                 ImGui::PushID(name.c_str());
-                std::string label = std::string(isDir ? "\xef\x81\xbb " : (std::string(AssetTypeIcon(atype)) + " ")) + name;
+                // Choose icon: folder, scene, prefab, or default type icon
+                const char* iconChar = " ";
+                if (isDir) iconChar = "\xef\x81\xbb ";
+                else if (atype == AssetType::Scene)  iconChar = "\xef\x86\xbb ";
+                else if (atype == AssetType::Prefab) iconChar = "\xef\x86\xb2 ";  // fa-cubes
+                else iconChar = AssetTypeIcon(atype);
+                std::string label = std::string(iconChar) + " " + name;
                 if (ImGui::Selectable(label.c_str(), selected,
                     ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick)) {
                     ImGuiIO& io = ImGui::GetIO();
@@ -686,10 +953,17 @@ inline void DrawAssetBrowserContent(
                     }
                     if (ImGui::IsMouseDoubleClicked(0)) {
                         if (isDir) {
+                            // Navigate into folder
+                            std::string newDir = path;
+                            if (!newDir.empty() && newDir.back() != '/' && newDir.back() != '\\')
+                                newDir += '/';
                             ab.navStack.push_back(ab.currentDir);
-                            ab.currentDir = path + "/";
+                            ab.currentDir = newDir;
                             ab.dirDirty = true;
                             ab.selectedGUIDs.clear();
+                        }
+                        else if (atype == AssetType::Scene && onOpenScene) {
+                            onOpenScene(path);
                         }
                         else if (onImportAsset) {
                             onImportAsset(path, atype);
@@ -699,15 +973,37 @@ inline void DrawAssetBrowserContent(
 
                 bool ctxOpen2 = ImGui::BeginPopupContextItem("##lctx");
                 if (ctxOpen2) {
-                    // Inline the context menu body (popup already open via BeginPopupContextItem)
                     AssetRecord* recCtx = gstr.empty() ? nullptr : db.FindByGUID(gstr);
                     bool isDirCtx = entry.is_directory();
 
                     ImGui::TextDisabled("%s", entry.path().filename().string().c_str());
                     ImGui::Separator();
 
+                    // Prefab-first action
+                    bool isPrefabCtx = !isDirCtx &&
+                        ExtToAssetType(entry.path().extension().string()) == AssetType::Prefab;
+                    if (isPrefabCtx) {
+                        ImGui::PushStyleColor(ImGuiCol_Text, { 0.3f, 1.f, 0.9f, 1.f });
+                        if (ImGui::MenuItem("\xef\x86\xb2  Edit Prefab")) {
+                            if (onImportAsset)
+                                onImportAsset(path, AssetType::Prefab);  // triggers EnterPrefabEditMode
+                        }
+                        ImGui::PopStyleColor();
+                        if (ImGui::MenuItem("Instantiate in Scene")) {
+                            // Instantiate (shift+dbl-click alternative) — uses the import callback
+                            // with a sentinel to skip edit mode; handled by main.cpp's lambda
+                            // We can't easily distinguish here, so just call onImportAsset and
+                            // let the user drag-drop to instantiate without entering edit mode.
+                            if (onImportAsset)
+                                onImportAsset(path + "?instantiate", AssetType::Prefab);
+                        }
+                        ImGui::Separator();
+                    }
+
                     if (!isDirCtx) {
-                        if (ImGui::MenuItem("Open")) {}
+                        if (ImGui::MenuItem("Open")) {
+                            OpenWithDefaultProgram(path);
+                        }
                         if (recCtx && ImGui::MenuItem("Reimport")) recCtx->needsReimport = true;
                         ImGui::Separator();
                     }
@@ -752,7 +1048,7 @@ inline void DrawAssetBrowserContent(
                     ImGui::EndPopup();
                 }
 
-                // Drag source
+                // Drag source (non-folder only)
                 if (!isDir && !gstr.empty() && ImGui::BeginDragDropSource()) {
                     AssetDragPayload payload;
                     strncpy_s(payload.guidStr, sizeof(payload.guidStr), gstr.c_str(), sizeof(payload.guidStr) - 1);
@@ -764,7 +1060,9 @@ inline void DrawAssetBrowserContent(
                 }
 
                 ImGui::TableSetColumnIndex(1);
-                ImGui::TextDisabled("%s", isDir ? "Folder" : AssetTypeName(atype));
+                if (isDir) ImGui::TextDisabled("Folder");
+                else if (atype == AssetType::Scene) ImGui::TextDisabled("Scene");
+                else ImGui::TextDisabled("%s", AssetTypeName(atype));
                 ImGui::TableSetColumnIndex(2);
                 if (rec) ImGui::TextDisabled("%s", FormatBytes(rec->fileSize).c_str());
                 ImGui::TableSetColumnIndex(3);
@@ -814,25 +1112,92 @@ inline void DrawAssetBrowserContent(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  DrawAssetBrowserPanel  — replaces the minimal one in main.cpp
+//  DrawAssetBrowserPanel  — Main panel to be called from IDE
 //  Parameters:
-//    ab   — browser UI state (persistent across frames)
+//    ab   — browser UI state (persistent across frames, rootPath must be set)
 //    db   — asset database
 //    dt   — frame delta time (for rescan timer)
-//    onImportModel — callback(path) when user drops / double-clicks a model
+//    onImportAsset — callback(path, type) when user drops / double-clicks an asset
+//    onOpenScene   — callback(scenePath) when user double-clicks a .honscene
 // ─────────────────────────────────────────────────────────────────────────────
+
 inline void DrawAssetBrowserPanel(
     AssetBrowserState& ab,
     AssetDatabase& db,
     float dt,
-    const std::function<void(const std::string& path, AssetType t)>& onImportAsset)
+    const std::function<void(const std::string& path, AssetType t)>& onImportAsset,
+    const std::function<void(const std::string& scenePath)>& onOpenScene = nullptr)
 {
     EnsureCheckerTex();
 
-    // Periodic rescan
+    // CRITICAL: rootPath must be set by the IDE (via SetRootPath) before first draw.
+    if (ab.rootPath.empty()) {
+        IM_ASSERT(false && "AssetBrowserState::rootPath not set! Call SetRootPath() with project asset folder.");
+        return;
+    }
+
+    // Periodic rescan: update file listing from currentDir, and refresh the asset
+    // database from the entire rootPath (so new/modified assets are discovered).
     ab.rescanTimer += dt;
     if (ab.dirDirty || ab.rescanTimer > 3.f) {
-        AssetBrowserRescan(ab, db);
+        // Clamp currentDir to root before scanning
+        ab.currentDir = ClampToRoot(ab.currentDir, ab.rootPath);
+
+        // Ensure trailing slash for consistent path handling
+        if (!ab.currentDir.empty() && ab.currentDir.back() != '/' && ab.currentDir.back() != '\\')
+            ab.currentDir += '/';
+
+        // Refresh directory listing (files/folders in currentDir)
+        ab.dirEntries.clear();
+        try {
+            if (fs::exists(ab.currentDir) && fs::is_directory(ab.currentDir)) {
+                for (auto& e : fs::directory_iterator(ab.currentDir)) {
+                    std::string fname = e.path().filename().string();
+                    // Skip hidden files/folders (those starting with .)
+                    if (!fname.empty() && fname[0] == '.') continue;
+                    ab.dirEntries.push_back(e);
+                }
+                // Sort: directories first, then files alphabetically
+                std::sort(ab.dirEntries.begin(), ab.dirEntries.end(),
+                    [](const fs::directory_entry& a, const fs::directory_entry& b) {
+                        if (a.is_directory() != b.is_directory())
+                            return a.is_directory() > b.is_directory();
+                        return a.path().filename().string() < b.path().filename().string();
+                    });
+            }
+            else {
+                // Current directory doesn't exist - reset to root
+                ab.currentDir = ab.rootPath;
+                if (!ab.currentDir.empty() && ab.currentDir.back() != '/' && ab.currentDir.back() != '\\')
+                    ab.currentDir += '/';
+                ab.navStack.clear();
+                // Rescan after reset
+                for (auto& e : fs::directory_iterator(ab.currentDir)) {
+                    std::string fname = e.path().filename().string();
+                    if (!fname.empty() && fname[0] == '.') continue;
+                    ab.dirEntries.push_back(e);
+                }
+                std::sort(ab.dirEntries.begin(), ab.dirEntries.end(),
+                    [](const fs::directory_entry& a, const fs::directory_entry& b) {
+                        if (a.is_directory() != b.is_directory())
+                            return a.is_directory() > b.is_directory();
+                        return a.path().filename().string() < b.path().filename().string();
+                    });
+            }
+        }
+        catch (const std::exception& e) {
+            // Log error but continue
+            (void)e;
+            ab.dirEntries.clear();
+        }
+
+        // Scan the ENTIRE asset root into the database – not just the current folder.
+        // This ensures all assets in the project are known and can be referenced.
+        if (fs::exists(ab.rootPath)) {
+            db.ScanDirectory(ab.rootPath);
+        }
+
+        ab.dirDirty = false;
         ab.rescanTimer = 0.f;
     }
 
@@ -844,24 +1209,18 @@ inline void DrawAssetBrowserPanel(
 
     // --- Tab: All Assets ---
     if (ImGui::BeginTabItem("All Assets")) {
-        // Save and restore favorites-only state for this tab
         bool prevFav = ab.showFavoritesOnly;
         ab.showFavoritesOnly = false;
-
-        DrawAssetBrowserContent(ab, db, dt, onImportAsset);
-
+        DrawAssetBrowserContent(ab, db, dt, onImportAsset, onOpenScene);
         ab.showFavoritesOnly = prevFav;
         ImGui::EndTabItem();
     }
 
     // --- Tab: Favorites ---
     if (ImGui::BeginTabItem("Favorites")) {
-        // Save and restore favorites-only state for this tab
         bool prevFav = ab.showFavoritesOnly;
         ab.showFavoritesOnly = true;
-
-        DrawAssetBrowserContent(ab, db, dt, onImportAsset);
-
+        DrawAssetBrowserContent(ab, db, dt, onImportAsset, onOpenScene);
         ab.showFavoritesOnly = prevFav;
         ImGui::EndTabItem();
     }
@@ -885,7 +1244,31 @@ inline void DrawAssetBrowserPanel(
         if (ImGui::Button("Cancel", { 90, 0 })) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
+    // ── Script Wizard modal ──────────────────────────────────────────────────────
+    if (ab.showScriptWizard) { ImGui::OpenPopup("Create Script##abwizard"); ab.showScriptWizard = false; }
+    if (ImGui::BeginPopupModal("Create Script##abwizard", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        static const char* kTemplates[] = { "Empty", "Start/Update", "Full Example" };
+        ImGui::InputText("Script Name", ab.wizardScriptName, sizeof(ab.wizardScriptName),
+            ImGuiInputTextFlags_AutoSelectAll);
+        ImGui::Combo("Template", &ab.wizardScriptTemplate, kTemplates, 3);
+        ImGui::TextDisabled("Language: C++ (.cpp)");
+        ImGui::Separator();
+
+        if (ImGui::Button("Create", { 120, 0 }))
+        {
+            if (CreateNewScript(ab.currentDir, ab.wizardScriptName, ab.wizardScriptTemplate)) {
+                db.Register((fs::path(ab.currentDir) / (std::string(ab.wizardScriptName) + ".cpp")).string());
+                ab.dirDirty = true;
+            }
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", { 80, 0 })) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
 }
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Viewport drag-drop target helper
 //  Call this inside the Viewport window after rendering the scene image.

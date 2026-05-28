@@ -80,6 +80,9 @@
 #include "ide_viewport_overlays.h"
 #include "ide_camera_bookmarks.h"
 #include "ide_ship.h"
+#include "scene_io.h"
+#include "ide_project_launcher.h"
+#include "ide_ai_chat.h"
 
 
 using namespace HonHengine;
@@ -100,6 +103,8 @@ struct HierarchyDragPayload {
 
 struct IDEObject {
     std::string name; float px = 0, py = 0, pz = 0; float sx = 1, sy = 1, sz = 1; float rw = 1, rx = 0, ry = 0, rz = 0; bool visible = true; bool locked = false; std::string shader; std::string tag; int cr = 255, cg = 255, cb = 255, ca = 255;
+    std::string type;      // "sphere", "plane", "rect", "obj", "gltf"
+    std::string assetPath; // For "obj"/"gltf" types — path to the mesh asset
 
     BaseObject toBaseObject() const {
         BaseObject obj;
@@ -114,7 +119,7 @@ struct IDEObject {
     }
 };
 struct IDELight {
-    std::string name; std::string lightType = "point"; float intensity = 1.f; int r = 255, g = 245, b = 209; float px = 0, py = 0, pz = 0; float rotx = 0, roty = 0, rotz = 0;
+    std::string name; std::string lightType = "point"; float intensity = 1.f; int r = 255, g = 255, b = 255; float px = 0, py = 0, pz = 0; float rotx = 0, roty = 0, rotz = 0;
 
     BaseLight* toBaseLight() const {
         BaseLight* lt = nullptr;
@@ -267,9 +272,9 @@ struct DeferredTask {
     double x = 0, y = 0, z = 0;
 };
 
-static std::vector<DeferredTask> g_deferredGLTFTasks;
+std::vector<DeferredTask> g_deferredGLTFTasks;
 struct ConsoleLog;
-static std::mutex g_deferredTasksMutex;
+std::mutex g_deferredTasksMutex;
 static ConsoleLog* g_deferredLog = nullptr;
 
 struct DeferredHDRTask {
@@ -291,7 +296,7 @@ static std::mutex g_deferredShaderMutex;
 // =============================================================================
 //  Fonctions JSON utilitaires (inchangées)
 // =============================================================================
-static std::string JStr(const std::string& s) {
+std::string JStr(const std::string& s) {
     std::string o; o.reserve(s.size() + 2); o += '"';
     for (char c : s) {
         if (c == '"') o += "\\\"";
@@ -320,7 +325,7 @@ static std::vector<std::string> Tokenize(const std::string& line) {
 }
 static bool ParseDouble(const std::string& s, double& out) { try { out = std::stod(s); return true; } catch (...) { return false; } }
 static bool ParseInt(const std::string& s, int& out) { try { out = std::stoi(s); return true; } catch (...) { return false; } }
-static std::string JsonGet(const std::string& json, const std::string& key) {
+std::string JsonGet(const std::string& json, const std::string& key) {
     auto pos = json.find("\"" + key + "\":");
     if (pos == std::string::npos) return "";
     pos += key.size() + 3;
@@ -370,8 +375,8 @@ static Quaternion EulerToQuat(double pitch, double yaw, double roll) {
 // =============================================================================
 //  Registres globaux (protégés par g_sceneMutex)
 // =============================================================================
-static std::unordered_map<std::string, BaseObject*> g_namedObjects;
-static std::unordered_map<std::string, BaseLight*>  g_namedLights;
+std::unordered_map<std::string, BaseObject*> g_namedObjects;
+std::unordered_map<std::string, BaseLight*>  g_namedLights;
 
 // =============================================================================
 //  CommandRegistry et command handlers (tous avec verrouillage)
@@ -734,6 +739,8 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer,
                 (double)std::clamp(a, 0, 255)
                 });
 
+            obj->refreshVertexColors();
+
             out << MakeResponse(true, "color", "Color set on '" + args[0] + "'") << "\n";
         });
     reg.Register("visible", "visible <name> <true/false>", "Set object visibility.",
@@ -871,6 +878,46 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer,
             g_namedLights.clear();
             out << MakeResponse(true, "clearscene", "Scene cleared") << "\n";
         });
+    // savescene <path> — delegates to the shared SceneSave() in scene_io.cpp
+    reg.Register("savescene", "savescene <path>", "Save the current scene to a .honscene file.",
+        [](CmdContext&, const std::vector<std::string>& args, std::ostream& out) {
+            if (args.empty()) {
+                out << MakeResponse(false, "savescene", "Usage: savescene <path>") << "\n";
+                return;
+            }
+            std::string path = args[0];
+            if (!path.empty() && path.front() == '"') path = path.substr(1);
+            if (!path.empty() && path.back() == '"') path.pop_back();
+
+            SceneSaveResult r = SceneSave(path);
+            if (r.ok)
+                out << MakeResponse(true, "savescene", "Scene saved: " + path) << "\n";
+            else
+                out << MakeResponse(false, "savescene", r.errorMsg) << "\n";
+        });
+
+    // loadscene <path> — delegates to the shared SceneLoad() in scene_io.cpp.
+    // The caller is responsible for sending "clearscene" first if a clean load is desired.
+    reg.Register("loadscene", "loadscene <path>", "Load a .honscene file into the current scene.",
+        [assetDb, sceneMgr](CmdContext& ctx, const std::vector<std::string>& args, std::ostream& out) {
+            if (args.empty()) {
+                out << MakeResponse(false, "loadscene", "Usage: loadscene <path>") << "\n";
+                return;
+            }
+            std::string path = args[0];
+            if (!path.empty() && path.front() == '"') path = path.substr(1);
+            if (!path.empty() && path.back() == '"') path.pop_back();
+
+            SceneLoadResult r = SceneLoad(path, ctx.sm, assetDb, sceneMgr);
+            if (!r.ok) {
+                out << MakeResponse(false, "loadscene", r.errorMsg) << "\n";
+                return;
+            }
+            std::string msg = "Loaded " + std::to_string(r.objCount) + " objects, " +
+                std::to_string(r.lightCount) + " lights from " + path;
+            if (!r.warnings.empty()) msg += " (warnings: " + r.warnings + ")";
+            out << MakeResponse(true, "loadscene", msg) << "\n";
+        });
     // quit
     reg.Register("quit", "quit", "Exit the application.",
         [](CmdContext&, const std::vector<std::string>&, std::ostream& out) {
@@ -913,6 +960,7 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer,
                 return;
             }
             obj->transform.position = Vector3(x, y, z);
+            obj->tag = "OBJ:" + path;
             std::unique_lock<std::shared_mutex> lock(*ctx.sceneMutex);
             ctx.sm->objects->push_back(obj);
 
@@ -1227,7 +1275,10 @@ struct IDEState {
     ScriptManager* scriptManager = nullptr;
     float editorFov = 60.f; // editor viewport camera FOV
     bool consoleFocused = false;
-
+    AIAssistant aiAssistant;
+    bool showAIChat = false;
+    bool quitRequested = false;
+    bool showQuitModal = false;
     MultiSelection selection;
 
     std::vector<HierarchyNode> hierRoots;
@@ -1252,18 +1303,28 @@ struct IDEState {
     bool showShipDialog = false;
     char shipSrcDir[512] = "./";
     char shipDstDir[512] = "./dist/";
+
+    // ── Scene management for shipping ────────────────────────────────────────
+    // All .honscene files found in the project, refreshed when the Ship dialog opens.
+    struct SceneEntry {
+        std::string path;       // relative or absolute path to the .honscene
+        std::string name;       // display name (filename stem)
+        bool selected = true;   // whether to include in the build
+    };
+    std::vector<SceneEntry> projectScenes;  // populated on Ship dialog open
+    int shipFirstScene = 0;                 // index into projectScenes of the startup scene
     bool showAddObject = false;
     char newObjName[64] = "obj1";
     ObjectType newObjType = PLANE;
     char newObjFile[256] = "";
     float newObjPos[3] = {};
-    float newObjHalf = 0.5f;
+    float newObjScale = 1.f;
     int newObjColor = 0;
     bool showAddLight = false;
     float newLightPos[3] = {};
     char newLightName[64] = "light1";
-    float newLightIntensity = 1.f;
-    float newLightColor[3] = { 1.f,0.96f,0.82f };
+    float newLightIntensity = .75f;
+    float newLightColor[3] = { 1.f,1.f,1.f };
     ObjectType newLightType = POINT_LIGHT;
     bool showAddCamera = false;
     char newCameraName[64] = "camera1";
@@ -1329,9 +1390,37 @@ struct IDEState {
     int cmdHistoryIdx = -1;
     std::vector<std::string> undoStack;
     bool sceneDirty = false;
-    char sceneFilePath[512] = "scene.honscene";
+    char sceneFilePath[512] = "assets/scene.honscene";
     bool showSaveModal = false;
+
+    // ── Project-root–relative path helpers ───────────────────────────────────
+    // Use these everywhere instead of hard-coded ".honassets" / "ide_settings.ini"
+    // so that all per-project data lives inside the chosen project folder.
+    std::string ProjectRoot() const {
+        return std::string(project.rootFolder);
+    }
+    std::string HonAssetsPath() const {
+        std::string r = ProjectRoot();
+        return r.empty() ? ".honassets"
+            : (fs::path(r) / ".honassets").string();
+    }
+    std::string EditorSettingsPath() const {
+        std::string r = ProjectRoot();
+        return r.empty() ? "ide_settings.ini"
+            : (fs::path(r) / "ide_settings.ini").string();
+    }
+    std::string AssetRootDir() const {
+        std::string r = ProjectRoot();
+        return r.empty() ? "./assets/"
+            : (fs::path(r) / "assets" / "").string();
+    }
     bool showLoadModal = false;
+
+    // ── Scene open from Asset Browser ─────────────────────────────────────────
+    // When the user double-clicks a .honscene in the browser, we check if the
+    // scene is dirty and show a confirmation prompt before loading.
+    bool showSceneOpenPrompt = false;    // "Save before opening?" modal
+    std::string pendingSceneOpenPath;   // the .honscene path to load once confirmed
     std::string pendingSelection;
     size_t logReadIdx = 0;
     bool showCreateFolder = false;
@@ -1400,6 +1489,33 @@ struct IDEState {
 
     // ── Prefab ────────────────────────────────────────────────────────────────
     std::unordered_map<std::string, std::string> prefabSourceGUID;
+
+    // Multi-object prefab creation (from folder right-click or multi-selection)
+    bool showCreatePrefabFromFolder = false;
+    std::string createPrefabFromFolderName;      // which folder to serialize
+    char createPrefabMultiName[64] = {};
+
+    // ── Prefab Edit Mode (Unity-style) ────────────────────────────────────────
+    // When the user double-clicks a .honprefab in the asset browser, the editor
+    // enters a dedicated "Prefab Edit Mode" — isolated from the main scene.
+    // The prefab objects are loaded into a temporary list; on Save the file is
+    // re-serialized and the mode is exited.
+    bool  prefabEditMode = false;           // true while editing a prefab
+    std::string prefabEditPath;             // path to the .honprefab being edited
+    std::string prefabEditName;             // display name (stem of file)
+    // Snapshot of the main scene objects/lights to restore on exit
+    std::vector<IDEObject> prefabEditSceneSnapshot;
+    std::vector<IDELight>  prefabEditLightSnapshot;
+    // Objects loaded from the prefab for inline editing
+    std::vector<IDEObject> prefabEditObjects;
+    bool prefabEditDirty = false;           // unsaved changes in prefab editor
+
+    // "Add Parent" (Create Empty Parent) state
+    bool showAddParentModal = false;
+    char addParentName[64] = "GameObject";
+
+    // Hierarchy drag-into-folder payload tag
+    static constexpr const char* kHierFolderDropPayload = "HONHON_HIER_INTO_FOLDER";
 
     // ── Profiler / Memory debug windows ──────────────────────────────────────
     bool showProfiler = false;
@@ -2058,20 +2174,107 @@ static void DrawHierarchyNodes(std::vector<HierarchyNode>& nodes, IDEState& ide,
             ImGui::TextUnformatted((std::string(ICON_FA_FOLDER " ") + node.name).c_str());
             ImGui::PopStyleColor();
 
+            // ── Folder drop target: accept hierarchy nodes dropped into this folder ──
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* folderPayload =
+                    ImGui::AcceptDragDropPayload(IDEState::kHierFolderDropPayload)) {
+                    // payload = null-terminated name string
+                    std::string draggedName(static_cast<const char*>(folderPayload->Data));
+                    // Find and move the dragged node from hierRoots into this folder
+                    std::function<bool(std::vector<HierarchyNode>&, HierarchyNode&)> moveNode =
+                        [&](std::vector<HierarchyNode>& src, HierarchyNode& target) -> bool {
+                        for (auto it = src.begin(); it != src.end(); ++it) {
+                            if (it->kind != HierarchyNode::FOLDER && it->name == draggedName) {
+                                target.children.push_back(*it);
+                                src.erase(it);
+                                return true;
+                            }
+                            if (it->kind == HierarchyNode::FOLDER) {
+                                if (moveNode(it->children, target)) return true;
+                            }
+                        }
+                        return false;
+                        };
+                    moveNode(ide.hierRoots, node);
+                }
+                ImGui::EndDragDropTarget();
+            }
+
             if (ImGui::BeginPopupContextItem(("fctx_" + node.name).c_str()))
             {
-                if (ImGui::MenuItem("Rename Folder...")) {
+                ImGui::TextDisabled(ICON_FA_FOLDER "  %s", node.name.c_str());
+                ImGui::Separator();
+
+                // ── Create sub-items ──────────────────────────────────────────
+                if (ImGui::BeginMenu("Create")) {
+                    if (ImGui::MenuItem(ICON_FA_CUBE "  Empty Child")) {
+                        HierarchyNode empty;
+                        empty.kind = HierarchyNode::OBJECT;
+                        // pick a unique name
+                        std::string eName = "GameObject";
+                        int ei = 1;
+                        auto nameUsed = [&](const std::string& n) {
+                            for (auto& o : ide.objects) if (o.name == n) return true;
+                            for (auto& l : ide.lights)  if (l.name == n) return true;
+                            return false;
+                            };
+                        while (nameUsed(eName)) eName = "GameObject_" + std::to_string(ei++);
+                        ide.bus.send("sphere " + eName + " 0 0 0");   // placeholder
+                        empty.name = eName;
+                        node.children.push_back(empty);
+                        ide.selection.SetSingle(eName);
+                        ide.sceneDirty = true;
+                    }
+                    ImGui::EndMenu();
+                }
+
+                ImGui::Separator();
+
+                // ── Prefab from folder ────────────────────────────────────────
+                if (ImGui::MenuItem(ICON_FA_BOXES_STACKED "  Create Prefab from Folder...")) {
+                    ide.createPrefabFromFolderName = node.name;
+                    ide.showCreatePrefabFromFolder = true;
+                }
+
+                ImGui::Separator();
+
+                // ── Folder management ─────────────────────────────────────────
+                if (ImGui::MenuItem(ICON_FA_PEN "  Rename Folder...")) {
                     strncpy_s(ide.renameOldName, sizeof(ide.renameOldName), node.name.c_str(), sizeof(ide.renameOldName) - 1);
                     strncpy_s(ide.renameNewName, sizeof(ide.renameNewName), node.name.c_str(), sizeof(ide.renameNewName) - 1);
                     ide.showRenameModal = true;
                 }
+                if (ImGui::MenuItem(ICON_FA_OBJECT_GROUP "  Select All Children")) {
+                    ide.selection.Clear();
+                    std::function<void(const std::vector<HierarchyNode>&)> selectAll =
+                        [&](const std::vector<HierarchyNode>& ch) {
+                        for (auto& c : ch) {
+                            if (c.kind != HierarchyNode::FOLDER) ide.selection.Add(c.name);
+                            else selectAll(c.children);
+                        }
+                        };
+                    selectAll(node.children);
+                }
                 ImGui::Separator();
-                if (ImGui::MenuItem("Delete Folder (keep children)")) {
+                ImGui::PushStyleColor(ImGuiCol_Text, { 1.f,0.4f,0.4f,1.f });
+                if (ImGui::MenuItem(ICON_FA_FOLDER_OPEN "  Dissolve Folder (keep children)")) {
                     for (auto& child : node.children)
                         ide.hierRoots.push_back(child);
                     node.children.clear();
                     node.name = "\x01__DELETE__";
                 }
+                if (ImGui::MenuItem(ICON_FA_TRASH "  Delete Folder and Contents")) {
+                    for (auto& child : node.children) {
+                        if (child.kind == HierarchyNode::LIGHT)
+                            ide.bus.send("removelight " + child.name);
+                        else if (child.kind == HierarchyNode::OBJECT)
+                            ide.bus.send("delete " + child.name);
+                    }
+                    node.children.clear();
+                    node.name = "\x01__DELETE__";
+                    ide.sceneDirty = true;
+                }
+                ImGui::PopStyleColor();
                 ImGui::EndPopup();
             }
 
@@ -2131,12 +2334,16 @@ static void DrawHierarchyNodes(std::vector<HierarchyNode>& nodes, IDEState& ide,
         bool rowClicked = ImGui::IsItemClicked(ImGuiMouseButton_Left) && !locked;
 
         // ── Drag source: drag this node to the Viewport to reposition it ────
+        // Also accepts a drop on a folder node (see folder context above).
         if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_None)) {
             HierarchyDragPayload hdp{};
             strncpy_s(hdp.name, sizeof(hdp.name),
                 node.name.c_str(), sizeof(hdp.name) - 1);
             hdp.isLight = isLight;
             ImGui::SetDragDropPayload(kHierarchyDragPayload, &hdp, sizeof(hdp));
+            // Also register the folder-into-folder payload (same data, different tag)
+            ImGui::SetDragDropPayload(IDEState::kHierFolderDropPayload,
+                node.name.c_str(), node.name.size() + 1);
             ImGui::TextUnformatted(isLight ? "Move Light" : "Move Object");
             ImGui::SameLine();
             ImGui::TextUnformatted(node.name.c_str());
@@ -2212,7 +2419,7 @@ static void DrawHierarchyNodes(std::vector<HierarchyNode>& nodes, IDEState& ide,
             ImGui::EndDragDropTarget();
         }
 
-        // Context menu (identique, mais agit sur la sélection)
+        // Context menu — Unity-style
         if (ImGui::BeginPopupContextItem(("hctx_" + node.name).c_str()))
         {
             if (!ide.selection.Contains(node.name)) {
@@ -2220,16 +2427,41 @@ static void DrawHierarchyNodes(std::vector<HierarchyNode>& nodes, IDEState& ide,
                 ide.bus.send("inspect " + node.name);
             }
 
-            ImGui::TextDisabled("  %s", node.name.c_str());
+            size_t selCount = ide.selection.Size();
+            ImGui::TextDisabled("  %s%s", node.name.c_str(),
+                selCount > 1 ? (" (+" + std::to_string(selCount - 1) + " more)").c_str() : "");
             ImGui::Separator();
 
-            if (ImGui::MenuItem("Rename...")) {
+            // ── Create sub-menu (Unity style) ────────────────────────────────
+            if (ImGui::BeginMenu("Create")) {
+                if (ImGui::MenuItem(ICON_FA_CUBE "  Empty GameObject")) {
+                    std::string eName = "GameObject";
+                    int ei = 1;
+                    auto nameUsed2 = [&](const std::string& n) {
+                        for (auto& o : ide.objects) if (o.name == n) return true;
+                        for (auto& l : ide.lights)  if (l.name == n) return true;
+                        return false;
+                        };
+                    while (nameUsed2(eName)) eName = "GameObject_" + std::to_string(ei++);
+                    ide.bus.send("sphere " + eName + " 0 0 0");
+                    ide.sceneDirty = true;
+                    ide.pendingSelection = eName;
+                    RefreshSceneList(ide);
+                }
+                ImGui::EndMenu();
+            }
+
+            ImGui::Separator();
+
+            // ── Rename ───────────────────────────────────────────────────────
+            if (ImGui::MenuItem(ICON_FA_PEN "  Rename...", "F2")) {
                 strncpy_s(ide.renameOldName, sizeof(ide.renameOldName), node.name.c_str(), sizeof(ide.renameOldName) - 1);
                 strncpy_s(ide.renameNewName, sizeof(ide.renameNewName), node.name.c_str(), sizeof(ide.renameNewName) - 1);
                 ide.showRenameModal = true;
             }
 
-            if (ImGui::MenuItem("Duplicate")) {
+            // ── Duplicate ────────────────────────────────────────────────────
+            if (ImGui::MenuItem(ICON_FA_COPY "  Duplicate", "Ctrl+D")) {
                 std::string newName = node.name + "_copy";
                 if (isCamera) {
                     if (pCam) {
@@ -2265,13 +2497,13 @@ static void DrawHierarchyNodes(std::vector<HierarchyNode>& nodes, IDEState& ide,
                 }
             }
 
-            if (ImGui::MenuItem("Copy")) {
+            if (ImGui::MenuItem(ICON_FA_SCISSORS "  Copy", "Ctrl+C")) {
                 ide.clipboardName = node.name;
                 ide.clipboardIsLight = isLight;
             }
 
             bool canPaste = !ide.clipboardName.empty();
-            if (ImGui::MenuItem("Paste", nullptr, false, canPaste)) {
+            if (ImGui::MenuItem(ICON_FA_PASTE "  Paste", "Ctrl+V", false, canPaste)) {
                 std::string newName = ide.clipboardName + "_copy";
                 if (!ide.clipboardIsLight) {
                     ide.bus.send("clone " + ide.clipboardName + " " + newName);
@@ -2294,7 +2526,25 @@ static void DrawHierarchyNodes(std::vector<HierarchyNode>& nodes, IDEState& ide,
 
             ImGui::Separator();
 
-            if (ImGui::MenuItem("Focus")) {
+            // ── Add Parent (Create Empty Parent) — Unity's "Create Empty Parent" ──
+            if (ImGui::MenuItem(ICON_FA_OBJECT_GROUP "  Add Parent (Create Empty Parent)")) {
+                ide.showAddParentModal = true;
+            }
+
+            // ── Group into Folder ─────────────────────────────────────────────
+            if (selCount >= 1) {
+                std::string groupLabel = selCount > 1
+                    ? (ICON_FA_FOLDER "  Group " + std::to_string(selCount) + " Objects into Folder...")
+                    : (ICON_FA_FOLDER "  Move to New Folder...");
+                if (ImGui::MenuItem(groupLabel.c_str())) {
+                    ide.showCreateFolder = true;
+                }
+            }
+
+            ImGui::Separator();
+
+            // ── Focus ─────────────────────────────────────────────────────────
+            if (ImGui::MenuItem(ICON_FA_MAGNIFYING_GLASS "  Focus", "F")) {
                 if (pObj) {
                     glm::vec3 target(pObj->px, pObj->py, pObj->pz);
                     ide.focus.Start(ide.sm->currentCamera, ide.editorFov, ide.viewportOrtho, ide.orthoSize, target, 5.f);
@@ -2307,36 +2557,70 @@ static void DrawHierarchyNodes(std::vector<HierarchyNode>& nodes, IDEState& ide,
 
             ImGui::Separator();
 
+            // ── Visibility / Lock ─────────────────────────────────────────────
             if (!isLight && pObj) {
                 bool vis = pObj->visible;
-                if (ImGui::MenuItem(vis ? "Hide" : "Show"))
+                if (ImGui::MenuItem(vis
+                    ? (ICON_FA_EYE_SLASH "  Hide")
+                    : (ICON_FA_EYE      "  Show"))) {
                     ide.bus.send("visible " + node.name + " " + (vis ? "false" : "true"));
-                if (ImGui::MenuItem(locked ? "Unlock" : "Lock"))
+                    ide.sceneDirty = true;
+                }
+                if (ImGui::MenuItem(locked
+                    ? (ICON_FA_LOCK_OPEN "  Unlock")
+                    : (ICON_FA_LOCK      "  Lock"))) {
                     pObj->locked = !pObj->locked;
+                    ide.sceneDirty = true;
+                }
+            }
+
+            // ── Properties (select only) ──────────────────────────────────────
+            if (ImGui::MenuItem(ICON_FA_CIRCLE_INFO "  Properties")) {
+                ide.selection.SetSingle(node.name);
+                ide.bus.send("inspect " + node.name);
             }
 
             ImGui::Separator();
 
+            // ── Create Prefab (single or multi) ──────────────────────────────
+            if (!isLight && !isCamera) {
+                if (selCount > 1) {
+                    if (ImGui::MenuItem(ICON_FA_BOXES_STACKED "  Create Prefab from Selection...")) {
+                        // Open multi-prefab modal (reuse folder path with empty folder name)
+                        ide.createPrefabFromFolderName = "";
+                        ide.showCreatePrefabFromFolder = true;
+                    }
+                }
+                else {
+                    if (ImGui::MenuItem(ICON_FA_BOX "  Create Prefab...")) {
+                        // Trigger single-object prefab modal via Inspector section
+                        ide.selection.SetSingle(node.name);
+                        ide.bus.send("inspect " + node.name);
+                    }
+                }
+            }
+
+            ImGui::Separator();
+
+            // ── Delete ────────────────────────────────────────────────────────
             ImGui::PushStyleColor(ImGuiCol_Text, { 1.f,0.4f,0.4f,1.f });
-            const char* deleteLabel = isLight ? "Remove Light" : isCamera ? "Remove Camera" : "Delete";
-            if (ImGui::MenuItem(deleteLabel)) {
+            const char* deleteLabel = isLight ? ICON_FA_TRASH "  Remove Light"
+                : isCamera ? ICON_FA_TRASH "  Remove Camera"
+                : ICON_FA_TRASH "  Delete";
+            if (ImGui::MenuItem(deleteLabel, "Del")) {
                 if (isCamera) {
-                    // Remove from ide.cameras and from sm->cameras
                     ide.cameras.erase(
                         std::remove_if(ide.cameras.begin(), ide.cameras.end(),
                             [&](const IDECamera& c) { return c.name == node.name; }),
                         ide.cameras.end());
-                    // Also remove the runtime Camera* from the scene
                     if (ide.sm && ide.sm->cameras) {
                         auto& sc = *ide.sm->cameras;
                         sc.erase(std::remove_if(sc.begin(), sc.end(),
                             [&](Camera* c) {
                                 for (auto& ic : ide.cameras) if (ic.runtimeCamera == c) return false;
-                                // If not in ide.cameras any more, it was the removed one
                                 return true;
                             }), sc.end());
                     }
-                    // Reset active play camera if we just removed cameras[0]
                     if (!ide.cameras.empty() && ide.savedEditorCamera == nullptr)
                         ide.sm->currentCamera = ide.cameras[0].runtimeCamera;
                 }
@@ -2422,6 +2706,7 @@ static void DrawTransformInspector(IDEState& ide, const std::string& target, IDE
                 std::snprintf(buf, sizeof(buf), "move %s %.4f %.4f %.4f", target.c_str(), p[0], p[1], p[2]);
                 ide.bus.send(buf);
                 ide.sceneDirty = true;
+                if (ide.prefabEditMode) ide.prefabEditDirty = true;
             }
 
             float rotStep = ide.snapEnabled ? ide.snapRotation : 0.5f;
@@ -2436,6 +2721,7 @@ static void DrawTransformInspector(IDEState& ide, const std::string& target, IDE
                 std::snprintf(buf, sizeof(buf), "rotate %s %.3f %.3f %.3f", target.c_str(), r[0], r[1], r[2]);
                 ide.bus.send(buf);
                 ide.sceneDirty = true;
+                if (ide.prefabEditMode) ide.prefabEditDirty = true;
             }
 
             float scStep = ide.snapEnabled ? ide.snapScale : 0.01f;
@@ -2450,6 +2736,7 @@ static void DrawTransformInspector(IDEState& ide, const std::string& target, IDE
                 std::snprintf(buf, sizeof(buf), "scale %s %.4f %.4f %.4f", target.c_str(), s[0], s[1], s[2]);
                 ide.bus.send(buf);
                 ide.sceneDirty = true;
+                if (ide.prefabEditMode) ide.prefabEditDirty = true;
             }
         }
 
@@ -2564,6 +2851,18 @@ static void DrawMaterialInspector(IDEState& ide, const std::string& target, IDEO
             std::snprintf(buf, sizeof(buf), "color %s %d %d %d %d", target.c_str(), r, g, b, a);
             ide.bus.send(buf);
             ide.sceneDirty = true;
+
+
+            BaseObject* baseObj = nullptr;
+            {
+                std::shared_lock<std::shared_mutex> lock(g_sceneMutex);
+                auto it = g_namedObjects.find(target);
+                if (it != g_namedObjects.end()) baseObj = it->second;
+            }
+            if (baseObj) {
+                baseObj->refreshVertexColors();  // Immediate refresh
+            }
+
             // Forcer un rafraîchissement pour que la couleur s'affiche immédiatement
             RefreshSceneList(ide);
         }
@@ -2629,6 +2928,7 @@ static void DrawRendererInspector(IDEState& ide, const std::string& target, IDEO
         ImGui::InputText("Tag##obj", ide.inspTag, sizeof(ide.inspTag));
         if (ImGui::IsItemDeactivatedAfterEdit()) {
             ide.bus.send(std::string("settag ") + target + " " + ide.inspTag);
+            ide.sceneDirty = true;
         }
     }
 
@@ -2789,6 +3089,7 @@ static void DrawScriptsInspector(IDEState& ide, const std::string& target, BaseO
                     else
                         ide.log.push(ConsoleLog::REPLY_ERR,
                             "[Inspector] Failed to attach script " + rec->displayName);
+                    ide.sceneDirty = true;
                 }
             }
             // Optionally handle HDR drops in the scripts section (unusual, but possible)
@@ -2817,6 +3118,7 @@ static void DrawScriptsInspector(IDEState& ide, const std::string& target, BaseO
                     newComp.compiledPath = "";
                     if (ide.scriptManager->LoadScript(guid, rec.path, newComp)) {
                         obj->scripts.push_back(newComp);
+                        ide.sceneDirty = true;
                     }
                     else {
                         ide.log.push(ConsoleLog::REPLY_ERR,
@@ -2872,6 +3174,7 @@ static void DrawScriptsInspector(IDEState& ide, const std::string& target, BaseO
             if (ImGui::Button("Remove Script")) {
                 ide.scriptManager->UnloadScript(comp);
                 obj->scripts.erase(obj->scripts.begin() + i);
+                ide.sceneDirty = true;
                 i--;
             }
         }
@@ -2906,6 +3209,7 @@ static void DrawRigidBodyInspector(IDEState& ide, BaseObject* obj)
             rb.object = obj;
             ide.rigidBodies[obj] = rb;
             ide.physicsWorld.Register(&ide.rigidBodies[obj]);
+            ide.sceneDirty = true;
             ide.log.push(ConsoleLog::INFO, "[Physics] RigidBody added to object");
         }
         ImGui::PopStyleColor();
@@ -2939,6 +3243,7 @@ static void DrawRigidBodyInspector(IDEState& ide, BaseObject* obj)
         if (ImGui::Button("Remove RigidBody")) {
             ide.physicsWorld.Unregister(&rb);
             ide.rigidBodies.erase(it);
+            ide.sceneDirty = true;
         }
         ImGui::PopStyleColor();
         ImGui::PopID();
@@ -2964,6 +3269,7 @@ static void DrawCollisionTriggerInspector(IDEState& ide, BaseObject* obj)
             CollisionTrigger ct;
             ct.object = obj;
             ide.collisionTriggers[obj] = ct;
+            ide.sceneDirty = true;
             ide.log.push(ConsoleLog::INFO, "[Physics] CollisionTrigger added to object");
         }
         ImGui::PopStyleColor();
@@ -2992,6 +3298,7 @@ static void DrawCollisionTriggerInspector(IDEState& ide, BaseObject* obj)
         ImGui::PushStyleColor(ImGuiCol_Button, { 0.7f, 0.2f, 0.2f, 1.f });
         if (ImGui::Button("Remove CollisionTrigger")) {
             ide.collisionTriggers.erase(it);
+            ide.sceneDirty = true;
         }
         ImGui::PopStyleColor();
         ImGui::PopID();
@@ -3130,6 +3437,7 @@ static void DrawMaterialTextureLayersEditor(IDEState& ide, BaseObject* obj)
                             ide.renderer->texManager.load(texDesc);
                             layer.texture = texDesc;
                             mat->dirty = true;
+                            ide.sceneDirty = true;
                         }
                     }
                     ImGui::EndDragDropTarget();
@@ -3157,7 +3465,10 @@ static void DrawMaterialTextureLayersEditor(IDEState& ide, BaseObject* obj)
                     layer.maskType = static_cast<LayerMaskType>(maskTypeInt);
                 }
 
-                if (changed) mat->dirty = true;
+                if (changed) {
+                    mat->dirty = true;
+                    ide.sceneDirty = true;
+                }
 
                 ImGui::Spacing();
                 ImGui::PushStyleColor(ImGuiCol_Button, { 0.7f, 0.2f, 0.2f, 1.f });
@@ -3172,6 +3483,7 @@ static void DrawMaterialTextureLayersEditor(IDEState& ide, BaseObject* obj)
         if (toRemove >= 0) {
             mat->textureLayers.erase(mat->textureLayers.begin() + toRemove);
             mat->dirty = true;
+            ide.sceneDirty = true;
         }
 
         if ((int)mat->textureLayers.size() < 8)
@@ -3179,6 +3491,7 @@ static void DrawMaterialTextureLayersEditor(IDEState& ide, BaseObject* obj)
             if (ImGui::Button("+ Add Texture Layer", { -1, 0 })) {
                 mat->textureLayers.push_back(TextureLayer{});
                 mat->dirty = true;
+                ide.sceneDirty = true;
             }
         }
         else {
@@ -3188,6 +3501,511 @@ static void DrawMaterialTextureLayersEditor(IDEState& ide, BaseObject* obj)
         ImGui::PopID();
     }
     else { ImGui::PopStyleColor(); }
+}
+
+
+
+static glm::vec3 GetCameraSpawnPos(IDEState& ide, float dist = 6.f)
+{
+    if (!ide.sm || !ide.sm->currentCamera) return glm::vec3(0.f);
+    Camera* cam = ide.sm->currentCamera;
+    glm::vec3 pos = cam->transform.position.ToGLM();
+    glm::vec3 fwd = glm::normalize(cam->transform.forward().ToGLM());
+    return pos + fwd * dist;
+}
+
+// =============================================================================
+//  Prefab Edit Mode  — Unity-style isolated prefab editing
+//  EnterPrefabEditMode: saves scene snapshot, loads prefab objects for editing.
+//  SaveAndExitPrefabEditMode: serializes edits back to the .honprefab file and
+//    restores the main scene snapshot.
+//  ExitPrefabEditModeDiscard: exits without saving (restores scene snapshot).
+// =============================================================================
+
+// Forward-declare so EnterPrefabEditMode can call it
+static std::string InstantiatePrefab(IDEState& ide, const std::string& path);
+
+static void EnterPrefabEditMode(IDEState& ide, const std::string& path)
+{
+    if (ide.prefabEditMode) return;  // already editing a prefab
+
+    // ── 1. Snapshot the current scene ──────────────────────────────────────
+    ide.prefabEditSceneSnapshot = ide.objects;
+    ide.prefabEditLightSnapshot = ide.lights;
+
+    // ── 2. Clear scene visuals (keep engine scene untouched via bus) ────────
+    ide.bus.send("clearscene");
+    ide.selection.Clear();
+
+    // ── 3. Load prefab objects from JSON into ide.objects ──────────────────
+    std::ifstream f(path);
+    if (!f.is_open()) {
+        ide.log.push(ConsoleLog::REPLY_ERR, "[PrefabEdit] Cannot open: " + path);
+        // Restore immediately
+        ide.objects = ide.prefabEditSceneSnapshot;
+        ide.lights = ide.prefabEditLightSnapshot;
+        ide.bus.send("clearscene");
+        for (auto& o : ide.objects) {
+            char buf[512];
+            std::snprintf(buf, sizeof(buf), "obj %s _ %.4f %.4f %.4f",
+                o.name.c_str(), o.px, o.py, o.pz);
+            ide.bus.send(buf);
+        }
+        return;
+    }
+    std::string json((std::istreambuf_iterator<char>(f)),
+        std::istreambuf_iterator<char>());
+    f.close();
+
+    ide.prefabEditObjects.clear();
+    ide.objects.clear();
+    ide.lights.clear();
+
+    // Parse multi-object prefab  {"name":..., "objects":[...]}
+    std::string prefabDisplayName = JsonGet(json, "name");
+    if (prefabDisplayName.empty())
+        prefabDisplayName = fs::path(path).stem().string();
+
+    // Helper: extract JSON array content between first '[' and its matching ']'
+    auto extractArray = [&](const std::string& arrayKey) -> std::string {
+        std::string marker = "\"" + arrayKey + "\"";
+        auto pos = json.find(marker);
+        if (pos == std::string::npos) return "";
+        pos = json.find('[', pos);
+        if (pos == std::string::npos) return "";
+        int depth = 0;
+        size_t start = pos;
+        for (size_t i = pos; i < json.size(); ++i) {
+            if (json[i] == '[') ++depth;
+            else if (json[i] == ']') { --depth; if (depth == 0) return json.substr(start + 1, i - start - 1); }
+        }
+        return "";
+        };
+
+    std::string objArray = extractArray("objects");
+
+    auto parseFloat = [](const std::string& src, const std::string& key, float def = 0.f) -> float {
+        std::string val = JsonGet(src, key);
+        if (val.empty()) return def;
+        try { return std::stof(val); }
+        catch (...) { return def; }
+        };
+
+    if (!objArray.empty()) {
+        // Split on },{  — simple object tokeniser
+        std::vector<std::string> tokens;
+        int depth = 0; size_t start = 0;
+        for (size_t i = 0; i < objArray.size(); ++i) {
+            if (objArray[i] == '{') { if (depth == 0) start = i; ++depth; }
+            else if (objArray[i] == '}') {
+                --depth;
+                if (depth == 0)
+                    tokens.push_back(objArray.substr(start, i - start + 1));
+            }
+        }
+        for (auto& tok : tokens) {
+            IDEObject o;
+            o.name = JsonGet(tok, "name");
+            if (o.name.empty()) o.name = "PrefabObject";
+            // Read object type and asset path
+            o.type = JsonGet(tok, "type");
+            if (o.type.empty()) o.type = "sphere";
+            o.assetPath = JsonGet(tok, "assetPath");
+            // Parse flat px/py/pz (CreatePrefabFromFolder / legacy format)
+            {
+                std::string v;
+                v = JsonGet(tok, "px"); if (!v.empty()) { try { o.px = std::stof(v); } catch (...) {} }
+                v = JsonGet(tok, "py"); if (!v.empty()) { try { o.py = std::stof(v); } catch (...) {} }
+                v = JsonGet(tok, "pz"); if (!v.empty()) { try { o.pz = std::stof(v); } catch (...) {} }
+                v = JsonGet(tok, "sx"); if (!v.empty()) { try { o.sx = std::stof(v); } catch (...) {} }
+                else o.sx = 1.f;
+                v = JsonGet(tok, "sy"); if (!v.empty()) { try { o.sy = std::stof(v); } catch (...) {} }
+                else o.sy = 1.f;
+                v = JsonGet(tok, "sz"); if (!v.empty()) { try { o.sz = std::stof(v); } catch (...) {} }
+                else o.sz = 1.f;
+                v = JsonGet(tok, "rw"); if (!v.empty()) { try { o.rw = std::stof(v); } catch (...) {} }
+                else o.rw = 1.f;
+                v = JsonGet(tok, "rx"); if (!v.empty()) { try { o.rx = std::stof(v); } catch (...) {} }
+                v = JsonGet(tok, "ry"); if (!v.empty()) { try { o.ry = std::stof(v); } catch (...) {} }
+                v = JsonGet(tok, "rz"); if (!v.empty()) { try { o.rz = std::stof(v); } catch (...) {} }
+            }
+            // Also parse from nested "transform" sub-object (SaveAndExitPrefabEditMode format)
+            auto tpos = tok.find("\"transform\"");
+            if (tpos != std::string::npos) {
+                auto tstart = tok.find('{', tpos);
+                auto tend = tok.find('}', tstart);
+                if (tstart != std::string::npos && tend != std::string::npos) {
+                    std::string tsub = tok.substr(tstart, tend - tstart + 1);
+                    o.px = parseFloat(tsub, "px"); o.py = parseFloat(tsub, "py"); o.pz = parseFloat(tsub, "pz");
+                    o.sx = parseFloat(tsub, "sx", 1.f); o.sy = parseFloat(tsub, "sy", 1.f); o.sz = parseFloat(tsub, "sz", 1.f);
+                    o.rw = parseFloat(tsub, "rw", 1.f); o.rx = parseFloat(tsub, "rx"); o.ry = parseFloat(tsub, "ry"); o.rz = parseFloat(tsub, "rz");
+                }
+            }
+            // Material color
+            {
+                std::string v;
+                v = JsonGet(tok, "cr"); if (!v.empty()) { try { o.cr = std::stoi(v); } catch (...) {} }
+                v = JsonGet(tok, "cg"); if (!v.empty()) { try { o.cg = std::stoi(v); } catch (...) {} }
+                v = JsonGet(tok, "cb"); if (!v.empty()) { try { o.cb = std::stoi(v); } catch (...) {} }
+                v = JsonGet(tok, "ca"); if (!v.empty()) { try { o.ca = std::stoi(v); } catch (...) {} }
+            }
+            // Visible flag
+            {
+                std::string v = JsonGet(tok, "visible");
+                if (v == "false") o.visible = false;
+            }
+            ide.prefabEditObjects.push_back(o);
+            ide.objects.push_back(o);
+        }
+    }
+    else {
+        // Legacy single-object prefab
+        IDEObject o;
+        o.name = prefabDisplayName;
+        o.type = JsonGet(json, "type");
+        if (o.type.empty()) o.type = "sphere";
+        o.assetPath = JsonGet(json, "assetPath");
+        auto tpos = json.find("\"transform\"");
+        if (tpos != std::string::npos) {
+            auto tstart = json.find('{', tpos);
+            auto tend = json.find('}', tstart);
+            if (tstart != std::string::npos && tend != std::string::npos) {
+                std::string tsub = json.substr(tstart, tend - tstart + 1);
+                auto parseF = [&](const std::string& k, float def = 0.f) {
+                    std::string v = JsonGet(tsub, k); if (v.empty()) return def; try { return std::stof(v); }
+                    catch (...) { return def; }
+                    };
+                o.px = parseF("px"); o.py = parseF("py"); o.pz = parseF("pz");
+                o.sx = parseF("sx", 1.f); o.sy = parseF("sy", 1.f); o.sz = parseF("sz", 1.f);
+                o.rw = parseF("rw", 1.f); o.rx = parseF("rx"); o.ry = parseF("ry"); o.rz = parseF("rz");
+            }
+        }
+        ide.prefabEditObjects.push_back(o);
+        ide.objects.push_back(o);
+    }
+
+    // ── 4. Spawn loaded objects into the engine scene for visual editing ────
+    for (auto& o : ide.objects) {
+        char buf[512];
+        std::string t = o.type.empty() ? "sphere" : o.type;
+        if (t == "plane") {
+            std::snprintf(buf, sizeof(buf), "plane %s %.4f %.4f %.4f", o.name.c_str(), o.px, o.py, o.pz);
+        }
+        else if (t == "rect") {
+            std::snprintf(buf, sizeof(buf), "rect %s %.4f %.4f %.4f", o.name.c_str(), o.px, o.py, o.pz);
+        }
+        else if (t == "obj" && !o.assetPath.empty()) {
+            std::snprintf(buf, sizeof(buf), "obj %s \"%s\" %.4f %.4f %.4f", o.name.c_str(), o.assetPath.c_str(), o.px, o.py, o.pz);
+        }
+        else if (t == "gltf" && !o.assetPath.empty()) {
+            std::snprintf(buf, sizeof(buf), "gltf %s \"%s\" %.4f %.4f %.4f", o.name.c_str(), o.assetPath.c_str(), o.px, o.py, o.pz);
+        }
+        else {
+            std::snprintf(buf, sizeof(buf), "sphere %s %.4f %.4f %.4f", o.name.c_str(), o.px, o.py, o.pz);
+        }
+        ide.bus.send(buf);
+        std::snprintf(buf, sizeof(buf), "scale %s %.4f %.4f %.4f",
+            o.name.c_str(), o.sx, o.sy, o.sz);
+        ide.bus.send(buf);
+    }
+
+    // ── 5. Flip into prefab edit mode ──────────────────────────────────────
+    ide.prefabEditMode = true;
+    ide.prefabEditPath = path;
+    ide.prefabEditName = prefabDisplayName;
+    ide.prefabEditDirty = false;
+    ide.sceneDirty = false;
+
+    ide.toastMgr.Push("Editing prefab: " + prefabDisplayName, Toast::Success, 2.f);
+    ide.log.push(ConsoleLog::INFO, "[PrefabEdit] Entered edit mode for: " + path);
+}
+
+// Serialize the current ide.objects back into the .honprefab file and exit.
+static void SaveAndExitPrefabEditMode(IDEState& ide)
+{
+    if (!ide.prefabEditMode) return;
+
+    // ── Serialize ide.objects → .honprefab ─────────────────────────────────
+    std::ofstream f(ide.prefabEditPath);
+    if (f.is_open()) {
+        f << "{\n";
+        f << "  \"name\": \"" << ide.prefabEditName << "\",\n";
+        f << "  \"objects\": [\n";
+        // Calculate base position from first object so all positions are stored relative
+        float baseX = 0.f, baseY = 0.f, baseZ = 0.f;
+        if (!ide.objects.empty()) {
+            baseX = ide.objects[0].px;
+            baseY = ide.objects[0].py;
+            baseZ = ide.objects[0].pz;
+        }
+        for (size_t i = 0; i < ide.objects.size(); ++i) {
+            const auto& o = ide.objects[i];
+            f << "    {\n";
+            f << "      \"name\": \"" << o.name << "\",\n";
+            f << "      \"type\": \"" << (o.type.empty() ? "sphere" : o.type) << "\",\n";
+            if (!o.assetPath.empty())
+                f << "      \"assetPath\": \"" << o.assetPath << "\",\n";
+            f << "      \"transform\": {\n";
+            // Store positions relative to first object (prefab origin)
+            f << "        \"px\":" << (o.px - baseX) << ", \"py\":" << (o.py - baseY) << ", \"pz\":" << (o.pz - baseZ) << ",\n";
+            f << "        \"sx\":" << o.sx << ", \"sy\":" << o.sy << ", \"sz\":" << o.sz << ",\n";
+            f << "        \"rw\":" << o.rw << ", \"rx\":" << o.rx << ", \"ry\":" << o.ry << ", \"rz\":" << o.rz << "\n";
+            f << "      },\n";
+            f << "      \"scripts\": []\n";
+            f << "    }";
+            if (i + 1 < ide.objects.size()) f << ",";
+            f << "\n";
+        }
+        f << "  ]\n}\n";
+        f.close();
+        ide.toastMgr.Push("Prefab saved: " + ide.prefabEditName, Toast::Success, 2.5f);
+        ide.log.push(ConsoleLog::REPLY_OK, "[PrefabEdit] Saved: " + ide.prefabEditPath);
+        ide.assetBrowser.dirDirty = true;
+    }
+    else {
+        ide.log.push(ConsoleLog::REPLY_ERR, "[PrefabEdit] Could not write: " + ide.prefabEditPath);
+    }
+
+    // ── Restore main scene ─────────────────────────────────────────────────
+    ide.bus.send("clearscene");
+    ide.objects = ide.prefabEditSceneSnapshot;
+    ide.lights = ide.prefabEditLightSnapshot;
+    for (auto& o : ide.objects) {
+        char buf[512];
+        std::string t = o.type.empty() ? "sphere" : o.type;
+        if (t == "plane") {
+            std::snprintf(buf, sizeof(buf), "plane %s %.4f %.4f %.4f", o.name.c_str(), o.px, o.py, o.pz);
+        }
+        else if (t == "rect") {
+            std::snprintf(buf, sizeof(buf), "rect %s %.4f %.4f %.4f", o.name.c_str(), o.px, o.py, o.pz);
+        }
+        else if (t == "obj" && !o.assetPath.empty()) {
+            std::snprintf(buf, sizeof(buf), "obj %s \"%s\" %.4f %.4f %.4f", o.name.c_str(), o.assetPath.c_str(), o.px, o.py, o.pz);
+        }
+        else if (t == "gltf" && !o.assetPath.empty()) {
+            std::snprintf(buf, sizeof(buf), "gltf %s \"%s\" %.4f %.4f %.4f", o.name.c_str(), o.assetPath.c_str(), o.px, o.py, o.pz);
+        }
+        else {
+            std::snprintf(buf, sizeof(buf), "sphere %s %.4f %.4f %.4f", o.name.c_str(), o.px, o.py, o.pz);
+        }
+        ide.bus.send(buf);
+    }
+
+    ide.prefabEditMode = false;
+    ide.prefabEditPath.clear();
+    ide.prefabEditName.clear();
+    ide.prefabEditObjects.clear();
+    ide.prefabEditSceneSnapshot.clear();
+    ide.prefabEditLightSnapshot.clear();
+    ide.prefabEditDirty = false;
+    ide.selection.Clear();
+    ide.sceneDirty = false;
+}
+
+// Exit without saving — restores the main scene snapshot.
+static void ExitPrefabEditModeDiscard(IDEState& ide)
+{
+    if (!ide.prefabEditMode) return;
+
+    ide.bus.send("clearscene");
+    ide.objects = ide.prefabEditSceneSnapshot;
+    ide.lights = ide.prefabEditLightSnapshot;
+    for (auto& o : ide.objects) {
+        char buf[512];
+        std::string t = o.type.empty() ? "sphere" : o.type;
+        if (t == "plane") {
+            std::snprintf(buf, sizeof(buf), "plane %s %.4f %.4f %.4f", o.name.c_str(), o.px, o.py, o.pz);
+        }
+        else if (t == "rect") {
+            std::snprintf(buf, sizeof(buf), "rect %s %.4f %.4f %.4f", o.name.c_str(), o.px, o.py, o.pz);
+        }
+        else if (t == "obj" && !o.assetPath.empty()) {
+            std::snprintf(buf, sizeof(buf), "obj %s \"%s\" %.4f %.4f %.4f", o.name.c_str(), o.assetPath.c_str(), o.px, o.py, o.pz);
+        }
+        else if (t == "gltf" && !o.assetPath.empty()) {
+            std::snprintf(buf, sizeof(buf), "gltf %s \"%s\" %.4f %.4f %.4f", o.name.c_str(), o.assetPath.c_str(), o.px, o.py, o.pz);
+        }
+        else {
+            std::snprintf(buf, sizeof(buf), "sphere %s %.4f %.4f %.4f", o.name.c_str(), o.px, o.py, o.pz);
+        }
+        ide.bus.send(buf);
+    }
+
+    ide.prefabEditMode = false;
+    ide.prefabEditPath.clear();
+    ide.prefabEditName.clear();
+    ide.prefabEditObjects.clear();
+    ide.prefabEditSceneSnapshot.clear();
+    ide.prefabEditLightSnapshot.clear();
+    ide.prefabEditDirty = false;
+    ide.selection.Clear();
+    ide.sceneDirty = false;
+    ide.toastMgr.Push("Prefab edit discarded.", Toast::Info, 1.5f);
+    ide.log.push(ConsoleLog::INFO, "[PrefabEdit] Exited without saving.");
+}
+
+// =============================================================================
+//  Prefab instantiation helper
+//  Reads a .honprefab JSON file and spawns all listed objects into the scene.
+//  Returns the name of the first spawned object (for selection), or empty.
+// =============================================================================
+static std::string InstantiatePrefab(IDEState& ide, const std::string& path)
+{
+    std::ifstream f(path);
+    if (!f.is_open()) {
+        ide.log.push(ConsoleLog::REPLY_ERR, "[Prefab] Cannot open: " + path);
+        return {};
+    }
+    std::string json((std::istreambuf_iterator<char>(f)),
+        std::istreambuf_iterator<char>());
+    f.close();
+
+    // Determine a base spawn position in front of the editor camera
+    glm::vec3 spawnOrigin = GetCameraSpawnPos(ide);
+
+    // Parse the "objects" array.
+    // Format: {"name":"Prefab","objects":[{"name":"Cube","px":0,...},…]}
+    // We do a simple linear scan so we don't need a full JSON library.
+    std::string firstSpawned;
+
+    auto parseFloat = [&](const std::string& src, const std::string& key, float fallback) -> float {
+        auto pos = src.find("\"" + key + "\":");
+        if (pos == std::string::npos) return fallback;
+        pos += key.size() + 3;
+        try { return std::stof(src.substr(pos, 32)); }
+        catch (...) { return fallback; }
+        };
+    auto parseStr = [&](const std::string& src, const std::string& key) -> std::string {
+        auto pos = src.find("\"" + key + "\":");
+        if (pos == std::string::npos) return {};
+        pos += key.size() + 3;
+        if (pos >= src.size() || src[pos] != '"') return {};
+        ++pos;
+        std::string v;
+        while (pos < src.size() && src[pos] != '"') v += src[pos++];
+        return v;
+        };
+
+    // Find the "objects" array
+    auto arrStart = json.find("\"objects\":");
+    if (arrStart == std::string::npos) {
+        // Single-object prefab (legacy format — no "objects" array, just a root transform)
+        std::string stem = fs::path(path).stem().string();
+        int n = 1; std::string nm = stem;
+        while (g_namedObjects.count(nm) || g_namedLights.count(nm))
+            nm = stem + "_" + std::to_string(n++);
+
+        // Use only the spawn origin — stored position is always zero for single-object prefabs
+        float px = spawnOrigin.x;
+        float py = spawnOrigin.y;
+        float pz = spawnOrigin.z;
+        float sx = parseFloat(json, "sx", 1);
+        float sy = parseFloat(json, "sy", 1);
+        float sz = parseFloat(json, "sz", 1);
+
+        std::string objType = parseStr(json, "type");
+        if (objType.empty()) objType = "sphere";  // backward compat
+        std::string assetPath = parseStr(json, "assetPath");
+
+        char buf[512];
+        if (objType == "plane") {
+            std::snprintf(buf, sizeof(buf), "plane %s %.3f %.3f %.3f", nm.c_str(), px, py, pz);
+        }
+        else if (objType == "rect") {
+            std::snprintf(buf, sizeof(buf), "rect %s %.3f %.3f %.3f", nm.c_str(), px, py, pz);
+        }
+        else if (objType == "obj" && !assetPath.empty()) {
+            std::snprintf(buf, sizeof(buf), "obj %s \"%s\" %.3f %.3f %.3f", nm.c_str(), assetPath.c_str(), px, py, pz);
+        }
+        else if (objType == "gltf" && !assetPath.empty()) {
+            std::snprintf(buf, sizeof(buf), "gltf %s \"%s\" %.3f %.3f %.3f", nm.c_str(), assetPath.c_str(), px, py, pz);
+        }
+        else {
+            std::snprintf(buf, sizeof(buf), "sphere %s %.3f %.3f %.3f", nm.c_str(), px, py, pz);
+        }
+        ide.bus.send(buf);
+        if (std::fabs(sx - 1) > 0.001f || std::fabs(sy - 1) > 0.001f || std::fabs(sz - 1) > 0.001f) {
+            std::snprintf(buf, sizeof(buf), "scale %s %.4f %.4f %.4f", nm.c_str(), sx, sy, sz);
+            ide.bus.send(buf);
+        }
+        firstSpawned = nm;
+    }
+    else {
+        // Multi-object prefab
+        arrStart = json.find('[', arrStart);
+        if (arrStart == std::string::npos) return {};
+        size_t depth = 0, pos = arrStart;
+        bool isFirstObject = true;
+        while (pos < json.size()) {
+            char ch = json[pos];
+            if (ch == '[' || ch == '{') ++depth;
+            else if (ch == ']' || ch == '}') { if (--depth == 0) break; }
+            // Parse each object block between { }
+            if (ch == '{' && depth == 2) {
+                // Find matching }
+                size_t blockStart = pos, blockDepth = 0, bp = pos;
+                while (bp < json.size()) {
+                    if (json[bp] == '{') ++blockDepth;
+                    else if (json[bp] == '}') { if (--blockDepth == 0) break; }
+                    ++bp;
+                }
+                std::string block = json.substr(blockStart, bp - blockStart + 1);
+
+                std::string objName = parseStr(block, "name");
+                if (objName.empty()) objName = "PrefabObject";
+                // Make unique
+                std::string nm = objName; int n = 1;
+                while (g_namedObjects.count(nm) || g_namedLights.count(nm))
+                    nm = objName + "_" + std::to_string(n++);
+
+                // Stored positions are relative to the prefab origin — add spawn origin
+                float px = parseFloat(block, "px", 0) + spawnOrigin.x;
+                float py = parseFloat(block, "py", 0) + spawnOrigin.y;
+                float pz = parseFloat(block, "pz", 0) + spawnOrigin.z;
+                float sx = parseFloat(block, "sx", 1);
+                float sy = parseFloat(block, "sy", 1);
+                float sz = parseFloat(block, "sz", 1);
+
+                std::string objType = parseStr(block, "type");
+                if (objType.empty()) objType = "sphere";  // backward compat
+                std::string assetPath = parseStr(block, "assetPath");
+
+                char buf[512];
+                if (objType == "plane") {
+                    std::snprintf(buf, sizeof(buf), "plane %s %.3f %.3f %.3f", nm.c_str(), px, py, pz);
+                }
+                else if (objType == "rect") {
+                    std::snprintf(buf, sizeof(buf), "rect %s %.3f %.3f %.3f", nm.c_str(), px, py, pz);
+                }
+                else if (objType == "obj" && !assetPath.empty()) {
+                    std::snprintf(buf, sizeof(buf), "obj %s \"%s\" %.3f %.3f %.3f", nm.c_str(), assetPath.c_str(), px, py, pz);
+                }
+                else if (objType == "gltf" && !assetPath.empty()) {
+                    std::snprintf(buf, sizeof(buf), "gltf %s \"%s\" %.3f %.3f %.3f", nm.c_str(), assetPath.c_str(), px, py, pz);
+                }
+                else {
+                    std::snprintf(buf, sizeof(buf), "sphere %s %.3f %.3f %.3f", nm.c_str(), px, py, pz);
+                }
+                ide.bus.send(buf);
+                if (std::fabs(sx - 1) > 0.001f || std::fabs(sy - 1) > 0.001f || std::fabs(sz - 1) > 0.001f) {
+                    std::snprintf(buf, sizeof(buf), "scale %s %.4f %.4f %.4f", nm.c_str(), sx, sy, sz);
+                    ide.bus.send(buf);
+                }
+
+                if (firstSpawned.empty()) firstSpawned = nm;
+                pos = bp;
+            }
+            ++pos;
+        }
+    }
+
+    if (!firstSpawned.empty()) {
+        ide.sceneDirty = true;
+        ide.toastMgr.Push("Prefab instantiated: " + fs::path(path).stem().string(), Toast::Success, 2.f);
+        RefreshSceneList(ide);
+        ide.log.push(ConsoleLog::REPLY_OK, "[Prefab] Instantiated: " + path);
+    }
+    return firstSpawned;
 }
 
 // =============================================================================
@@ -3213,19 +4031,32 @@ static void DrawPrefabSection(IDEState& ide, const std::string& target, BaseObje
         {
             // Build a .honprefab JSON file
             std::string outDir = std::string(ide.project.rootFolder).empty()
-                ? "assets/prefabs/" : (std::string(ide.project.rootFolder) + "/assets/prefabs/");
+                ? "assets/prefabs/" : (fs::path(ide.project.rootFolder) / "assets" / "prefabs" / "").string();
             fs::create_directories(outDir);
             std::string outPath = outDir + prefabName + ".honprefab";
 
             std::ofstream f(outPath);
             if (f.is_open())
             {
+                // Determine object type
+                std::string objType = "sphere";
+                if (dynamic_cast<Plane*>(obj)) objType = "plane";
+                else if (dynamic_cast<HonHengine::Rectangle*>(obj)) objType = "rect";
+                else if (!obj->tag.empty()) {
+                    if (obj->tag.rfind("OBJ:", 0) == 0) objType = "obj";
+                    else if (obj->tag.rfind("GLTF:", 0) == 0) objType = "gltf";
+                }
+
                 f << "{\n";
                 f << "  \"name\": \"" << prefabName << "\",\n";
+                f << "  \"type\": \"" << objType << "\",\n";
+                if (objType == "obj" || objType == "gltf") {
+                    std::string ap = obj->tag.substr(objType == "obj" ? 4 : 5);
+                    f << "  \"assetPath\": \"" << ap << "\",\n";
+                }
                 f << "  \"transform\": {\n";
-                f << "    \"px\":" << obj->transform.position.x
-                    << ", \"py\":" << obj->transform.position.y
-                    << ", \"pz\":" << obj->transform.position.z << ",\n";
+                // Store zeroed position so instantiation uses the spawn origin correctly
+                f << "    \"px\":0.0, \"py\":0.0, \"pz\":0.0,\n";
                 f << "    \"sx\":" << obj->transform.scale.x
                     << ", \"sy\":" << obj->transform.scale.y
                     << ", \"sz\":" << obj->transform.scale.z << ",\n";
@@ -3262,7 +4093,7 @@ static void DrawPrefabSection(IDEState& ide, const std::string& target, BaseObje
 
                 // Register in asset DB
                 auto& rec = ide.assetDb.Register(outPath);
-                ide.assetDb.Save(".honassets");
+                ide.assetDb.Save(ide.HonAssetsPath());
                 ide.toastMgr.Push("Prefab saved: " + outPath, Toast::Success, 2.5f);
                 ide.prefabSourceGUID[target] = rec.guid.ToString();
                 ide.assetBrowser.dirDirty = true;
@@ -3287,12 +4118,63 @@ static void DrawPrefabSection(IDEState& ide, const std::string& target, BaseObje
     {
         ImGui::TextDisabled("Prefab source: %s", pfIt->second.c_str());
         if (ImGui::SmallButton("Apply to Prefab")) {
-            ide.log.push(ConsoleLog::INFO,
-                "[Prefab] Apply-to-prefab not yet implemented.");
+            // Find the source prefab file and overwrite it with current transforms
+            AssetRecord* rec = ide.assetDb.FindByGUID(pfIt->second);
+            if (rec && !rec->path.empty() && obj) {
+                std::ofstream pf(rec->path);
+                if (pf.is_open()) {
+                    // Determine object type
+                    std::string objType2 = "sphere";
+                    if (dynamic_cast<Plane*>(obj)) objType2 = "plane";
+                    else if (dynamic_cast<HonHengine::Rectangle*>(obj)) objType2 = "rect";
+                    else if (!obj->tag.empty()) {
+                        if (obj->tag.rfind("OBJ:", 0) == 0) objType2 = "obj";
+                        else if (obj->tag.rfind("GLTF:", 0) == 0) objType2 = "gltf";
+                    }
+                    pf << "{\n";
+                    pf << "  \"name\": \"" << fs::path(rec->path).stem().string() << "\",\n";
+                    pf << "  \"type\": \"" << objType2 << "\",\n";
+                    if (objType2 == "obj" || objType2 == "gltf") {
+                        std::string ap2 = obj->tag.substr(objType2 == "obj" ? 4 : 5);
+                        pf << "  \"assetPath\": \"" << ap2 << "\",\n";
+                    }
+                    pf << "  \"transform\": {\n";
+                    // Store zeroed position so instantiation uses the spawn origin correctly
+                    pf << "    \"px\":0.0, \"py\":0.0, \"pz\":0.0,\n";
+                    pf << "    \"sx\":" << obj->transform.scale.x
+                        << ", \"sy\":" << obj->transform.scale.y
+                        << ", \"sz\":" << obj->transform.scale.z << ",\n";
+                    pf << "    \"rw\":" << obj->transform.rotation.w
+                        << ", \"rx\":" << obj->transform.rotation.x
+                        << ", \"ry\":" << obj->transform.rotation.y
+                        << ", \"rz\":" << obj->transform.rotation.z << "\n";
+                    pf << "  },\n";
+                    // Preserve scripts
+                    pf << "  \"scripts\": [";
+                    bool first = true;
+                    for (auto& sc : obj->scripts) {
+                        if (!first) pf << ", ";
+                        pf << "\"" << sc.scriptGUID << "\"";
+                        first = false;
+                    }
+                    pf << "]\n}\n";
+                    pf.close();
+                    ide.toastMgr.Push("Applied to prefab: " + rec->displayName, Toast::Success, 2.f);
+                    ide.assetBrowser.dirDirty = true;
+                    if (ide.prefabEditMode && ide.prefabEditPath == rec->path)
+                        ide.prefabEditDirty = false;
+                }
+                else {
+                    ide.log.push(ConsoleLog::REPLY_ERR, "[Prefab] Could not write: " + rec->path);
+                }
+            }
+            else {
+                ide.log.push(ConsoleLog::INFO,
+                    "[Prefab] Apply-to-prefab: source asset not found in database.");
+            }
         }
     }
 }
-
 // =============================================================================
 //  Multi-Object Transform Editing
 // =============================================================================
@@ -3527,7 +4409,7 @@ static void DrawToolchainWindow(IDEState& ide)
                 ScriptManager::AddLibraryPath(fs::path(lib));
             for (auto& lnk : es.linkLibraries)
                 ScriptManager::AddLinkLibrary(lnk);
-            es.Save("ide_settings.ini");
+            es.Save(ide.EditorSettingsPath());
             ide.toastMgr.Push("Toolchain settings applied.", Toast::Success, 2.0f);
         }
     }
@@ -3554,7 +4436,7 @@ static void DrawScriptWizardModal(IDEState& ide)
         if (ImGui::Button("Create", { 120, 0 }))
         {
             std::string scriptDir = std::string(ide.project.rootFolder).empty()
-                ? "scripts/" : (std::string(ide.project.rootFolder) + "/scripts/");
+                ? "scripts/" : (fs::path(ide.project.rootFolder) / "scripts" / "").string();
             fs::create_directories(scriptDir);
             std::string outPath = scriptDir + ide.newScriptName + ".cpp";
 
@@ -3580,7 +4462,7 @@ static void DrawScriptWizardModal(IDEState& ide)
 
                 // Register in asset DB
                 auto& rec = ide.assetDb.Register(outPath);
-                ide.assetDb.Save(".honassets");
+                ide.assetDb.Save(ide.HonAssetsPath());
                 ide.assetBrowser.dirDirty = true;
 
                 // Attempt to compile
@@ -3655,6 +4537,7 @@ static void DrawInspectorPanel(IDEState& ide)
                         else
                             ide.log.push(ConsoleLog::REPLY_ERR,
                                 "[Inspector] Failed to attach script " + rec->displayName);
+                        ide.sceneDirty = true;
                     }
                 }
             }
@@ -3721,6 +4604,7 @@ static void DrawInspectorPanel(IDEState& ide)
         if (changed && pCam->runtimeCamera)
         {
             pCam->runtimeCamera->transform.position = Vector3(pCam->px, pCam->py, pCam->pz);
+            ide.sceneDirty = true;
         }
 
         ImGui::Spacing();
@@ -4116,7 +5000,7 @@ static void UpdateEditorCamera(IDEState& ide, float dt, int vw, int vh,
 // =============================================================================
 //  Viewport  — avec contrôles de caméra éditeur (Unity-style)
 // =============================================================================
-static void HandleShortcuts(IDEState& ide, bool& quitRequested)
+static void HandleShortcuts(IDEState& ide)
 {
     ImGuiIO& io = ImGui::GetIO();
     if (io.WantCaptureKeyboard) return;
@@ -4693,17 +5577,6 @@ static void DrawSelectionToast(IDEState& ide, const ImVec2& imagePos, const ImVe
         IM_COL32(220, 220, 240, 255), selText.c_str());
 }
 
-
-static glm::vec3 GetCameraSpawnPos(IDEState& ide, float dist = 6.f)
-{
-    if (!ide.sm || !ide.sm->currentCamera) return glm::vec3(0.f);
-    Camera* cam = ide.sm->currentCamera;
-    glm::vec3 pos = cam->transform.position.ToGLM();
-    glm::vec3 fwd = glm::normalize(cam->transform.forward().ToGLM());
-    return pos + fwd * dist;
-}
-
-
 static void DrawCameraPositionOverlay(IDEState& ide, const ImVec2& imagePos, const ImVec2& imageSize)
 {
     Camera* cam = ide.sm ? ide.sm->currentCamera : nullptr;
@@ -4727,11 +5600,17 @@ static void DrawCameraPositionOverlay(IDEState& ide, const ImVec2& imagePos, con
         IM_COL32(140, 200, 255, 255), buf);
 }
 
-static void DrawViewportPanel(IDEState& ide, float dt)
+static void DrawViewportPanel(IDEState& ide, float dt, float reservedTopPx = 0.f)
 {
+    // GetContentRegionAvail() already accounts for any ImGui items drawn above
+    // (e.g. the prefab banner + its separator pixel), so vpW/vpH exactly match
+    // the drawable area and imagePos will be at the correct screen position.
     ImVec2 panelSize = ImGui::GetContentRegionAvail();
     int vpW = (int)panelSize.x;
     int vpH = (int)panelSize.y;
+    // reservedTopPx is informational — it's already consumed by ImGui layout
+    // so we don't subtract it again, but we keep the parameter for future use.
+    (void)reservedTopPx;
     if (vpW < 8)  vpW = 8;
     if (vpH < 8)  vpH = 8;
     ide.sceneFBO.resize(vpW, vpH);
@@ -4757,6 +5636,13 @@ static void DrawViewportPanel(IDEState& ide, float dt)
     glm::mat4 rendererView = ide.renderer->GetLastViewMatrix();
     glm::mat4 rendererProj = ide.renderer->GetLastProjMatrix();
     glm::vec3 camPos = cam ? cam->transform.position.ToGLM() : glm::vec3(0.f);
+
+    // The renderer projection uses OpenGL NDC (Y up). The gizmo and raycast
+    // functions draw/pick in ImGui screen space (Y down). Flip Y once here so
+    // every consumer — gizmo render, gizmo hit-test, raycast, box-select — is
+    // consistent with the ImGui Image rect.
+    glm::mat4 gizmoProj = rendererProj;
+    gizmoProj[1][1] *= -1.f;
 
     if (cam)
     {
@@ -4806,58 +5692,74 @@ static void DrawViewportPanel(IDEState& ide, float dt)
             IM_ASSERT(payload->DataSize == sizeof(AssetDragPayload));
             auto& drop = *static_cast<const AssetDragPayload*>(payload->Data);
 
-            ide.importOverlayGUID = drop.guidStr;
-            ide.showImportOverlay = true;
-            ide.importOverlayHasImportBtn = true;
-            // Anchor to the center of the screen as a fallback in case the Inspector
-            // panel hasn't updated its anchor pos yet this frame (e.g. drop fires before
-            // Inspector renders). The Inspector will overwrite this next frame if open.
-            {
-                ImGuiIO& _io = ImGui::GetIO();
-                if (ide.importOverlayAnchorSize.x < 10.f || ide.importOverlayAnchorSize.y < 10.f) {
-                    ide.importOverlayAnchorPos = ImVec2(_io.DisplaySize.x * 0.6f, _io.DisplaySize.y * 0.1f);
-                    ide.importOverlayAnchorSize = ImVec2(_io.DisplaySize.x * 0.22f, _io.DisplaySize.y * 0.5f);
-                }
+            // Prefabs skip the import-settings overlay — instantiate immediately
+            std::string dropExt = fs::path(std::string(drop.path)).extension().string();
+            if (dropExt == ".honprefab") {
+                std::string first = InstantiatePrefab(ide, std::string(drop.path));
+                if (!first.empty()) ide.pendingSelection = first;
             }
-            ide.importOverlayOnImport = [&ide, drop]()
+            else {
+                ide.importOverlayGUID = drop.guidStr;
+                ide.showImportOverlay = true;
+                ide.importOverlayHasImportBtn = true;
+                // Anchor to the center of the screen as a fallback in case the Inspector
+                // panel hasn't updated its anchor pos yet this frame (e.g. drop fires before
+                // Inspector renders). The Inspector will overwrite this next frame if open.
                 {
-                    std::string path(drop.path);
-                    std::string ext = std::filesystem::path(path).extension().string();
-                    std::string stem = std::filesystem::path(path).stem().string();
-
-                    int n = 1;
-                    std::string objName = stem;
-                    while (g_namedObjects.count(objName) || g_namedLights.count(objName))
-                        objName = stem + "_" + std::to_string(n++);
-
-                    glm::vec3 spawnPos = GetCameraSpawnPos(ide);
-                    char posBuf[64];
-                    std::snprintf(posBuf, sizeof(posBuf), "%.3f %.3f %.3f",
-                        spawnPos.x, spawnPos.y, spawnPos.z);
-
-                    std::string cmd;
-                    if (ext == ".obj")                  cmd = "obj " + objName + " \"" + path + "\" " + posBuf;
-                    else if (ext == ".gltf" || ext == ".glb") cmd = "gltf " + objName + " \"" + path + "\" " + posBuf;
-
-                    if (!cmd.empty())
+                    ImGuiIO& _io = ImGui::GetIO();
+                    if (ide.importOverlayAnchorSize.x < 10.f || ide.importOverlayAnchorSize.y < 10.f) {
+                        ide.importOverlayAnchorPos = ImVec2(_io.DisplaySize.x * 0.6f, _io.DisplaySize.y * 0.1f);
+                        ide.importOverlayAnchorSize = ImVec2(_io.DisplaySize.x * 0.22f, _io.DisplaySize.y * 0.5f);
+                    }
+                }
+                ide.importOverlayOnImport = [&ide, drop]()
                     {
-                        ide.log.push(ConsoleLog::CMD, "> " + cmd);
-                        ide.bus.send(cmd);
-                        ide.pendingSelection = objName;
-                        ide.sceneDirty = true;
-                        ide.assetBrowser.hasPendingDrop = true;
-                        ide.assetBrowser.pendingDrop = drop;
-                        RefreshSceneList(ide);
-                    }
-                    else if (ext == ".hdr") {
-                        std::string cmd = "loadhdrskybox \"" + path + "\"";
-                        ide.log.push(ConsoleLog::CMD, "> " + cmd);
-                        ide.bus.send(cmd);
-                        ide.toastMgr.Push("HDR skybox loaded", Toast::Success, 2.0f);
-                    }
+                        std::string path(drop.path);
+                        std::string ext = std::filesystem::path(path).extension().string();
+                        std::string stem = std::filesystem::path(path).stem().string();
 
-                    ide.showImportOverlay = false;
-                };
+                        int n = 1;
+                        std::string objName = stem;
+                        while (g_namedObjects.count(objName) || g_namedLights.count(objName))
+                            objName = stem + "_" + std::to_string(n++);
+
+                        glm::vec3 spawnPos = GetCameraSpawnPos(ide);
+                        char posBuf[64];
+                        std::snprintf(posBuf, sizeof(posBuf), "%.3f %.3f %.3f",
+                            spawnPos.x, spawnPos.y, spawnPos.z);
+
+                        std::string cmd;
+                        if (ext == ".obj")                  cmd = "obj " + objName + " \"" + path + "\" " + posBuf;
+                        else if (ext == ".gltf" || ext == ".glb") cmd = "gltf " + objName + " \"" + path + "\" " + posBuf;
+
+                        // ── Prefab drag-drop instantiation ────────────────────────
+                        if (ext == ".honprefab") {
+                            std::string first = InstantiatePrefab(ide, path);
+                            if (!first.empty()) ide.pendingSelection = first;
+                            ide.showImportOverlay = false;
+                            return;
+                        }
+
+                        if (!cmd.empty())
+                        {
+                            ide.log.push(ConsoleLog::CMD, "> " + cmd);
+                            ide.bus.send(cmd);
+                            ide.pendingSelection = objName;
+                            ide.sceneDirty = true;
+                            ide.assetBrowser.hasPendingDrop = true;
+                            ide.assetBrowser.pendingDrop = drop;
+                            RefreshSceneList(ide);
+                        }
+                        else if (ext == ".hdr") {
+                            std::string cmd = "loadhdrskybox \"" + path + "\"";
+                            ide.log.push(ConsoleLog::CMD, "> " + cmd);
+                            ide.bus.send(cmd);
+                            ide.toastMgr.Push("HDR skybox loaded", Toast::Success, 2.0f);
+                        }
+
+                        ide.showImportOverlay = false;
+                    };
+            } // end non-prefab branch
         }
 
         if (const ImGuiPayload* payload =
@@ -4925,7 +5827,7 @@ static void DrawViewportPanel(IDEState& ide, float dt)
             // 1. Logic Update
             bool isGizmoInteracting = ide.gizmo.Update(
                 ide.toolMode, objPos, objRot, ide.gizmoLocalMode,
-                rendererView, rendererProj, imagePos.x, imagePos.y, imageSize.x, imageSize.y,
+                rendererView, gizmoProj, imagePos.x, imagePos.y, imageSize.x, imageSize.y,
                 io.MousePos.x, io.MousePos.y, mousePressed, mouseReleased,
                 ide.snapEnabled, ide.snapPosition, ide.snapRotation, ide.snapScale,
                 primary, ide.bus
@@ -4934,6 +5836,7 @@ static void DrawViewportPanel(IDEState& ide, float dt)
             if (isGizmoInteracting || ide.gizmo.isDragging) {
                 skipSelection = true;
                 ide.sceneDirty = true;
+                if (ide.prefabEditMode) ide.prefabEditDirty = true;
             }
 
             // 2. FIXED RENDER: Use ImGui's Window DrawList instead of UIRenderer
@@ -4943,7 +5846,7 @@ static void DrawViewportPanel(IDEState& ide, float dt)
             ide.gizmo.Render(
                 drawList,
                 ide.toolMode, objPos, objRot, ide.gizmoLocalMode,
-                rendererView, rendererProj,
+                rendererView, gizmoProj,
                 imagePos.x, imagePos.y, imageSize.x, imageSize.y,
                 io.MousePos.x, io.MousePos.y
             );
@@ -4989,7 +5892,7 @@ static void DrawViewportPanel(IDEState& ide, float dt)
             if (ide.boxSelect.IsSignificant())
             {
                 auto picked = BoxSelectObjects(
-                    ide.boxSelect, rendererProj, rendererView,
+                    ide.boxSelect, gizmoProj, rendererView,
                     imagePos.x, imagePos.y, imageSize.x, imageSize.y,
                     candidates);
 
@@ -5012,7 +5915,7 @@ static void DrawViewportPanel(IDEState& ide, float dt)
                 std::string hit = RaycastObjects(
                     io.MousePos.x, io.MousePos.y,
                     imagePos.x, imagePos.y, imageSize.x, imageSize.y,
-                    rendererProj, rendererView, camPos, candidates);
+                    gizmoProj, rendererView, camPos, candidates);
 
                 if (!hit.empty())
                 {
@@ -5293,7 +6196,7 @@ static void DrawConsolePanel(IDEState& ide)
 // =============================================================================
 //  Modals
 // =============================================================================
-static void DrawModals(IDEState& ide)
+static void DrawModals(IDEState& ide, bool& quit)
 {
     // Add Object modal
     if (ide.showAddObject) {
@@ -5306,29 +6209,35 @@ static void DrawModals(IDEState& ide)
     {
         static const char* kTypes[] = { "Plane", "OBJ mesh", "glTF / GLB", "Rectangle", "Sphere" };
         static const ObjectType kObjTypeMap[] = { PLANE, OBJ_MESH, GLTF_MESH, RECTANGLE, SPHERE };
-        ImGui::InputText("Name", ide.newObjName, sizeof(ide.newObjName));
-        {
-            int comboObjIdx = 0;
-            for (int i = 0; i < 6; ++i) if (kObjTypeMap[i] == ide.newObjType) { comboObjIdx = i; break; }
-            if (ImGui::Combo("Type", &comboObjIdx, kTypes, 6)) ide.newObjType = kObjTypeMap[comboObjIdx];
+        int comboObjIdx = 0;
+        for (int i = 0; i < 5; ++i) if (kObjTypeMap[i] == ide.newObjType) { comboObjIdx = i; break; }
+
+        // Fix: Create a modifiable buffer for the name
+        static char nameBuffer[256] = "";
+        if (comboObjIdx >= 0 && comboObjIdx < 5) {
+            strcpy_s(nameBuffer, sizeof(nameBuffer), kTypes[comboObjIdx]);
         }
+        ImGui::InputText("Name", nameBuffer, sizeof(nameBuffer));
+
+        if (ImGui::Combo("Type", &comboObjIdx, kTypes, 5)) ide.newObjType = kObjTypeMap[comboObjIdx];
+
         ImGui::DragFloat3("Position", ide.newObjPos, 0.1f);
         if (ide.newObjType == CUBE)
-            ImGui::DragFloat("Half-extent", &ide.newObjHalf, 0.01f, 0.01f, 100.f);
+            ImGui::DragFloat("Half-extent", &ide.newObjScale, 0.01f, 0.01f, 100.f);
         if (ide.newObjType == SPHERE)
-            ImGui::DragFloat("Radius", &ide.newObjHalf, 0.01f, 0.01f, 100.f);
+            ImGui::DragFloat("Radius", &ide.newObjScale, 0.01f, 0.01f, 100.f);
         if (ide.newObjType == OBJ_MESH || ide.newObjType == GLTF_MESH)
             ImGui::InputText("File path", ide.newObjFile, sizeof(ide.newObjFile));
         ImGui::Combo("Color", &ide.newObjColor, kColorNames, kNumColors);
 
         if (ImGui::Button("Add", { 120,0 })) {
             char buf[512];
-            std::string nm = NameValidator::GetFinalName(ide.newObjName, ide.objects, ide.lights);
+            std::string nm = NameValidator::GetFinalName(nameBuffer, ide.objects, ide.lights);
             float* p = ide.newObjPos;
             switch (ide.newObjType) {
             case CUBE:
                 std::snprintf(buf, sizeof(buf), "cube %s %.3f %.3f %.3f %.3f %s",
-                    nm.c_str(), p[0], p[1], p[2], ide.newObjHalf,
+                    nm.c_str(), p[0], p[1], p[2], ide.newObjScale,
                     kColorNames[ide.newObjColor]);
                 break;
             case PLANE:
@@ -5350,7 +6259,7 @@ static void DrawModals(IDEState& ide)
                 break;
             case SPHERE:
                 std::snprintf(buf, sizeof(buf), "sphere %s %.3f %.3f %.3f %.3f %s",
-                    nm.c_str(), p[0], p[1], p[2], ide.newObjHalf,
+                    nm.c_str(), p[0], p[1], p[2], ide.newObjScale,
                     kColorNames[ide.newObjColor]);
                 break;
             default: break;
@@ -5358,6 +6267,7 @@ static void DrawModals(IDEState& ide)
             ide.log.push(ConsoleLog::CMD, std::string("> ") + buf);
             ide.bus.send(buf);
             ide.pendingSelection = nm;
+            ide.sceneDirty = true;
             RefreshSceneList(ide);
             ImGui::CloseCurrentPopup();
         }
@@ -5376,15 +6286,15 @@ static void DrawModals(IDEState& ide)
     }
     if (ImGui::BeginPopupModal("Add Light", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
     {
-        ImGui::InputText("Name", ide.newLightName, sizeof(ide.newLightName));
 
         static const char* lightTypes[] = { "Point", "Directional", "Ambient" };
         static const ObjectType kLightTypeMap[] = { POINT_LIGHT, DIRECTIONAL_LIGHT, AMBIENT_LIGHT };
-        {
-            int comboLightIdx = 0;
-            for (int i = 0; i < 3; ++i) if (kLightTypeMap[i] == ide.newLightType) { comboLightIdx = i; break; }
-            if (ImGui::Combo("Type", &comboLightIdx, lightTypes, 3)) ide.newLightType = kLightTypeMap[comboLightIdx];
-        }
+
+        int comboLightIdx = 0;
+        for (int i = 0; i < 3; ++i) if (kLightTypeMap[i] == ide.newLightType) { comboLightIdx = i; break; }
+        ImGui::InputText("Name", ide.newLightName, sizeof(ide.newLightName));
+
+        ImGui::Combo("Type", &comboLightIdx, lightTypes, 3);
 
         ImGui::DragFloat("Intensity", &ide.newLightIntensity, 0.05f, 0.f, 20.f);
         ImGui::ColorEdit3("Color", ide.newLightColor);
@@ -5403,6 +6313,7 @@ static void DrawModals(IDEState& ide)
             ide.log.push(ConsoleLog::CMD, std::string("> ") + buf);
             ide.bus.send(buf);
             ide.pendingSelection = ide.newLightName;
+            ide.sceneDirty = true;
             RefreshSceneList(ide);
             ImGui::CloseCurrentPopup();
         }
@@ -5520,7 +6431,176 @@ static void DrawModals(IDEState& ide)
         ImGui::EndPopup();
     }
 
-    // Rename modal (UPDATED for multi-selection)
+    // ── Multi-object / Folder Prefab modal ────────────────────────────────────
+    if (ide.showCreatePrefabFromFolder) {
+        ImGui::OpenPopup("CreatePrefabFromFolder");
+        ide.showCreatePrefabFromFolder = false;
+        // Pre-fill name from folder or "MultiPrefab"
+        std::string defaultName = ide.createPrefabFromFolderName.empty()
+            ? "MultiPrefab" : ide.createPrefabFromFolderName;
+        strncpy_s(ide.createPrefabMultiName, sizeof(ide.createPrefabMultiName),
+            defaultName.c_str(), _TRUNCATE);
+    }
+    if (ImGui::BeginPopupModal("CreatePrefabFromFolder", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        bool fromFolder = !ide.createPrefabFromFolderName.empty();
+        if (fromFolder)
+            ImGui::TextDisabled("Folder: %s", ide.createPrefabFromFolderName.c_str());
+        else
+            ImGui::TextDisabled("%zu selected object(s)", ide.selection.Size());
+
+        ImGui::SetNextItemWidth(280.f);
+        ImGui::InputText("Prefab Name", ide.createPrefabMultiName, sizeof(ide.createPrefabMultiName));
+        ImGui::Spacing();
+
+        if (ImGui::Button("Save", { 120, 0 }))
+        {
+            // Collect names to serialize
+            std::vector<std::string> objNames;
+            if (fromFolder) {
+                // Gather all leaf names from the folder
+                std::function<void(const std::vector<HierarchyNode>&)> collect =
+                    [&](const std::vector<HierarchyNode>& nodes) {
+                    for (auto& n : nodes) {
+                        if (n.kind == HierarchyNode::FOLDER) collect(n.children);
+                        else if (n.kind == HierarchyNode::OBJECT) objNames.push_back(n.name);
+                    }
+                    };
+                for (auto& r : ide.hierRoots) {
+                    if (r.kind == HierarchyNode::FOLDER && r.name == ide.createPrefabFromFolderName)
+                        collect(r.children);
+                }
+            }
+            else {
+                for (auto& nm : ide.selection.items) objNames.push_back(nm);
+            }
+
+            std::string outDir = std::string(ide.project.rootFolder).empty()
+                ? "assets/prefabs/"
+                : (fs::path(ide.project.rootFolder) / "assets" / "prefabs" / "").string();
+            fs::create_directories(outDir);
+            std::string pName(ide.createPrefabMultiName);
+            std::string outPath = outDir + pName + ".honprefab";
+
+            std::ofstream pf(outPath);
+            if (pf.is_open()) {
+                pf << "{\n  \"name\": \"" << pName << "\",\n  \"objects\": [\n";
+                bool first = true;
+                glm::vec3 basePos(0.f);
+                bool basePosSet = false;
+                std::shared_lock<std::shared_mutex> lock(g_sceneMutex);
+                for (auto& nm : objNames) {
+                    auto it = g_namedObjects.find(nm);
+                    if (it == g_namedObjects.end()) continue;
+                    BaseObject* obj = it->second;
+
+                    // Determine base position from the first object
+                    if (!basePosSet) {
+                        basePos = glm::vec3(obj->transform.position.x,
+                            obj->transform.position.y,
+                            obj->transform.position.z);
+                        basePosSet = true;
+                    }
+
+                    // Determine object type
+                    std::string objType = "sphere";
+                    if (dynamic_cast<Plane*>(obj)) objType = "plane";
+                    else if (dynamic_cast<HonHengine::Rectangle*>(obj)) objType = "rect";
+                    else if (!obj->tag.empty()) {
+                        if (obj->tag.rfind("OBJ:", 0) == 0) objType = "obj";
+                        else if (obj->tag.rfind("GLTF:", 0) == 0) objType = "gltf";
+                    }
+
+                    if (!first) pf << ",\n";
+                    first = false;
+                    // Store positions relative to the first object (prefab origin)
+                    pf << "    {\"name\": \"" << nm << "\","
+                        << "\"type\":\"" << objType << "\","
+                        << "\"px\":" << (obj->transform.position.x - basePos.x)
+                        << ",\"py\":" << (obj->transform.position.y - basePos.y)
+                        << ",\"pz\":" << (obj->transform.position.z - basePos.z)
+                        << ",\"sx\":" << obj->transform.scale.x
+                        << ",\"sy\":" << obj->transform.scale.y
+                        << ",\"sz\":" << obj->transform.scale.z
+                        << ",\"rw\":" << obj->transform.rotation.w
+                        << ",\"rx\":" << obj->transform.rotation.x
+                        << ",\"ry\":" << obj->transform.rotation.y
+                        << ",\"rz\":" << obj->transform.rotation.z
+                        << ",\"visible\":" << (obj->visible ? "true" : "false");
+                    if (objType == "obj" || objType == "gltf") {
+                        std::string ap = obj->tag.substr(objType == "obj" ? 4 : 5);
+                        pf << ",\"assetPath\":\"" << ap << "\"";
+                    }
+                    if (obj->material)
+                        pf << ",\"cr\":" << (int)obj->material->color.r
+                        << ",\"cg\":" << (int)obj->material->color.g
+                        << ",\"cb\":" << (int)obj->material->color.b
+                        << ",\"ca\":" << (int)obj->material->color.a;
+                    pf << "}";
+                }
+                pf << "\n  ]\n}\n";
+                pf.close();
+                auto& rec = ide.assetDb.Register(outPath);
+                ide.assetDb.Save(ide.HonAssetsPath());
+                ide.assetBrowser.dirDirty = true;
+                ide.toastMgr.Push("Prefab saved: " + outPath + " (" +
+                    std::to_string(objNames.size()) + " objects)", Toast::Success, 3.f);
+            }
+            else {
+                ide.log.push(ConsoleLog::REPLY_ERR, "[Prefab] Could not write: " + outPath);
+            }
+            ide.createPrefabFromFolderName.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", { 80, 0 })) {
+            ide.createPrefabFromFolderName.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    // ── Add Parent modal ──────────────────────────────────────────────────────
+    // Creates a new empty folder that wraps the selected objects (Unity's
+    // "Create Empty Parent" / "Add Parent" option).
+    if (ide.showAddParentModal) { ImGui::OpenPopup("AddParentModal"); ide.showAddParentModal = false; }
+    if (ImGui::BeginPopupModal("AddParentModal", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        ImGui::TextUnformatted("New parent folder name:");
+        ImGui::SetNextItemWidth(260.f);
+        ImGui::InputText("##parentname", ide.addParentName, sizeof(ide.addParentName),
+            ImGuiInputTextFlags_AutoSelectAll);
+        if (!ide.selection.Empty())
+            ImGui::TextDisabled("  %zu object(s) will be parented", ide.selection.Size());
+        ImGui::Spacing();
+        if (ImGui::Button("Create Parent", { 140, 0 })) {
+            std::string pname(ide.addParentName);
+            if (!pname.empty()) {
+                HierarchyNode parentFolder;
+                parentFolder.kind = HierarchyNode::FOLDER;
+                parentFolder.name = pname;
+                parentFolder.folderOpen = true;
+
+                // Move selected items into the parent folder (same logic as Create Folder)
+                std::set<std::string> toMove = ide.selection.items;
+                for (auto it = ide.hierRoots.begin(); it != ide.hierRoots.end(); ) {
+                    if ((it->kind == HierarchyNode::OBJECT || it->kind == HierarchyNode::LIGHT)
+                        && toMove.count(it->name)) {
+                        parentFolder.children.push_back(*it);
+                        it = ide.hierRoots.erase(it);
+                    }
+                    else { ++it; }
+                }
+                ide.hierRoots.push_back(parentFolder);
+                ide.selection.Clear();
+                ide.toastMgr.Push("Parent folder '" + pname + "' created", Toast::Success, 2.f);
+            }
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", { 80, 0 })) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
     if (ide.showRenameModal) { ImGui::OpenPopup("Rename Object"); ide.showRenameModal = false; }
     if (ImGui::BeginPopupModal("Rename Object", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
     {
@@ -5539,6 +6619,7 @@ static void DrawModals(IDEState& ide)
                     ide.selection.Add(newN);
                 }
                 ide.sceneDirty = true;
+
                 RefreshSceneList(ide);
             }
             ImGui::CloseCurrentPopup();
@@ -5548,21 +6629,223 @@ static void DrawModals(IDEState& ide)
         ImGui::EndPopup();
     }
 
+    // Quit Confirmation modal
+    if (ide.showQuitModal) { ImGui::OpenPopup("QuitConfirmation"); ide.showQuitModal = false; }
+    if (ImGui::BeginPopupModal("QuitConfirmation", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextUnformatted("The current scene has unsaved changes.");
+        ImGui::TextUnformatted("Do you want to save before quitting?");
+        ImGui::Separator();
+        if (ImGui::Button("Save & Quit", { 120, 0 })) {
+            ide.bus.send(std::string("savescene ") + ide.sceneFilePath);
+            quit = true;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Don't Save", { 110, 0 })) {
+            quit = true;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", { 80, 0 })) {
+            ide.quitRequested = false;
+            ide.showQuitModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
     // Save Scene modal
     if (ide.showSaveModal) { ImGui::OpenPopup("Save Scene"); ide.showSaveModal = false; }
     if (ImGui::BeginPopupModal("Save Scene", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
     {
-        ImGui::TextUnformatted("Save scene to file:");
+        ImGui::TextUnformatted("Save scene to file (inside assets/):");
         ImGui::SetNextItemWidth(340.f);
         ImGui::InputText("##savepath", ide.sceneFilePath, sizeof(ide.sceneFilePath));
         ImGui::Spacing();
         if (ImGui::Button("Save", { 120,0 })) {
-            ide.bus.send(std::string("savescene ") + ide.sceneFilePath);
-            ide.sceneDirty = false;
+            // Ensure the parent directory exists (scenes live in assets/)
+            fs::create_directories(fs::path(ide.sceneFilePath).parent_path());
+            // Serialize the live scene to JSON and write to disk
+            std::string sceneJson2;
+            {
+                std::shared_lock<std::shared_mutex> lock(g_sceneMutex);
+                std::ostringstream oss2;
+                oss2 << "{\"objects\":[";
+                bool fo2 = true;
+                for (auto& [nm, ob] : g_namedObjects) {
+                    if (!fo2) oss2 << ","; fo2 = false;
+                    oss2 << "{\"name\":" << JStr(nm)
+                        << ",\"px\":" << ob->transform.position.x
+                        << ",\"py\":" << ob->transform.position.y
+                        << ",\"pz\":" << ob->transform.position.z
+                        << ",\"sx\":" << ob->transform.scale.x
+                        << ",\"sy\":" << ob->transform.scale.y
+                        << ",\"sz\":" << ob->transform.scale.z
+                        << ",\"rw\":" << ob->transform.rotation.w
+                        << ",\"rx\":" << ob->transform.rotation.x
+                        << ",\"ry\":" << ob->transform.rotation.y
+                        << ",\"rz\":" << ob->transform.rotation.z
+                        << ",\"visible\":" << (ob->visible ? "true" : "false")
+                        << ",\"cr\":" << (ob->material ? (int)ob->material->color.r : 255)
+                        << ",\"cg\":" << (ob->material ? (int)ob->material->color.g : 255)
+                        << ",\"cb\":" << (ob->material ? (int)ob->material->color.b : 255)
+                        << ",\"ca\":" << (ob->material ? (int)ob->material->color.a : 255)
+                        << ",\"shader\":" << JStr(ob->render.shaderName)
+                        << ",\"tag\":" << JStr(ob->tag)
+                        << ",\"scripts\":[";
+                    bool fs2 = true;
+                    for (auto& sc : ob->scripts) { if (!fs2) oss2 << ","; fs2 = false; oss2 << JStr(sc.scriptGUID); }
+                    oss2 << "]}";
+                }
+                oss2 << "],\"lights\":[";
+                bool fl2 = true;
+                for (auto& [nm, lt] : g_namedLights) {
+                    if (!fl2) oss2 << ","; fl2 = false;
+                    std::string ltype = "point"; float lpx = 0, lpy = 0, lpz = 0;
+                    if (auto* dl = dynamic_cast<DirectionalLight*>(lt)) { ltype = "directional"; lpx = dl->transform.position.x; lpy = dl->transform.position.y; lpz = dl->transform.position.z; }
+                    else if (auto* pl = dynamic_cast<PointLight*>(lt)) { lpx = pl->transform.position.x; lpy = pl->transform.position.y; lpz = pl->transform.position.z; }
+                    oss2 << "{\"name\":" << JStr(nm) << ",\"type\":" << JStr(ltype)
+                        << ",\"intensity\":" << lt->intensity
+                        << ",\"r\":" << (int)lt->color.r << ",\"g\":" << (int)lt->color.g << ",\"b\":" << (int)lt->color.b
+                        << ",\"px\":" << lpx << ",\"py\":" << lpy << ",\"pz\":" << lpz << "}";
+                }
+                oss2 << "]}";
+                sceneJson2 = oss2.str();
+            }
+            std::ofstream sf2(ide.sceneFilePath);
+            if (sf2.is_open()) {
+                sf2 << sceneJson2; sf2.close();
+                ide.sceneDirty = false;
+                ide.assetDb.ScanDirectory(ide.AssetRootDir());
+                ide.assetBrowser.dirDirty = true;
+                ide.toastMgr.Push("Scene saved: " + std::string(ide.sceneFilePath), Toast::Success, 2.0f);
+            }
+            else {
+                ide.log.push(ConsoleLog::REPLY_ERR, "[Scene] Could not write: " + std::string(ide.sceneFilePath));
+            }
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
         if (ImGui::Button("Cancel", { 100,0 })) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    if (ide.showSceneOpenPrompt) {
+        ImGui::OpenPopup("Unsaved Scene");
+        ide.showSceneOpenPrompt = false;
+    }
+    if (ImGui::BeginPopupModal("Unsaved Scene", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        ImGui::TextColored({ 1.f, 0.85f, 0.3f, 1.f }, ICON_FA_SAVE "  Unsaved Changes");
+        ImGui::Separator();
+        ImGui::TextWrapped("The current scene has unsaved changes.");
+        ImGui::TextWrapped("Do you want to save before opening:");
+        ImGui::TextDisabled("  %s", ide.pendingSceneOpenPath.c_str());
+        ImGui::Spacing();
+
+        auto doLoad = [&]() {
+            ide.bus.send("clearscene");
+            ide.bus.send("loadscene " + ide.pendingSceneOpenPath);
+            strncpy_s(ide.sceneFilePath, sizeof(ide.sceneFilePath),
+                ide.pendingSceneOpenPath.c_str(), sizeof(ide.sceneFilePath) - 1);
+            ide.sceneDirty = false;
+            ide.selection.Clear();
+            RefreshSceneList(ide);
+            ide.log.push(ConsoleLog::REPLY_OK, "[Scene] Loaded: " + ide.pendingSceneOpenPath);
+            ide.pendingSceneOpenPath.clear();
+            ImGui::CloseCurrentPopup();
+            };
+
+        if (ImGui::Button("Save & Open", { 130, 0 })) {
+            // Serialize current scene to sceneFilePath then load the new one
+            fs::create_directories(fs::path(ide.sceneFilePath).parent_path());
+            std::string sceneJson;
+            {
+                std::shared_lock<std::shared_mutex> lock(g_sceneMutex);
+                std::ostringstream oss;
+                oss << "{\"objects\":[";
+                bool firstObj = true;
+                for (auto& [name, obj] : g_namedObjects) {
+                    if (!firstObj) oss << ",";
+                    firstObj = false;
+                    oss << "{\"name\":" << JStr(name)
+                        << ",\"px\":" << obj->transform.position.x
+                        << ",\"py\":" << obj->transform.position.y
+                        << ",\"pz\":" << obj->transform.position.z
+                        << ",\"sx\":" << obj->transform.scale.x
+                        << ",\"sy\":" << obj->transform.scale.y
+                        << ",\"sz\":" << obj->transform.scale.z
+                        << ",\"rw\":" << obj->transform.rotation.w
+                        << ",\"rx\":" << obj->transform.rotation.x
+                        << ",\"ry\":" << obj->transform.rotation.y
+                        << ",\"rz\":" << obj->transform.rotation.z
+                        << ",\"visible\":" << (obj->visible ? "true" : "false")
+                        << ",\"cr\":" << (obj->material ? (int)obj->material->color.r : 255)
+                        << ",\"cg\":" << (obj->material ? (int)obj->material->color.g : 255)
+                        << ",\"cb\":" << (obj->material ? (int)obj->material->color.b : 255)
+                        << ",\"ca\":" << (obj->material ? (int)obj->material->color.a : 255)
+                        << ",\"shader\":" << JStr(obj->render.shaderName)
+                        << ",\"tag\":" << JStr(obj->tag)
+                        << ",\"scripts\":[";
+                    bool firstScript = true;
+                    for (auto& sc : obj->scripts) {
+                        if (!firstScript) oss << ",";
+                        firstScript = false;
+                        oss << JStr(sc.scriptGUID);
+                    }
+                    oss << "]}";
+                }
+                oss << "],\"lights\":[";
+                bool firstLight = true;
+                for (auto& [name, lt] : g_namedLights) {
+                    if (!firstLight) oss << ",";
+                    firstLight = false;
+                    std::string lightType = "point";
+                    float px = 0, py = 0, pz = 0;
+                    if (auto* dl = dynamic_cast<DirectionalLight*>(lt)) {
+                        lightType = "directional";
+                        px = dl->transform.position.x;
+                        py = dl->transform.position.y;
+                        pz = dl->transform.position.z;
+                    }
+                    else if (auto* pl = dynamic_cast<PointLight*>(lt)) {
+                        px = pl->transform.position.x;
+                        py = pl->transform.position.y;
+                        pz = pl->transform.position.z;
+                    }
+                    oss << "{\"name\":" << JStr(name)
+                        << ",\"type\":" << JStr(lightType)
+                        << ",\"intensity\":" << lt->intensity
+                        << ",\"r\":" << (int)lt->color.r
+                        << ",\"g\":" << (int)lt->color.g
+                        << ",\"b\":" << (int)lt->color.b
+                        << ",\"px\":" << px << ",\"py\":" << py << ",\"pz\":" << pz << "}";
+                }
+                oss << "]}";
+                sceneJson = oss.str();
+            }
+            std::ofstream sf(ide.sceneFilePath);
+            if (sf.is_open()) {
+                sf << sceneJson;
+                sf.close();
+                ide.log.push(ConsoleLog::REPLY_OK, "[Scene] Saved: " + std::string(ide.sceneFilePath));
+                ide.sceneDirty = false;
+                ide.assetDb.ScanDirectory(ide.AssetRootDir());
+                ide.assetBrowser.dirDirty = true;
+            }
+            else {
+                ide.log.push(ConsoleLog::REPLY_ERR, "[Scene] Could not save: " + std::string(ide.sceneFilePath));
+            }
+            doLoad();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Don't Save", { 110, 0 })) {
+            doLoad();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", { 80, 0 })) {
+            ide.pendingSceneOpenPath.clear();
+            ImGui::CloseCurrentPopup();
+        }
         ImGui::EndPopup();
     }
 
@@ -5590,17 +6873,77 @@ static void DrawModals(IDEState& ide)
     }
 
     // ── Ship Game modal (real compile-and-link build) ─────────────────────────
-    if (ide.showShipDialog) { ImGui::OpenPopup("Ship Game"); ide.showShipDialog = false; }
+    if (ide.showShipDialog) {
+        ImGui::OpenPopup("Ship Game");
+        ide.showShipDialog = false;
+
+        // Refresh scene list from disk every time the dialog opens.
+        // Scenes are always stored under <projectDir>/assets/ — scan only there.
+        ide.projectScenes.clear();
+        ide.shipFirstScene = 0;
+        fs::path projRoot(ide.shipSrcDir);
+        if (!fs::exists(projRoot)) projRoot = fs::current_path();
+        fs::path assetsDir = projRoot / "assets";
+        auto scanScenesIntoList = [&](const fs::path& dir) {
+            if (!fs::exists(dir)) return;
+            try {
+                for (auto& entry : fs::recursive_directory_iterator(
+                    dir, fs::directory_options::skip_permission_denied))
+                {
+                    if (!entry.is_regular_file()) continue;
+                    if (entry.path().extension() != ".honscene") continue;
+                    IDEState::SceneEntry se;
+                    se.path = entry.path().string();
+                    se.name = entry.path().stem().string();
+                    se.selected = true;
+                    ide.projectScenes.push_back(se);
+                }
+            }
+            catch (...) {}
+            };
+        scanScenesIntoList(assetsDir);
+
+        // If no scenes found, add the current scene file as a default entry
+        if (ide.projectScenes.empty()) {
+            IDEState::SceneEntry se;
+            se.path = ide.sceneFilePath;
+            se.name = fs::path(ide.sceneFilePath).stem().string();
+            se.selected = true;
+            ide.projectScenes.push_back(se);
+        }
+    }
+
     if (ImGui::BeginPopupModal("Ship Game", nullptr,
         ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove))
     {
         ImGui::TextColored({ 0.5f,0.85f,1.f,1.f }, ICON_FA_BOXES_PACKING "  Build & Ship");
-        ImGui::TextDisabled("Compiles all scene scripts + a game_entry.cpp into one standalone exe.");
+        ImGui::TextDisabled("Compiles selected scenes' scripts into one standalone executable.");
         ImGui::Separator();
 
         // ── Paths ──
         ImGui::SetNextItemWidth(380.f);
-        ImGui::InputText("Project dir##ship", ide.shipSrcDir, sizeof(ide.shipSrcDir));
+        if (ImGui::InputText("Project dir##ship", ide.shipSrcDir, sizeof(ide.shipSrcDir))) {
+            // Re-scan when project dir changes — always look in <projectDir>/assets/
+            ide.projectScenes.clear();
+            ide.shipFirstScene = 0;
+            fs::path assetsSubDir = fs::path(ide.shipSrcDir) / "assets";
+            if (fs::exists(assetsSubDir)) {
+                try {
+                    for (auto& entry : fs::recursive_directory_iterator(
+                        assetsSubDir, fs::directory_options::skip_permission_denied))
+                    {
+                        if (!entry.is_regular_file() ||
+                            entry.path().extension() != ".honscene") continue;
+                        IDEState::SceneEntry se;
+                        se.path = entry.path().string();
+                        se.name = entry.path().stem().string();
+                        se.selected = true;
+                        ide.projectScenes.push_back(se);
+                    }
+                }
+                catch (...) {}
+            }
+        }
         ImGui::SameLine(); ImGui::TextDisabled("(root of your project)");
 
         ImGui::SetNextItemWidth(380.f);
@@ -5609,7 +6952,6 @@ static void DrawModals(IDEState& ide)
 
         // ── Static ship config stored in IDEState ──
         static char s_gameName[128] = "MyGame";
-        static char s_entryScene[512] = "scene.honscene";
         static char s_compiler[512] = "";   // auto-detected from ScriptManager
         static char s_engineLib[512] = "";   // path to GameEngine.a
         static char s_sdl2LibDir[512] = "";   // dir with SDL2.lib / libSDL2.a
@@ -5624,9 +6966,116 @@ static void DrawModals(IDEState& ide)
         ImGui::InputText("Game name##ship", s_gameName, sizeof(s_gameName));
         ImGui::SameLine(); ImGui::TextDisabled("(executable filename, no extension)");
 
-        ImGui::SetNextItemWidth(380.f);
-        ImGui::InputText("Entry scene##ship", s_entryScene, sizeof(s_entryScene));
-        ImGui::SameLine(); ImGui::TextDisabled("(relative path loaded on startup)");
+        // ── Scene Selection & Ordering ──────────────────────────────────────
+        ImGui::Spacing();
+        ImGui::SeparatorText("Scenes  (check to include · drag to reorder · top = startup scene)");
+
+        // Clamp shipFirstScene in case scenes were removed
+        if (ide.shipFirstScene >= (int)ide.projectScenes.size())
+            ide.shipFirstScene = 0;
+
+        // Show the derived entry scene path (read-only hint)
+        {
+            std::string entryHint = "(none selected)";
+            // Find first selected scene — that's the startup scene
+            for (int si = 0; si < (int)ide.projectScenes.size(); ++si) {
+                if (ide.projectScenes[si].selected) {
+                    entryHint = ide.projectScenes[si].path;
+                    break;
+                }
+            }
+            ImGui::PushStyleColor(ImGuiCol_Text, { 0.5f, 0.85f, 0.5f, 1.f });
+            ImGui::TextUnformatted(("  Startup scene: " + entryHint).c_str());
+            ImGui::PopStyleColor();
+        }
+
+        ImGui::Spacing();
+
+        // Scrollable region for scene list
+        ImGui::BeginChild("##scene_list", ImVec2(520, 160), true);
+
+        int swapA = -1, swapB = -1; // deferred swap for drag-reorder
+        for (int si = 0; si < (int)ide.projectScenes.size(); ++si) {
+            auto& sc = ide.projectScenes[si];
+            ImGui::PushID(si);
+
+            // Drag handle (≡)
+            ImGui::TextDisabled(" \xE2\x89\xA1 "); // ≡ U+2261
+            if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+                float dy = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left).y;
+                if (dy < -14.f && si > 0) { swapA = si - 1; swapB = si; ImGui::ResetMouseDragDelta(); }
+                else if (dy > 14.f && si < (int)ide.projectScenes.size() - 1) { swapA = si; swapB = si + 1; ImGui::ResetMouseDragDelta(); }
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Drag up/down to reorder");
+
+            ImGui::SameLine();
+
+            // Checkbox — include in build
+            ImGui::Checkbox(("##sel" + std::to_string(si)).c_str(), &sc.selected);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Include this scene in the build");
+
+            ImGui::SameLine();
+
+            // Scene name + path
+            bool isFirst = sc.selected && [&]() {
+                for (int j = 0; j < si; ++j) if (ide.projectScenes[j].selected) return false;
+                return true;
+                }();
+
+            if (isFirst) ImGui::PushStyleColor(ImGuiCol_Text, { 0.4f, 1.f, 0.4f, 1.f });
+            else if (!sc.selected) ImGui::PushStyleColor(ImGuiCol_Text, { 0.45f, 0.45f, 0.45f, 1.f });
+            else ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_Text));
+
+            ImGui::Text("%-28s", sc.name.c_str());
+            ImGui::PopStyleColor();
+
+            ImGui::SameLine();
+            ImGui::TextDisabled("%s", sc.path.c_str());
+
+            ImGui::PopID();
+        }
+
+        // Apply drag-reorder swap
+        if (swapA >= 0 && swapB < (int)ide.projectScenes.size()) {
+            std::swap(ide.projectScenes[swapA], ide.projectScenes[swapB]);
+        }
+
+        ImGui::EndChild();
+
+        // Quick-action buttons for scene list
+        if (ImGui::SmallButton("Select All"))
+            for (auto& sc : ide.projectScenes) sc.selected = true;
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Deselect All"))
+            for (auto& sc : ide.projectScenes) sc.selected = false;
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Refresh List")) {
+            ide.projectScenes.clear();
+            ide.shipFirstScene = 0;
+            fs::path assetsSubDir2 = fs::path(ide.shipSrcDir) / "assets";
+            if (fs::exists(assetsSubDir2)) {
+                try {
+                    for (auto& entry : fs::recursive_directory_iterator(
+                        assetsSubDir2, fs::directory_options::skip_permission_denied))
+                    {
+                        if (!entry.is_regular_file() ||
+                            entry.path().extension() != ".honscene") continue;
+                        IDEState::SceneEntry se;
+                        se.path = entry.path().string();
+                        se.name = entry.path().stem().string();
+                        se.selected = true;
+                        ide.projectScenes.push_back(se);
+                    }
+                }
+                catch (...) {}
+            }
+            ide.toastMgr.Push("Scene list refreshed", Toast::Info, 1.5f);
+        }
+
+        // Derive entry scene string (first selected scene, top-to-bottom)
+        std::string s_entryScene;
+        for (auto& sc : ide.projectScenes)
+            if (sc.selected) { s_entryScene = sc.path; break; }
 
         ImGui::Spacing();
         ImGui::SeparatorText("Toolchain  (blank = use editor settings automatically)");
@@ -5664,21 +7113,32 @@ static void DrawModals(IDEState& ide)
         ImGui::Checkbox("Create .tar.gz archive", &s_createArchive);
 
         ImGui::Spacing();
+        static bool s_bakeSceneToCpp = false;
+        ImGui::Checkbox("Bake scene to C++ (faster load, no JSON at runtime)", &s_bakeSceneToCpp);
+        if (s_bakeSceneToCpp)
+            ImGui::TextDisabled("  The current live scene will be baked directly into the executable.");
+
+        ImGui::Spacing();
         ImGui::Separator();
 
         // ── Validation hint ──
         bool canBuild = (strlen(ide.shipSrcDir) > 0 && strlen(ide.shipDstDir) > 0
-            && strlen(s_entryScene) > 0 && strlen(s_gameName) > 0);
+            && !s_entryScene.empty() && strlen(s_gameName) > 0);
         if (!canBuild)
-            ImGui::TextColored({ 1.f,0.5f,0.2f,1.f }, "  Fill in Project dir, Output dir, Game name, Entry scene.");
+            ImGui::TextColored({ 1.f,0.5f,0.2f,1.f }, "  Fill in Project dir, Output dir, Game name, and select at least one scene.");
 
         ImGui::Spacing();
         ImGui::BeginDisabled(!canBuild);
-        
+
         if (ImGui::Button("  " ICON_FA_HAMMER "  Build & Ship  ", { 220,0 })) {
             ImGui::CloseCurrentPopup();
 
-            fs::path savePath = fs::path(ide.shipSrcDir) / s_entryScene;
+            // s_entryScene is the full path of the first selected scene.
+            // We auto-save the current live scene into it so the shipped game
+            // always reflects what the editor shows right now.
+            fs::path savePath = fs::path(s_entryScene);
+            if (savePath.is_relative())
+                savePath = fs::path(ide.shipSrcDir) / savePath;
             fs::create_directories(savePath.parent_path());
 
             std::string sceneJson;
@@ -5767,6 +7227,150 @@ static void DrawModals(IDEState& ide)
             cfg.entryScene = savePath.string();
             cfg.debugBuild = s_debugBuild;
             cfg.createArchive = s_createArchive;
+            cfg.bakeSceneToCpp = s_bakeSceneToCpp;
+
+            // Populate the ordered list of selected scenes.
+            // CollectSceneScriptGUIDs will restrict its scan to only these files.
+            for (auto& sc : ide.projectScenes)
+                if (sc.selected) cfg.selectedScenes.push_back(sc.path);
+
+            // ── Capture live scene snapshot for baked build ───────────────────────
+            if (s_bakeSceneToCpp) {
+                // Cameras
+                for (const auto& cam : ide.cameras) {
+                    HonHengine::CameraSnapshot cs;
+                    cs.name = cam.name;
+                    cs.px = cam.px; cs.py = cam.py; cs.pz = cam.pz;
+                    cs.fov = cam.fov;
+                    if (cam.runtimeCamera) {
+                        cs.rx = cam.runtimeCamera->transform.rotation.x;
+                        cs.ry = cam.runtimeCamera->transform.rotation.y;
+                        cs.rz = cam.runtimeCamera->transform.rotation.z;
+                        cs.rw = cam.runtimeCamera->transform.rotation.w;
+                    }
+                    else {
+                        cs.rx = 0; cs.ry = 0; cs.rz = 0; cs.rw = 1;
+                    }
+                    cfg.cameras.push_back(cs);
+                }
+
+                // Skybox
+                cfg.skybox.mode = ide.skyboxMode; // 0=procedural, 2=cubemap
+                for (int _i = 0; _i < 6; ++_i)
+                    cfg.skybox.faces[_i] = ide.skyboxFaces[_i];
+                // sunIntensity / sunColor: derive from first directional light if available
+                {
+                    std::shared_lock<std::shared_mutex> lock(g_sceneMutex);
+                    for (const auto& [_lname, _lt] : g_namedLights) {
+                        if (dynamic_cast<DirectionalLight*>(_lt)) {
+                            cfg.skybox.sunIntensity = _lt->intensity;
+                            cfg.skybox.sunColor[0] = _lt->color.r / 255.f;
+                            cfg.skybox.sunColor[1] = _lt->color.g / 255.f;
+                            cfg.skybox.sunColor[2] = _lt->color.b / 255.f;
+                            break;
+                        }
+                    }
+                }
+
+                // Objects
+                {
+                    std::shared_lock<std::shared_mutex> lock(g_sceneMutex);
+                    for (const auto& [_oname, _o] : g_namedObjects) {
+                        HonHengine::ObjectSnapshot snap;
+                        snap.name = _oname;
+                        snap.tag = _o->tag;
+                        snap.px = _o->transform.position.x;
+                        snap.py = _o->transform.position.y;
+                        snap.pz = _o->transform.position.z;
+                        snap.sx = _o->transform.scale.x;
+                        snap.sy = _o->transform.scale.y;
+                        snap.sz = _o->transform.scale.z;
+                        snap.rx = _o->transform.rotation.x;
+                        snap.ry = _o->transform.rotation.y;
+                        snap.rz = _o->transform.rotation.z;
+                        snap.rw = _o->transform.rotation.w;
+                        snap.visible = _o->visible;
+
+                        // Determine kind
+                        if (dynamic_cast<Plane*>(_o))      snap.kind = "Plane";
+                        else if (dynamic_cast<Sphere*>(_o))    snap.kind = "Sphere";
+                        else if (dynamic_cast<HonHengine::Rectangle*> (_o)) snap.kind = "Rectangle";
+                        else if (!snap.tag.empty() && snap.tag.rfind("OBJ:", 0) == 0) {
+                            snap.kind = "OBJ";
+                            snap.assetPath = snap.tag.substr(4);
+                        }
+                        else if (!snap.tag.empty() && snap.tag.rfind("GLTF:", 0) == 0) {
+                            snap.kind = "GLTF";
+                            snap.assetPath = snap.tag.substr(5);
+                        }
+                        else {
+                            snap.kind = "Base";
+                        }
+
+                        // Material
+                        if (_o->material) {
+                            snap.hasMaterial = true;
+                            snap.specularity = _o->material->specularity;
+                            snap.reflectivity = _o->material->reflectivity;
+                            snap.cr = _o->material->color.r;
+                            snap.cg = _o->material->color.g;
+                            snap.cb = _o->material->color.b;
+                            snap.ca = _o->material->color.a;
+                            for (const auto& _tl : _o->material->textureLayers) {
+                                HonHengine::TextureLayerSnapshot tls;
+                                tls.texName = _tl.texture.name;
+                                tls.texPath = _tl.texture.path;
+                                tls.tilingU = _tl.texture.tilingU;
+                                tls.tilingV = _tl.texture.tilingV;
+                                tls.offsetU = _tl.texture.offsetU;
+                                tls.offsetV = _tl.texture.offsetV;
+                                tls.blendWeight = _tl.blendWeight;
+                                tls.blendMode = (int)_tl.blendMode;
+                                snap.textureLayers.push_back(tls);
+                            }
+                        }
+
+                        // Scripts
+                        for (const auto& _sc : _o->scripts)
+                            snap.scriptGUIDs.push_back(_sc.scriptGUID);
+
+                        cfg.sceneObjects.push_back(snap);
+                    }
+                }
+
+                // Lights
+                {
+                    std::shared_lock<std::shared_mutex> lock(g_sceneMutex);
+                    for (const auto& [_lname, _lt] : g_namedLights) {
+                        HonHengine::LightSnapshot ls;
+                        ls.name = _lname;
+                        ls.intensity = _lt->intensity;
+                        ls.r = _lt->color.r;
+                        ls.g = _lt->color.g;
+                        ls.b = _lt->color.b;
+                        if (auto* _dl = dynamic_cast<DirectionalLight*>(_lt)) {
+                            ls.kind = "directional";
+                            ls.px = _dl->transform.position.x;
+                            ls.py = _dl->transform.position.y;
+                            ls.pz = _dl->transform.position.z;
+                            ls.qx = _dl->transform.rotation.x;
+                            ls.qy = _dl->transform.rotation.y;
+                            ls.qz = _dl->transform.rotation.z;
+                            ls.qw = _dl->transform.rotation.w;
+                        }
+                        else if (auto* _pl = dynamic_cast<PointLight*>(_lt)) {
+                            ls.kind = "point";
+                            ls.px = _pl->transform.position.x;
+                            ls.py = _pl->transform.position.y;
+                            ls.pz = _pl->transform.position.z;
+                        }
+                        else {
+                            ls.kind = "base";
+                        }
+                        cfg.sceneLights.push_back(ls);
+                    }
+                }
+            } // end if (s_bakeSceneToCpp)
 
             cfg.compilerPath = strlen(s_compiler) > 0 ? s_compiler
                 : ScriptManager::GetCompilerPath().string();
@@ -5789,7 +7393,7 @@ static void DrawModals(IDEState& ide)
                 RunShipBuild(cfg, *logPtr);
                 }).detach();
         }
-        
+
         ImGui::EndDisabled();
 
         ImGui::SameLine();
@@ -5801,7 +7405,7 @@ static void DrawModals(IDEState& ide)
 //  Menu Bar  (Unity/UE-style: File, Edit, Scene, View, Build, Help,
 //                  centred Play/Pause/Step, right-side stats badge)
 // =============================================================================
-static void DrawMenuBar(IDEState& ide, bool& quitRequested)
+static void DrawMenuBar(IDEState& ide)
 {
     if (!ImGui::BeginMainMenuBar()) return;
     // Utiliser des largeurs fixes pour éviter l'étalement
@@ -5821,7 +7425,7 @@ static void DrawMenuBar(IDEState& ide, bool& quitRequested)
         ImGui::Separator();
         if (ImGui::MenuItem("Ship...")) ide.showShipDialog = true;
         ImGui::Separator();
-        if (ImGui::MenuItem("Quit", "Alt+F4")) quitRequested = true;
+        if (ImGui::MenuItem("Quit", "Alt+F4")) ide.quitRequested = true;
         ImGui::EndMenu();
     }
 
@@ -5855,6 +7459,7 @@ static void DrawMenuBar(IDEState& ide, bool& quitRequested)
         }
         if (ImGui::MenuItem("Delete", "Del", false, !ide.selection.Empty())) {
             ide.bus.send("delete " + ide.selection.Primary());
+            ide.sceneDirty = true;
             ide.selection.Clear();
             RefreshSceneList(ide);
         }
@@ -5922,6 +7527,10 @@ static void DrawMenuBar(IDEState& ide, bool& quitRequested)
         ImGui::EndMenu();
     }
 
+    // AI CHAT
+    if (ImGui::MenuItem("AI Assistant", nullptr, ide.showAIChat)) {
+        ide.showAIChat = !ide.showAIChat;
+    }
     // --- VIEW ---
     if (ImGui::BeginMenu("View", true))
     {
@@ -6098,11 +7707,14 @@ static void SetupDockSpace(IDEState& ide) {
             ImGuiID dockLeft = ImGui::DockBuilderSplitNode(dockLeftAndCenter, ImGuiDir_Left, 0.25f, nullptr, &dockLeftAndCenter);
             ImGuiID dockCenter = dockLeftAndCenter;
 
-            ImGuiID dockBottom = ImGui::DockBuilderSplitNode(dockCenter, ImGuiDir_Down, 0.27f, nullptr, &dockCenter);
+            ImGuiID dockBottom = ImGui::DockBuilderSplitNode(dockCenter, ImGuiDir_Down, 0.35f, nullptr, &dockCenter);
 
             ImGui::DockBuilderDockWindow("Hierarchy", dockLeft);
             ImGui::DockBuilderDockWindow("Viewport", dockCenter);
+            // Inspector docked first so it is the default active tab on the right
+            ImGui::DockBuilderDockWindow("AI Assistant", dockRight);
             ImGui::DockBuilderDockWindow("Inspector", dockRight);
+            // Asset Browser docked first so it is the default active tab at the bottom
             ImGui::DockBuilderDockWindow("Console", dockBottom);
             ImGui::DockBuilderDockWindow("Asset Browser", dockBottom);
 
@@ -6124,8 +7736,113 @@ void MainScene_Run() {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    //  STEP 1 — Project Launcher  (runs in its own separate window, Unity-style)
+    //  This window is fully created, used, then destroyed before the main editor
+    //  window is created.  The chosen project root / name flow in via the two
+    //  strings below.
+    // ═══════════════════════════════════════════════════════════════════════════
+    std::string g_projectRoot;   // e.g. "C:/Users/.../Documents/HonHengine/MyGame"
+    std::string g_projectName;   // e.g. "MyGame"
+    {
+        // ── Create a small launcher window ────────────────────────────────────
+        SDL_Window* launchWin = SDL_CreateWindow(
+            "HonHon Engine — Project Launcher",
+            SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+            760, 560,
+            SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN);
+        if (!launchWin) {
+            std::cerr << "SDL_CreateWindow (launcher) failed\n";
+            SDL_Quit();
+            return;
+        }
+        SDL_GLContext launchCtx = SDL_GL_CreateContext(launchWin);
+        SDL_GL_MakeCurrent(launchWin, launchCtx);
+        SDL_GL_SetSwapInterval(1);
+
+        if (!gladLoadGLLoader((GLADloadproc)SDL_GL_GetProcAddress)) {
+            std::cerr << "GLAD failed (launcher)\n";
+            SDL_GL_DeleteContext(launchCtx);
+            SDL_DestroyWindow(launchWin);
+            SDL_Quit();
+            return;
+        }
+
+        // ── Init ImGui for the launcher window ────────────────────────────────
+        IMGUI_CHECKVERSION();
+        ImGui::CreateContext();
+        {
+            ImGuiIO& lio = ImGui::GetIO();
+            lio.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+            // Disable viewports / docking — launcher is a single plain window
+        }
+        ImGui_ImplSDL2_InitForOpenGL(launchWin, launchCtx);
+        ImGui_ImplOpenGL3_Init("#version 330 core");
+
+        // ── Load fonts for the launcher (same assets as the IDE) ─────────────
+        {
+            ImGuiIO& lio = ImGui::GetIO();
+            const std::string jbPath = "assets/JetBrainsMono-Medium.ttf";
+            const std::string faPath2 = "assets/fa-solid-900.ttf";
+
+            std::ifstream chkJB(jbPath);
+            if (chkJB.good()) {
+                ImFontConfig cfg;
+                cfg.FontDataOwnedByAtlas = false;
+                ImFont* lf = lio.Fonts->AddFontFromFileTTF(
+                    jbPath.c_str(), 16.f, &cfg,
+                    lio.Fonts->GetGlyphRangesDefault());
+                if (!lf) lio.Fonts->AddFontDefault();
+
+                // Merge FontAwesome icons if available
+                std::ifstream chkFA(faPath2);
+                if (chkFA.good()) {
+                    static const ImWchar launcherIconRanges[] = {
+                        ICON_MIN_FA, ICON_MAX_FA, 0 };
+                    ImFontConfig icfg;
+                    icfg.MergeMode = true;
+                    icfg.FontDataOwnedByAtlas = false;
+                    icfg.GlyphMinAdvanceX = 16.f;
+                    lio.Fonts->AddFontFromFileTTF(
+                        faPath2.c_str(), 16.f, &icfg, launcherIconRanges);
+                }
+            }
+            else {
+                lio.Fonts->AddFontDefault();
+            }
+            lio.Fonts->Build();
+        }
+
+        // ── Run the modal picker (blocks until user chooses or closes) ────────
+        HonHengine::ProjectLauncher launcher;
+        bool accepted = launcher.RunModal(launchWin, launchCtx);
+
+        // ── Tear down launcher ImGui + window ─────────────────────────────────
+        ImGui_ImplOpenGL3_Shutdown();
+        ImGui_ImplSDL2_Shutdown();
+        ImGui::DestroyContext();
+        SDL_GL_DeleteContext(launchCtx);
+        SDL_DestroyWindow(launchWin);
+
+        if (!accepted) {
+            // User closed the launcher — exit cleanly.
+            SDL_Quit();
+            return;
+        }
+
+        g_projectRoot = launcher.chosenProjectRoot;
+        g_projectName = launcher.chosenProjectName;
+    }
+    // ── End of launcher ───────────────────────────────────────────────────────
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    //  STEP 2 — Main editor window  (created fresh after launcher is gone)
+    // ═══════════════════════════════════════════════════════════════════════════
     int ideW = 1600, ideH = 960;
-    SDL_Window* win = SDL_CreateWindow("HonHon Engine IDE", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+    std::string editorTitle = "HonHon Engine IDE  —  " + g_projectName
+        + "  [" + g_projectRoot + "]";
+    SDL_Window* win = SDL_CreateWindow(editorTitle.c_str(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         ideW, ideH, SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
     if (!win) { std::cerr << "SDL_CreateWindow failed\n"; SDL_Quit(); return; }
     SDL_GLContext ctx = SDL_GL_CreateContext(win);
@@ -6235,6 +7952,28 @@ void MainScene_Run() {
     player.sdlKeys = SdlBindings::WASD();
 
     IDEState ide;
+
+    // ── Populate project identity from the launcher result ───────────────────
+    // ide.project.rootFolder / name drive every path helper (HonAssetsPath(),
+    // AssetRootDir(), etc.), so this must happen before any Load/Save/Scan call.
+    {
+        auto safeSet = [](char* dst, size_t dstLen, const std::string& src) {
+            strncpy_s(dst, dstLen, src.c_str(), dstLen - 1);
+            dst[dstLen - 1] = '\0';
+            };
+        safeSet(ide.project.rootFolder, sizeof(ide.project.rootFolder), g_projectRoot);
+        safeSet(ide.project.name, sizeof(ide.project.name), g_projectName);
+
+        fs::path defaultScene = fs::path(g_projectRoot) / "assets" / "scenes" / "untitled.honscene";
+        safeSet(ide.sceneFilePath, sizeof(ide.sceneFilePath), defaultScene.string());
+
+        safeSet(ide.shipSrcDir, sizeof(ide.shipSrcDir), g_projectRoot);
+        fs::path distDir = fs::path(g_projectRoot) / "dist";
+        safeSet(ide.shipDstDir, sizeof(ide.shipDstDir), distDir.string());
+
+        fs::create_directories(fs::path(g_projectRoot) / "assets" / "scenes");
+    }
+
     ide.sm = sm;
     ide.renderer = &renderer;
     ide.player = &player;
@@ -6249,13 +7988,14 @@ void MainScene_Run() {
     ScriptManager::AddIncludePath("./tools/glm/include");
     ScriptManager::AddLibraryPath("./tools/glm/lib");
     ScriptManager::AddIncludePath("./tools/glad/include");
+    ScriptManager::AddIncludePath("./vcpkg/installed/x64-windows/include");
 
-     ScriptManager::AddLibraryPathAfter("./tools/glad/lib");
+    ScriptManager::AddLibraryPathAfter("./tools/glad/lib");
     ScriptManager::AddLinkLibraryAfter("glad");
     ide.scriptManager = sm->scriptManager.get();
 
-    // Load editor settings
-    ide.editorSettings.Load("ide_settings.ini");
+    // Load editor settings — stored inside the project folder
+    ide.editorSettings.Load(ide.EditorSettingsPath());
 
     static bool firstRun = true;
 
@@ -6268,15 +8008,18 @@ void MainScene_Run() {
         }
     }
 
-    // ── Asset browser: initial scan ───────────────────────────────────────────
-    ide.assetBrowser.currentDir = "./assets/";
+    // ── Asset browser: initial scan (project-relative) ───────────────────────
+    std::string assetRoot = ide.AssetRootDir();
+    ide.assetBrowser.SetRootPath(assetRoot);      // <-- CRITICAL
+    ide.assetBrowser.currentDir = assetRoot;
     ide.assetBrowser.dirDirty = true;
-    // Load persisted asset database, then rescan to catch new/changed files
-    ide.assetDb.Load(".honassets");
-    if (fs::exists("./assets/"))
-        ide.assetDb.ScanDirectory("./assets/");
 
-    // ── Package manager: seed built-in packages ───────────────────────────────
+    // Load persisted asset database, then scan full asset root
+    ide.assetDb.Load(ide.HonAssetsPath());
+    if (fs::exists(assetRoot))
+        ide.assetDb.ScanDirectory(assetRoot);
+
+    // Package manager setup (unchanged)
     {
         PackageRecord core;
         core.id = "honhon.core"; core.displayName = "HonHon Core";
@@ -6302,7 +8045,6 @@ void MainScene_Run() {
         audio.status = PackageStatus::Available;
         ide.packageMgr.packages.push_back(audio);
 
-        // Load persisted package list if it exists
         ide.packageMgr.Load(".honpackages");
     }
 
@@ -6344,6 +8086,7 @@ void MainScene_Run() {
                     continue;
                 }
                 obj->transform.position = Vector3(task.x, task.y, task.z);
+                obj->tag = "GLTF:" + task.path;
                 {
                     std::unique_lock<std::shared_mutex> lock(g_sceneMutex);
                     ide.sm->objects->push_back(obj);
@@ -6394,7 +8137,7 @@ void MainScene_Run() {
         // -----------------------------------------------------------------------
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
-            if (ev.type == SDL_QUIT) quit = true;
+            if (ev.type == SDL_QUIT) ide.quitRequested = true;
             if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_ESCAPE && ide.playing) {
                 ide.playing = false;
                 SDL_SetRelativeMouseMode(SDL_FALSE);
@@ -6405,7 +8148,16 @@ void MainScene_Run() {
         }
 
         // Process keyboard shortcuts after ImGui has captured its own keys
-        HandleShortcuts(ide, quit);
+        HandleShortcuts(ide);
+        if (ide.quitRequested && !ide.showQuitModal) {
+            if (ide.sceneDirty) {
+                ide.showQuitModal = true;
+            }
+            else {
+                quit = true;   // no unsaved changes, exit immediately
+            }
+        }
+
         UpdateFPSCamera(ide, dt);
 
         if (ide.playing) {
@@ -6504,7 +8256,7 @@ void MainScene_Run() {
                                         }
                                     }
                                 }
-                                ide.assetDb.Save(".honassets");
+                                ide.assetDb.Save(ide.HonAssetsPath());
                             }
                         }
                     }
@@ -6530,7 +8282,47 @@ void MainScene_Run() {
         }
 
         ImGui::Begin("Viewport");
-        DrawViewportPanel(ide, dt);
+
+        // ── Prefab Edit Mode banner (Unity-style) ──────────────────────────
+        // Drawn BEFORE DrawViewportPanel so it consumes cursor space correctly,
+        // and the viewport image + gizmo coordinate space is fully self-consistent.
+        float prefabBannerH = 0.f;
+        if (ide.prefabEditMode) {
+            ImVec2 bannerStart = ImGui::GetCursorScreenPos();
+            // Bright cyan banner at the top of the viewport window
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, { 0.05f, 0.22f, 0.28f, 1.f });
+            ImGui::PushStyleColor(ImGuiCol_Text, { 0.3f,  1.0f,  0.9f,  1.f });
+            ImGui::BeginChild("##prefab_banner", { 0.f, 34.f }, false,
+                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 6.f);
+            ImGui::Text("  \xef\x86\xb2  Prefab Edit Mode  —  %s", ide.prefabEditName.c_str());
+            if (ide.prefabEditDirty) { ImGui::SameLine(); ImGui::TextDisabled("(unsaved)"); }
+            ImGui::SameLine(ImGui::GetContentRegionAvail().x - 200.f);
+            ImGui::PushStyleColor(ImGuiCol_Button, { 0.1f, 0.55f, 0.45f, 1.f });
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, { 0.15f, 0.7f, 0.6f, 1.f });
+            if (ImGui::SmallButton("  Save & Exit  "))
+                SaveAndExitPrefabEditMode(ide);
+            ImGui::PopStyleColor(2);
+            ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Button, { 0.35f, 0.15f, 0.15f, 1.f });
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, { 0.55f, 0.2f,  0.2f,  1.f });
+            if (ImGui::SmallButton("  Discard  "))
+                ExitPrefabEditModeDiscard(ide);
+            ImGui::PopStyleColor(2);
+            ImGui::EndChild();
+            ImGui::PopStyleColor(2);
+            // Thin separator line
+            ImDrawList* bdl = ImGui::GetWindowDrawList();
+            ImVec2 sepStart = ImGui::GetCursorScreenPos();
+            bdl->AddLine({ sepStart.x, sepStart.y },
+                { sepStart.x + ImGui::GetContentRegionAvail().x, sepStart.y },
+                IM_COL32(50, 200, 180, 120), 1.f);
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 1.f);
+            // Track how many pixels were consumed so DrawViewportPanel can account for it
+            prefabBannerH = ImGui::GetCursorScreenPos().y - bannerStart.y;
+        }
+
+        DrawViewportPanel(ide, dt, prefabBannerH);
         ImGui::End();
 
         ImGui::Begin("Hierarchy");
@@ -6554,7 +8346,6 @@ void MainScene_Run() {
                 std::string ext = fs::path(path).extension().string();
                 std::string stem = fs::path(path).stem().string();
 
-                // Ensure unique object name
                 std::string objName = stem;
                 {
                     int n = 1;
@@ -6562,7 +8353,6 @@ void MainScene_Run() {
                         objName = stem + "_" + std::to_string(n++);
                 }
 
-                // Fetch import settings
                 AssetRecord* rec = ide.assetDb.FindByPath(path);
                 float importScale = 1.0f;
                 if (rec && rec->type == AssetType::Model)
@@ -6576,11 +8366,27 @@ void MainScene_Run() {
                     cmd = "obj " + objName + " \"" + path + "\" " + posBuf;
                 else if (ext == ".gltf" || ext == ".glb")
                     cmd = "gltf " + objName + " \"" + path + "\" " + posBuf;
-                else if (ext == ".honscene") {
-                    ide.bus.send("clearscene");
-                    ide.bus.send("loadscene " + path);
-                    ide.sceneDirty = false;
-                    RefreshSceneList(ide);
+
+                // ── Prefab: double-click enters Prefab Edit Mode (Unity-style) ─
+                if (ext == ".honprefab") {
+                    if (ide.prefabEditMode) {
+                        // Already editing a prefab — save the current one first
+                        if (ide.prefabEditPath != path) {
+                            ide.toastMgr.Push("Save or discard current prefab first.", Toast::Warning, 2.f);
+                        }
+                    }
+                    else {
+                        EnterPrefabEditMode(ide, path);
+                    }
+                    return;
+                }
+
+                // ── Prefab: explicit "Instantiate in Scene" from context menu ───
+                // The asset browser sends path+"?instantiate" to signal this intent.
+                if (path.size() > 12 && path.substr(path.size() - 12) == "?instantiate") {
+                    std::string realPath = path.substr(0, path.size() - 12);
+                    std::string first = InstantiatePrefab(ide, realPath);
+                    if (!first.empty()) ide.pendingSelection = first;
                     return;
                 }
 
@@ -6596,13 +8402,29 @@ void MainScene_Run() {
                     }
                     ide.pendingSelection = objName;
                     ide.sceneDirty = true;
-                    // Register and mark sub-object scan pending
                     if (!rec) rec = &ide.assetDb.Register(path);
                     ide.assetBrowser.hasPendingDrop = true;
                     AssetDragPayload fake{};
-                    strncpy_s(fake.path, sizeof(fake.path), path.c_str(), _TRUNCATE);                    fake.type = t;
+                    strncpy_s(fake.path, sizeof(fake.path), path.c_str(), _TRUNCATE);
+                    fake.type = t;
                     ide.assetBrowser.pendingDrop = fake;
                     RefreshSceneList(ide);
+                }
+            },
+            [&](const std::string& scenePath) {
+                if (ide.sceneDirty) {
+                    ide.pendingSceneOpenPath = scenePath;
+                    ide.showSceneOpenPrompt = true;
+                }
+                else {
+                    ide.bus.send("clearscene");
+                    ide.bus.send("loadscene " + scenePath);
+                    strncpy_s(ide.sceneFilePath, sizeof(ide.sceneFilePath),
+                        scenePath.c_str(), sizeof(ide.sceneFilePath) - 1);
+                    ide.sceneDirty = false;
+                    ide.selection.Clear();
+                    RefreshSceneList(ide);
+                    ide.log.push(ConsoleLog::REPLY_OK, "[Scene] Loaded: " + scenePath);
                 }
             });
         ImGui::End();
@@ -6753,8 +8575,8 @@ void MainScene_Run() {
             ImGui::End();
         }
 
-        DrawMenuBar(ide, quit);
-        DrawModals(ide);
+        DrawMenuBar(ide);
+        DrawModals(ide, quit);
         DrawScriptWizardModal(ide);
         DrawToolchainWindow(ide);
         DrawProfilerWindow(ide, dt);
@@ -6768,6 +8590,13 @@ void MainScene_Run() {
                 ide.assetBrowser.focusedGUID = guid;
                 ide.assetBrowser.selectedGUIDs = { guid };
             });
+
+        ide.aiAssistant.Update(&ide.bus);
+        if (ide.showAIChat) {
+            ImGui::Begin(AIAssistant::GetWindowName(), &ide.showAIChat);
+            ide.aiAssistant.DrawInspectorTab();
+            ImGui::End();
+        }
 
         // Toast notifications at end of frame
         ide.toastMgr.DrawToasts(dt);
@@ -6826,7 +8655,7 @@ void MainScene_Run() {
                 if (!toUnregister.empty()) {
                     for (auto& g : toUnregister)
                         ide.assetDb.Unregister(g);
-                    ide.assetDb.Save(".honassets");
+                    ide.assetDb.Save(ide.HonAssetsPath());
                     RefreshSceneList(ide);
                 }
             }
@@ -6897,8 +8726,8 @@ void MainScene_Run() {
     if (shellThr.joinable()) shellThr.join();
     ide.sceneFBO.destroy();
     ide.packageMgr.Save(".honpackages");
-    ide.assetDb.Save(".honassets");
-    ide.editorSettings.Save("ide_settings.ini");  // Save editor settings
+    ide.assetDb.Save(ide.HonAssetsPath());
+    ide.editorSettings.Save(ide.EditorSettingsPath());  // Save editor settings
     ImGui_ImplOpenGL3_Shutdown(); ImGui_ImplSDL2_Shutdown(); ImGui::DestroyContext();
     renderer.cleanup();
     delete sm;

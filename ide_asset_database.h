@@ -121,6 +121,7 @@ inline const char* AssetTypeIcon(AssetType t) {
     case AssetType::Script:       return "\xef\x84\xa0";  // fa-terminal
     case AssetType::Scene:        return "\xef\x81\xbb";  // fa-tree
     case AssetType::Material:     return "\xef\x83\xab";  // fa-lightbulb
+    case AssetType::Prefab:       return "\xef\x86\xb2";  // fa-cubes (package / prefab)
     case AssetType::Font:         return "\xef\x80\xb1";  // fa-font
     case AssetType::ShaderSource: return "\xef\x81\x9b";  // fa-code
     default:                      return "\xef\x85\x9b";  // fa-file

@@ -224,6 +224,7 @@
     <ClInclude Include="exampleScene.h" />
     <ClInclude Include="gizmo.h" />
     <ClInclude Include="GltfImporter.h" />
+    <ClInclude Include="ide_ai_chat.h" />
     <ClInclude Include="ide_asset_browser.h" />
     <ClInclude Include="ide_asset_database.h" />
     <ClInclude Include="ide_camera_bookmarks.h" />
@@ -234,6 +235,7 @@
     <ClInclude Include="ide_package_manager.h" />
     <ClInclude Include="ide_progress.h" />
     <ClInclude Include="ide_project.h" />
+    <ClInclude Include="ide_project_launcher.h" />
     <ClInclude Include="ide_selection.h" />
     <ClInclude Include="ide_ship.h" />
     <ClInclude Include="ide_theme.h" />
@@ -252,6 +254,7 @@
     <ClInclude Include="rectangle.h" />
     <ClInclude Include="GPURenderer.h" />
     <ClInclude Include="renderComponent.h" />
+    <ClInclude Include="scene_io.h" />
     <ClInclude Include="script_component.h" />
     <ClInclude Include="script_manager.h" />
     <ClInclude Include="skinnedShader.h" />
@@ -285,6 +288,7 @@
     <ClCompile Include="gizmo.cpp" />
     <ClCompile Include="GltfImporter.cpp" />
     <ClCompile Include="GPURenderer.cpp" />
+    <ClCompile Include="ide_ai_chat.cpp" />
     <ClCompile Include="ide_ship.cpp" />
     <ClCompile Include="imgui_impl_sdl2.cpp" />
     <ClCompile Include="Importer.cpp" />
@@ -293,6 +297,7 @@
     <ClCompile Include="plane.cpp" />
     <ClCompile Include="quaternion.cpp" />
     <ClCompile Include="rectangle.cpp" />
+    <ClCompile Include="scene_io.cpp" />
     <ClCompile Include="script_manager.cpp" />
     <ClCompile Include="skybox.cpp" />
     <ClCompile Include="UIRenderer.cpp" />

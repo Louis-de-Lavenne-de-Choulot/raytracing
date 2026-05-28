@@ -17,7 +17,7 @@ bool TransformGizmo::ScreenToWorldPlane(float mx, float my, const glm::vec3& pla
 {
     // Convert screen mouse space to NDC
     float x = ((mx - vpX) / vpW) * 2.0f - 1.0f;
-    float y = 1.0f - ((my - vpY) / vpH) * 2.0f;
+    float y = ((my - vpY) / vpH) * 2.0f - 1.0f;
 
     glm::mat4 invVP = glm::inverse(proj * view);
     glm::vec4 rayStartNDC(x, y, -1.0f, 1.0f);
@@ -75,7 +75,7 @@ bool TransformGizmo::Update(int toolMode, const glm::vec3& objPos, const glm::qu
 
     glm::mat4 invVP = glm::inverse(proj * view);
     float ndcX = ((mouseX - vpX) / vpW) * 2.0f - 1.0f;
-    float ndcY = 1.0f - ((mouseY - vpY) / vpH) * 2.0f;
+    float ndcY = ((mouseY - vpY) / vpH) * 2.0f - 1.0f;
     glm::vec4 r0 = invVP * glm::vec4(ndcX, ndcY, -1.0f, 1.0f); r0 /= r0.w;
     glm::vec4 r1 = invVP * glm::vec4(ndcX, ndcY, 1.0f, 1.0f);  r1 /= r1.w;
     glm::vec3 rayOrig = glm::vec3(r0);
@@ -87,7 +87,7 @@ bool TransformGizmo::Update(int toolMode, const glm::vec3& objPos, const glm::qu
             glm::vec4 clip = proj * view * glm::vec4(wp, 1.f);
             if (clip.w <= 0.f) return glm::vec2(-9999);
             glm::vec3 ndc = glm::vec3(clip) / clip.w;
-            return glm::vec2(vpX + (ndc.x * 0.5f + 0.5f) * vpW, vpY + (1.f - (ndc.y * 0.5f + 0.5f)) * vpH);
+            return glm::vec2(vpX + (ndc.x * 0.5f + 0.5f) * vpW, vpY + (ndc.y * 0.5f + 0.5f) * vpH);
             };
 
         glm::vec2 sCenter = projectToScreenLocal(objPos);
@@ -242,7 +242,7 @@ void TransformGizmo::Render(ImDrawList* drawList, int toolMode, const glm::vec3&
         ndc.x = glm::clamp(ndc.x, -1.0f, 1.0f);
         ndc.y = glm::clamp(ndc.y, -1.0f, 1.0f);
         float sx = vpX + (ndc.x * 0.5f + 0.5f) * vpW;
-        float sy = vpY + (1.f - (ndc.y * 0.5f + 0.5f)) * vpH;
+        float sy = vpY + (ndc.y * 0.5f + 0.5f) * vpH;
         return glm::vec2(sx, sy);
         };
 

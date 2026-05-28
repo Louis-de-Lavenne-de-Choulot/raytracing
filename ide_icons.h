@@ -8,13 +8,24 @@
 
 // Commonly used icons — add more as needed from:
 // https://fontawesome.com/icons?s=solid&f=classic
+#define ICON_FA_CIRCLE_INFO "\xef\x84\x9a"   // f05a
 #define ICON_FA_LOCK         "\xef\x80\xa3"   // f023
+#define ICON_FA_LOCK_OPEN    "\xef\x80\xa4"   // f09c
 #define ICON_FA_UNLOCK       "\xef\x80\xa4"   // f09c
 #define ICON_FA_EYE_SLASH    "\xef\x81\xb0"   // f070
 #define ICON_FA_SUN          "\xef\x86\x85"   // f185
 #define ICON_FA_LIGHTBULB    "\xef\x83\xab"   // f0eb
 #define ICON_FA_FOLDER       "\xef\x81\xbb"   // f07b
+#define ICON_FA_FOLDER_OPEN  "\xef\x81\xbc"   // f07c
+#define ICON_FA_OBJECT_GROUP "\xef\x9d\xa3"   // f5fe (group)
+#define ICON_FA_BOXES_STACKED "\xef\x9e\xbd"   // f7bd
 #define ICON_FA_FILE         "\xef\x85\x9b"   // f15b
+#define ICON_FA_BOX 		"\xef\x86\x9e"   // f1c6 (cube/box)
+#define ICON_FA_PEN 		"\xef\x84\x9b"   // f304 (edit)
+#define ICON_FA_SCISSORS 	 "\xef\x84\x9c"   // f0c4 (cut)
+#define ICON_FA_MAGNIFYING_GLASS "\xef\x80\x83"   // f002 (search)
+#define ICON_FA_EYE 		"\xef\x81\xae"   // f06e (view)
+#define ICON_FA_PASTE 		"\xef\x84\x9d"   // f0ea (paste)
 #define ICON_FA_TRASH        "\xef\x8b\xad"   // f2ed
 #define ICON_FA_PLAY         "\xef\x81\x8b"   // f04b
 #define ICON_FA_PAUSE        "\xef\x81\x8c"   // f04c
