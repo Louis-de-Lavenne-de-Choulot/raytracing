@@ -1,84 +1,106 @@
 #pragma once
 #ifndef VRECTANGLEOBJECT
 #define VRECTANGLEOBJECT
-
 #include "baseobject.h"
 #include "basetype.h"
 #include "vertice.h"
 #include "triangle.h"
-#include <array>
+#include <vector>
 
 namespace HonHengine
 {
-    // A box needs 24 vertices (4 per face × 6 faces) so every vertex can carry
-    // a constant per-face normal.
+    // Box subdivided per-face.  Each axis pair controls one pair of opposite faces:
+    //   segmentsX / segmentsY  →  Front & Back  faces  (XY plane)
+    //   segmentsZ / segmentsY  →  Left  & Right faces  (ZY plane)
+    //   segmentsX / segmentsZ  →  Top   & Bottom faces (XZ plane)
     //
-    // Winding matches the original CW convention (GL_CW front-face).
-    // Vertex index layout:
-    //   Front  (-Z) : 0-3    Back   (+Z) : 4-7
-    //   Left   (-X) : 8-11   Right  (+X) : 12-15
-    //   Top    (+Y) : 16-19  Bottom (-Y) : 20-23
-    //
-    // NOTE: Vertice(pos, norm, col) — 3-arg constructor must be used explicitly
-    // so the normal is not silently interpreted as vColor.
-
+    // Passing all three as 1 reproduces the original 12-triangle box exactly.
+    // Winding is CW (GL_CW front-face), normals are per-face constants.
     struct VRectangle
     {
-        std::array<Vertice, 24> vertices = std::array<Vertice, 24>{
-            // ── Front face  (normal  0, 0,-1) ──────────────────────────────
-            Vertice(Vector3(-1, -1, -1), Vector3(0,  0, -1), Vector3(1, 1, 1)), // 0  LBF
-            Vertice(Vector3(1, -1, -1), Vector3(0,  0, -1), Vector3(1, 1, 1)), // 1  RBF
-            Vertice(Vector3(1,  1, -1), Vector3(0,  0, -1), Vector3(1, 1, 1)), // 2  RTF
-            Vertice(Vector3(-1,  1, -1), Vector3(0,  0, -1), Vector3(1, 1, 1)), // 3  LTF
+        std::vector<Vertice>  vertices;
+        std::vector<Triangle> triangles;
 
-            // ── Back face   (normal  0, 0,+1) ──────────────────────────────
-            Vertice(Vector3(-1, -1,  1), Vector3(0,  0,  1), Vector3(1, 1, 1)), // 4  LBB
-            Vertice(Vector3(1, -1,  1), Vector3(0,  0,  1), Vector3(1, 1, 1)), // 5  RBB
-            Vertice(Vector3(1,  1,  1), Vector3(0,  0,  1), Vector3(1, 1, 1)), // 6  RTB
-            Vertice(Vector3(-1,  1,  1), Vector3(0,  0,  1), Vector3(1, 1, 1)), // 7  LTB
+        VRectangle(int segmentsX = 1, int segmentsY = 1, int segmentsZ = 1,
+            Material* mat = Defaults::MissingMaterial)
+        {
+            // Helper: build one subdivided quad-patch and append its vertices/triangles.
+            //
+            //  origin  – bottom-left corner of the patch in 3-D space
+            //  uAxis   – direction of "column" steps  (maps 0..1 → left..right)
+            //  vAxis   – direction of "row"    steps  (maps 0..1 → bottom..top)
+            //  normal  – constant outward normal for every vertex on this face
+            //  uSegs / vSegs – subdivision counts along uAxis / vAxis
+            auto addFace = [&](Vector3 origin,
+                Vector3 uAxis, Vector3 vAxis,
+                Vector3 normal,
+                int uSegs, int vSegs)
+                {
+                    const int uCols = uSegs + 1;
+                    const int vRows = vSegs + 1;
+                    const int base = static_cast<int>(vertices.size());
 
-            // ── Left face   (normal -1, 0, 0) ──────────────────────────────
-            Vertice(Vector3(-1, -1, -1), Vector3(-1,  0,  0), Vector3(1, 1, 1)), // 8
-            Vertice(Vector3(-1,  1, -1), Vector3(-1,  0,  0), Vector3(1, 1, 1)), // 9
-            Vertice(Vector3(-1,  1,  1), Vector3(-1,  0,  0), Vector3(1, 1, 1)), // 10
-            Vertice(Vector3(-1, -1,  1), Vector3(-1,  0,  0), Vector3(1, 1, 1)), // 11
+                    // Vertices
+                    for (int row = 0; row < vRows; ++row)
+                    {
+                        float v = float(row) / float(vSegs);
+                        for (int col = 0; col < uCols; ++col)
+                        {
+                            float u = float(col) / float(uSegs);
+                            Vector3 pos = origin + uAxis * u + vAxis * v;
+                            vertices.push_back(Vertice(pos, normal, Vector3(1, 1, 1)));
+                        }
+                    }
 
-            // ── Right face  (normal +1, 0, 0) ──────────────────────────────
-            Vertice(Vector3(1, -1, -1), Vector3(1,  0,  0), Vector3(1, 1, 1)), // 12
-            Vertice(Vector3(1, -1,  1), Vector3(1,  0,  0), Vector3(1, 1, 1)), // 13
-            Vertice(Vector3(1,  1,  1), Vector3(1,  0,  0), Vector3(1, 1, 1)), // 14
-            Vertice(Vector3(1,  1, -1), Vector3(1,  0,  0), Vector3(1, 1, 1)), // 15
+                    // Triangles  (CCW from the outward-normal side)
+                    //
+                    //  row+1 : tl --- tr
+                    //           |  /  |
+                    //  row   : bl --- br
+                    //
+                    //  CCW from outside:  bl, br, tl  and  tl, br, tr
+                    for (int row = 0; row < vSegs; ++row)
+                    {
+                        for (int col = 0; col < uSegs; ++col)
+                        {
+                            int bl = base + row * uCols + col;
+                            int br = bl + 1;
+                            int tl = bl + uCols;
+                            int tr = tl + 1;
 
-            // ── Top face    (normal  0,+1, 0) ──────────────────────────────
-            Vertice(Vector3(-1,  1, -1), Vector3(0,  1,  0), Vector3(1, 1, 1)), // 16
-            Vertice(Vector3(1,  1, -1), Vector3(0,  1,  0), Vector3(1, 1, 1)), // 17
-            Vertice(Vector3(1,  1,  1), Vector3(0,  1,  0), Vector3(1, 1, 1)), // 18
-            Vertice(Vector3(-1,  1,  1), Vector3(0,  1,  0), Vector3(1, 1, 1)), // 19
+                            triangles.push_back(Triangle(bl, br, tl, mat));
+                            triangles.push_back(Triangle(tl, br, tr, mat));
+                        }
+                    }
+                };
 
-            // ── Bottom face (normal  0,-1, 0) ──────────────────────────────
-            Vertice(Vector3(-1, -1, -1), Vector3(0, -1,  0), Vector3(1, 1, 1)), // 20
-            Vertice(Vector3(-1, -1,  1), Vector3(0, -1,  0), Vector3(1, 1, 1)), // 21
-            Vertice(Vector3(1, -1,  1), Vector3(0, -1,  0), Vector3(1, 1, 1)), // 22
-            Vertice(Vector3(1, -1, -1), Vector3(0, -1,  0), Vector3(1, 1, 1)), // 23
-        };
+            // ── 6 faces, each spanning [-1, 1] on its two tangent axes ──────────
+            //   addFace(origin, uAxis * 2, vAxis * 2, normal, uSegs, vSegs)
 
-        std::array<Triangle, 12> triangles = std::array<Triangle, 12>{
-            // CW winding - same convention as the original VRectangle.
+            // Front  (-Z)  origin bottom-left = (-1,-1,-1), u→+X, v→+Y
+            addFace(Vector3(-1, -1, -1), Vector3(2, 0, 0), Vector3(0, 2, 0),
+                Vector3(0, 0, -1), segmentsX, segmentsY);
 
-            // Front  (-Z)
-            Triangle(0,  1,  2), Triangle(0,  2,  3),
-            // Back   (+Z)
-            Triangle(4,  6,  5), Triangle(4,  7,  6),
-            // Left   (-X)
-            Triangle(8,  9, 10), Triangle(8, 10, 11),
-            // Right  (+X)
-            Triangle(12, 13, 14), Triangle(12, 14, 15),
-            // Top    (+Y)
-            Triangle(16, 17, 18), Triangle(16, 18, 19),
-            // Bottom (-Y)
-            Triangle(20, 21, 22), Triangle(20, 22, 23),
-        };
+            // Back   (+Z)  origin bottom-left = (+1,-1,+1), u→-X, v→+Y
+            addFace(Vector3(1, -1, 1), Vector3(-2, 0, 0), Vector3(0, 2, 0),
+                Vector3(0, 0, 1), segmentsX, segmentsY);
+
+            // Left   (-X)  origin bottom-left = (-1,-1,+1), u→-Z, v→+Y
+            addFace(Vector3(-1, -1, 1), Vector3(0, 0, -2), Vector3(0, 2, 0),
+                Vector3(-1, 0, 0), segmentsZ, segmentsY);
+
+            // Right  (+X)  origin bottom-left = (+1,-1,-1), u→+Z, v→+Y
+            addFace(Vector3(1, -1, -1), Vector3(0, 0, 2), Vector3(0, 2, 0),
+                Vector3(1, 0, 0), segmentsZ, segmentsY);
+
+            // Top    (+Y)  origin bottom-left = (-1,+1,-1), u→+X, v→+Z
+            addFace(Vector3(-1, 1, -1), Vector3(2, 0, 0), Vector3(0, 0, 2),
+                Vector3(0, 1, 0), segmentsX, segmentsZ);
+
+            // Bottom (-Y)  origin bottom-left = (-1,-1,+1), u→+X, v→-Z
+            addFace(Vector3(-1, -1, 1), Vector3(2, 0, 0), Vector3(0, 0, -2),
+                Vector3(0, -1, 0), segmentsX, segmentsZ);
+        }
     };
-};
-
+}
 #endif

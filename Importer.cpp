@@ -220,6 +220,7 @@ namespace HonHengine {
 
         // ── Create object ─────────────────────────────────────────────────
         BaseObject* obj = new BaseObject();
+		obj->type = ObjectType::OBJ_MESH;
         obj->render.shaderName = "beach";           // sensible default; caller can override
         obj->render.vertexStride = sizeof(ObjVert);   // 32 bytes
 
