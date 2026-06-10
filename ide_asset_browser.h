@@ -30,6 +30,7 @@
 #include <windows.h>    // for ShellExecuteA
 #include <shellapi.h>   // for SW_SHOWNORMAL
 #endif
+#include "ide_icons.h"
 
 namespace fs = std::filesystem;
 
@@ -133,16 +134,32 @@ struct AssetBrowserState {
     // Selection
     std::vector<std::string> selectedGUIDs;   // GUID strings
     std::string focusedGUID;                  // single focused (for inspector)
+    std::string lastClickedGUID;              // anchor for Shift-range selection
 
     // Rename modal
     bool  showRenameModal = false;
     char  renameTargetGUID[40] = {};
+    char  renameTargetPath[512] = {};   // fallback when GUID is unknown
     char  renameNewName[128] = {};
+
+    // Path-based selection (for folders and unregistered files)
+    std::vector<std::string> selectedPaths;
 
     // Script wizard modal
     bool  showScriptWizard = false;
     char  wizardScriptName[128] = "NewScript";
     int   wizardScriptTemplate = 0;   // 0=Empty, 1=Start/Update, 2=Full Example
+
+    // Shader create-from-sources wizard
+    bool  showShaderWizard = false;
+    char  shaderWizardName[128] = "NewShader";
+    char  shaderWizardVert[512] = {};   // absolute path to .vert file
+    char  shaderWizardFrag[512] = {};   // absolute path to .frag file
+
+    // Folder rename modal
+    bool  showFolderRenameModal = false;
+    char  folderRenameOldPath[512] = {};
+    char  folderRenameNewName[128] = {};
 
     // Import settings panel (shown when exactly one asset is selected)
     bool  showImportSettings = true;
@@ -254,6 +271,24 @@ static bool CreateNewFolder(const std::string& dir, const std::string& name) {
     return fs::create_directory(folderpath);
 }
 
+// Creates a .honshader sidecar that records the vert/frag source paths.
+// The engine's ShaderLibrary reads this file to compile + cache the program.
+static bool CreateShaderAsset(const std::string& dir, const std::string& name,
+    const std::string& vertPath, const std::string& fragPath)
+{
+    fs::path filepath = fs::path(dir) / (name + ".honshader");
+    if (fs::exists(filepath)) return false;
+    std::ofstream f(filepath);
+    if (!f) return false;
+    f << "shader\n{\n";
+    f << "    name    = \"" << name << "\";\n";
+    f << "    vertex  = \"" << vertPath << "\";\n";
+    f << "    fragment = \"" << fragPath << "\";\n";
+    f << "}\n";
+    f.close();
+    return true;
+}
+
 // Creates an empty .honprefab stub that can be filled in later
 static bool CreateNewPrefab(const std::string& dir, const std::string& name) {
     fs::path filepath = fs::path(dir) / (name + ".honprefab");
@@ -262,13 +297,92 @@ static bool CreateNewPrefab(const std::string& dir, const std::string& name) {
     if (!f) return false;
     f << "{\n"
         << "  \"name\": \"" << name << "\",\n"
-        << "  \"objects\": []\n"
+        << "  \"objects\": [],\n"
+        << "  \"lights\": []\n"
         << "}\n";
     f.close();
     return true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  Helper: scan selectedGUIDs for .vert / .frag and fill wizard fields.
+//  Returns true if at least one slot was filled.
+// ─────────────────────────────────────────────────────────────────────────────
+static bool FillShaderWizardFromSelection(AssetBrowserState& ab, AssetDatabase& db,
+    const std::string& clickedPath = "")
+{
+    ab.shaderWizardVert[0] = '\0';
+    ab.shaderWizardFrag[0] = '\0';
+    bool gotVert = false, gotFrag = false;
+    std::string stemName;
+
+    // First check all selected GUIDs
+    for (auto& g : ab.selectedGUIDs) {
+        auto* r = db.FindByGUID(g);
+        if (!r) continue;
+        std::string ext = fs::path(r->path).extension().string();
+        for (auto& c : ext) c = (char)std::tolower((unsigned char)c);
+        if (ext == ".vert" && !gotVert) {
+            strncpy_s(ab.shaderWizardVert, sizeof(ab.shaderWizardVert),
+                r->path.c_str(), sizeof(ab.shaderWizardVert) - 1);
+            gotVert = true;
+            if (stemName.empty()) stemName = fs::path(r->path).stem().string();
+        }
+        else if (ext == ".frag" && !gotFrag) {
+            strncpy_s(ab.shaderWizardFrag, sizeof(ab.shaderWizardFrag),
+                r->path.c_str(), sizeof(ab.shaderWizardFrag) - 1);
+            gotFrag = true;
+            if (stemName.empty()) stemName = fs::path(r->path).stem().string();
+        }
+        if (gotVert && gotFrag) break;
+    }
+
+    // Fall back to the clicked file path if a slot is still empty
+    if (!clickedPath.empty()) {
+        std::string ext = fs::path(clickedPath).extension().string();
+        for (auto& c : ext) c = (char)std::tolower((unsigned char)c);
+        if (ext == ".vert" && !gotVert) {
+            strncpy_s(ab.shaderWizardVert, sizeof(ab.shaderWizardVert),
+                clickedPath.c_str(), sizeof(ab.shaderWizardVert) - 1);
+            gotVert = true;
+            if (stemName.empty()) stemName = fs::path(clickedPath).stem().string();
+        }
+        else if (ext == ".frag" && !gotFrag) {
+            strncpy_s(ab.shaderWizardFrag, sizeof(ab.shaderWizardFrag),
+                clickedPath.c_str(), sizeof(ab.shaderWizardFrag) - 1);
+            gotFrag = true;
+            if (stemName.empty()) stemName = fs::path(clickedPath).stem().string();
+        }
+    }
+
+    if (!stemName.empty())
+        strncpy_s(ab.shaderWizardName, sizeof(ab.shaderWizardName),
+            stemName.c_str(), sizeof(ab.shaderWizardName) - 1);
+
+    return gotVert || gotFrag;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Opens the host OS file explorer pointed at the specified item's folder
+// ─────────────────────────────────────────────────────────────────────────────
+static void OpenInFileExplorer(const fs::path& targetPath) {
+    // Determine the directory containing the item if it's a file
+    fs::path folderPath = fs::is_directory(targetPath) ? targetPath : targetPath.parent_path();
+    std::string pathStr = folderPath.make_preferred().string();
+
+#if defined(_WIN32)
+    // On Windows, opens the folder directly in File Explorer
+    ShellExecuteA(NULL, "open", "explorer.exe", pathStr.c_str(), NULL, SW_SHOWNORMAL);
+#elif defined(__APPLE__)
+    std::string cmd = "open \"" + pathStr + "\"";
+    std::system(cmd.c_str());
+#else
+    std::string cmd = "xdg-open \"" + pathStr + "\"";
+    std::system(cmd.c_str());
+#endif
+}
+
+//────────────────────────────────────────────────────────────────────────────
 //  Context menu drawn per-item or globally on empty space
 // ─────────────────────────────────────────────────────────────────────────────
 static void DrawAssetContextMenu(AssetBrowserState& ab, AssetDatabase& db,
@@ -276,39 +390,19 @@ static void DrawAssetContextMenu(AssetBrowserState& ab, AssetDatabase& db,
     const fs::directory_entry* entry,
     const std::function<void(const std::string& path, AssetType t)>& onImportAsset = nullptr)
 {
-    // NOTE: caller must have already opened the popup via BeginPopupContextItem.
-    // This function only draws the menu body and calls EndPopup.
-
     AssetRecord* rec = guidStr.empty() ? nullptr : db.FindByGUID(guidStr);
-    if (entry) {
-        // Show prefab-specific header
-        bool isPrefab = !entry->is_directory() &&
-            ExtToAssetType(entry->path().extension().string()) == AssetType::Prefab;
-        if (isPrefab) {
-            ImGui::PushStyleColor(ImGuiCol_Text, { 0.2f, 0.9f, 0.85f, 1.f });
-            ImGui::TextUnformatted("\xef\x86\xb2  ");  // cubes icon
-            ImGui::SameLine();
-            ImGui::TextUnformatted(entry->path().filename().string().c_str());
-            ImGui::PopStyleColor();
-            ImGui::TextDisabled("  Prefab");
-        }
-        else {
-            ImGui::TextDisabled("%s", entry->path().filename().string().c_str());
-        }
-        ImGui::Separator();
-    }
 
     bool isDir = entry && entry->is_directory();
     bool isPrefabEntry = entry && !isDir &&
         ExtToAssetType(entry->path().extension().string()) == AssetType::Prefab;
 
+    // ── File/Type Specific Actions ───────────────────────────────────────────
     if (!isDir) {
-        // "Edit Prefab" + "Instantiate in Scene" for prefabs — surfaces at the top
         if (isPrefabEntry) {
             ImGui::PushStyleColor(ImGuiCol_Text, { 0.3f, 1.f, 0.9f, 1.f });
             if (ImGui::MenuItem("\xef\x86\xb2  Edit Prefab")) {
                 if (entry && onImportAsset)
-                    onImportAsset(entry->path().string(), AssetType::Prefab);  // triggers EnterPrefabEditMode
+                    onImportAsset(entry->path().string(), AssetType::Prefab);
             }
             ImGui::PopStyleColor();
             if (ImGui::MenuItem("Instantiate in Scene")) {
@@ -330,31 +424,124 @@ static void DrawAssetContextMenu(AssetBrowserState& ab, AssetDatabase& db,
     }
 
     if (!isDir && rec) {
-        if (ImGui::MenuItem("Rename...")) {
-            ab.showRenameModal = true;
-            strncpy_s(ab.renameTargetGUID, sizeof(ab.renameTargetGUID), guidStr.c_str(), sizeof(ab.renameTargetGUID) - 1);
-            strncpy_s(ab.renameNewName, sizeof(ab.renameNewName), rec->displayName.c_str(), sizeof(ab.renameNewName) - 1);
-        }
         if (ImGui::MenuItem("Duplicate")) {
             std::string newGuid = db.Duplicate(guidStr);
             if (!newGuid.empty()) ab.dirDirty = true;
         }
+    }
+
+    // Shader creation helper for source codes
+    if (!isDir && entry) {
+        AssetType et = ExtToAssetType(entry->path().extension().string());
+        if (et == AssetType::ShaderSource) {
+            ImGui::Separator();
+            ImGui::PushStyleColor(ImGuiCol_Text, { 0.9f, 0.5f, 0.5f, 1.f });
+            if (ImGui::MenuItem("\xef\x81\x9b  Create Shader from Sources...")) {
+                ab.showShaderWizard = true;
+                FillShaderWizardFromSelection(ab, db, entry->path().string());
+            }
+            ImGui::PopStyleColor();
+        }
+    }
+
+    // ── Mandatory Cross-Target Actions (Files & Folders) ────────────────────
+    if (entry) {
         ImGui::Separator();
+
+        // 1. Open in Explorer
+        if (ImGui::MenuItem("Open in Explorer")) {
+            // Open parent directory if it's a file, or open the folder itself
+            OpenInFileExplorer(entry->path());
+        }
+
+        // 2. Copy Path
+        if (ImGui::MenuItem("Copy Path")) {
+            ImGui::SetClipboardText(entry->path().string().c_str());
+        }
+
+        // 3. Rename
+        if (ImGui::MenuItem("Rename...")) {
+            if (isDir) {
+                ab.showFolderRenameModal = true;
+                std::string oldPath = entry->path().string();
+                std::string oldName = entry->path().filename().string();
+
+                // Clean buffers and assign
+                std::memset(ab.folderRenameOldPath, 0, sizeof(ab.folderRenameOldPath));
+                std::memset(ab.folderRenameNewName, 0, sizeof(ab.folderRenameNewName));
+                strncpy_s(ab.folderRenameOldPath, oldPath.c_str(), sizeof(ab.folderRenameOldPath) - 1);
+                strncpy_s(ab.folderRenameNewName, oldName.c_str(), sizeof(ab.folderRenameNewName) - 1);
+            }
+            else {
+                // Treat as a database tracked asset file
+                ab.showRenameModal = true;
+                std::string oldName = entry->path().filename().string();
+
+                std::memset(ab.renameTargetGUID, 0, sizeof(ab.renameTargetGUID));
+                std::memset(ab.renameTargetPath, 0, sizeof(ab.renameTargetPath));
+                std::memset(ab.renameNewName, 0, sizeof(ab.renameNewName));
+                strncpy_s(ab.renameTargetGUID, guidStr.c_str(), sizeof(ab.renameTargetGUID) - 1);
+                strncpy_s(ab.renameTargetPath, entry->path().string().c_str(), sizeof(ab.renameTargetPath) - 1);
+                strncpy_s(ab.renameNewName, oldName.c_str(), sizeof(ab.renameNewName) - 1);
+            }
+        }
+
+        // 4. Delete
         ImGui::PushStyleColor(ImGuiCol_Text, { 1.f, 0.4f, 0.4f, 1.f });
         if (ImGui::MenuItem("Delete")) {
-            db.BulkDelete({ guidStr });
-            ab.dirDirty = true;
-            ab.selectedGUIDs.erase(
-                std::remove(ab.selectedGUIDs.begin(), ab.selectedGUIDs.end(), guidStr),
-                ab.selectedGUIDs.end());
+            try {
+                if (isDir) {
+                    fs::remove_all(entry->path());
+                }
+                else {
+                    // If tracked in DB, run bulk delete cleanup, otherwise directly remove file
+                    if (!guidStr.empty() && rec) {
+                        db.BulkDelete({ guidStr });
+                        ab.selectedGUIDs.erase(
+                            std::remove(ab.selectedGUIDs.begin(), ab.selectedGUIDs.end(), guidStr),
+                            ab.selectedGUIDs.end()
+                        );
+                    }
+                    else {
+                        fs::remove(entry->path());
+                    }
+                }
+                ab.dirDirty = true;
+            }
+            catch (const std::exception& e) {
+                // Fallback fail-safe logging if a file system lock is active
+                printf("Error executing delete: %s\n", e.what());
+            }
         }
         ImGui::PopStyleColor();
     }
 
-    // Multi-selection bulk ops
+    // Multi-selection bulk ops (unchanged)
     if (ab.selectedGUIDs.size() > 1) {
         ImGui::Separator();
         ImGui::TextDisabled("%zu selected", ab.selectedGUIDs.size());
+
+        {
+            bool hasVert = false, hasFrag = false;
+            for (auto& g : ab.selectedGUIDs) {
+                auto* r = db.FindByGUID(g);
+                if (!r) continue;
+                std::string ext = fs::path(r->path).extension().string();
+                for (auto& c : ext) c = (char)std::tolower((unsigned char)c);
+                if (ext == ".vert") hasVert = true;
+                else if (ext == ".frag") hasFrag = true;
+            }
+            if (hasVert && hasFrag) {
+                ImGui::PushStyleColor(ImGuiCol_Text, { 0.9f, 0.5f, 0.5f, 1.f });
+                if (ImGui::MenuItem("\xef\x81\x9b  Create Shader from Sources...")) {
+                    ab.showShaderWizard = true;
+                    FillShaderWizardFromSelection(ab, db, entry ? entry->path().string() : "");
+                }
+                ImGui::PopStyleColor();
+                ImGui::Separator();
+            }
+        }
+
         if (ImGui::MenuItem("Delete all selected")) {
             db.BulkDelete(ab.selectedGUIDs);
             ab.selectedGUIDs.clear();
@@ -382,6 +569,14 @@ static void DrawAssetContextMenu(AssetBrowserState& ab, AssetDatabase& db,
     ImGui::EndPopup();
 }
 
+static void EnsureAssetRegistered(AssetDatabase& db, const fs::directory_entry& entry) {
+    if (entry.is_directory()) return;
+    std::string path = entry.path().string();
+    if (!db.FindByPath(path)) {
+        db.Register(path);
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Draw a single grid cell; returns true if double-clicked (open dir / import)
 //  Improved: folders show folder icon, scenes show scene icon
@@ -397,12 +592,17 @@ static bool DrawGridCell(AssetBrowserState& ab, AssetDatabase& db,
     AssetType atype = isDir ? AssetType::Unknown
         : ExtToAssetType(entry.path().extension().string());
     std::string path = entry.path().string();
+
+    EnsureAssetRegistered(db, entry);
     AssetRecord* rec = isDir ? nullptr : db.FindByPath(path);
     std::string gstr = (rec) ? rec->guid.ToString() : "";
 
-    bool selected = !gstr.empty() &&
+    bool selected = (!gstr.empty() &&
         std::find(ab.selectedGUIDs.begin(), ab.selectedGUIDs.end(), gstr)
-        != ab.selectedGUIDs.end();
+        != ab.selectedGUIDs.end())
+        || (gstr.empty() &&
+            std::find(ab.selectedPaths.begin(), ab.selectedPaths.end(), path)
+            != ab.selectedPaths.end());
 
     // Outer cell frame
     ImVec2 cellStart = ImGui::GetCursorScreenPos();
@@ -482,18 +682,21 @@ static bool DrawGridCell(AssetBrowserState& ab, AssetDatabase& db,
     }
     else {
         GLuint thumbTex = (rec && rec->thumbnailTex) ? rec->thumbnailTex : g_checkerTex;
-        if (rec && !rec->thumbnailTex) {
-            // Draw type icon text centred
-            const char* iconChar = AssetTypeIcon(atype);
-            // Override scene icon to a more distinctive one
-            if (atype == AssetType::Scene) iconChar = "\xef\x86\xbb";  // fa-tree (scene)
-            dl->AddText(ImGui::GetFont(), 32.f,
-                { cellStart.x + (cellSize - 20.f) * 0.5f, cellStart.y + 18.f },
-                IM_COL32(200, 210, 230, 200), iconChar);
+
+        if (rec && rec->thumbnailTex && rec->thumbnailTex != g_checkerTex) {
+            // Calculate centered position for the 48x48 thumbnail
+            float imgX = cellStart.x + (cellSize - 48.f) * 0.5f;
+            float imgY = cellStart.y + 8.f;
+            dl->AddImage((ImTextureID)(uintptr_t)rec->thumbnailTex,
+                ImVec2(imgX, imgY),
+                ImVec2(imgX + 48.f, imgY + 48.f));
         }
         else {
-            dl->AddImage((ImTextureID)(uintptr_t)thumbTex,
-                { iconX, iconY }, { iconX + 48.f, iconY + 48.f });
+            const char* iconChar = AssetTypeIcon(atype);
+            if (atype == AssetType::Scene) iconChar = "\xef\x86\xbb"; // fa-tree
+            dl->AddText(ImGui::GetFont(), 32.f,
+                { cellStart.x + (cellSize - 32.f) * 0.5f, cellStart.y + 18.f },
+                IM_COL32(200, 210, 230, 200), iconChar);
         }
     }
 
@@ -524,27 +727,94 @@ static bool DrawGridCell(AssetBrowserState& ab, AssetDatabase& db,
     // Selection logic
     if (clicked && !ctxOpen) {
         ImGuiIO& io = ImGui::GetIO();
-        if (!io.KeyCtrl && !io.KeyShift) ab.selectedGUIDs.clear();
+        if (!io.KeyCtrl) {
+            ab.selectedGUIDs.clear();
+            ab.selectedPaths.clear();
+        }
         if (!gstr.empty()) {
-            auto it = std::find(ab.selectedGUIDs.begin(), ab.selectedGUIDs.end(), gstr);
-            if (it == ab.selectedGUIDs.end())
-                ab.selectedGUIDs.push_back(gstr);
+            // GUID-tracked asset
+            if (io.KeyShift && !ab.lastClickedGUID.empty()) {
+                if (std::find(ab.selectedGUIDs.begin(), ab.selectedGUIDs.end(), gstr)
+                    == ab.selectedGUIDs.end())
+                    ab.selectedGUIDs.push_back(gstr);
+                ab.focusedGUID = gstr;
+            }
+            else {
+                auto it = std::find(ab.selectedGUIDs.begin(), ab.selectedGUIDs.end(), gstr);
+                if (it == ab.selectedGUIDs.end())
+                    ab.selectedGUIDs.push_back(gstr);
+                else if (io.KeyCtrl)
+                    ab.selectedGUIDs.erase(it);
+                ab.focusedGUID = gstr;
+                ab.lastClickedGUID = gstr;
+            }
+        }
+        else {
+            // Folder or unregistered file: use path-based selection
+            auto it = std::find(ab.selectedPaths.begin(), ab.selectedPaths.end(), path);
+            if (it == ab.selectedPaths.end())
+                ab.selectedPaths.push_back(path);
             else if (io.KeyCtrl)
-                ab.selectedGUIDs.erase(it);
-            ab.focusedGUID = gstr;
+                ab.selectedPaths.erase(it);
         }
     }
 
     // Drag source (only for non-folders)
-    if (!isDir && !gstr.empty() && ImGui::BeginDragDropSource(ImGuiDragDropFlags_None)) {
+    // SourceAllowNullID is required because the last item is an InvisibleButton,
+    // which has a null item-ID in ImGui's drag context.
+    if (!isDir && !gstr.empty() && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
         AssetDragPayload payload;
         strncpy_s(payload.guidStr, sizeof(payload.guidStr), gstr.c_str(), sizeof(payload.guidStr) - 1);
         strncpy_s(payload.path, sizeof(payload.path), path.c_str(), sizeof(payload.path) - 1);
         payload.type = atype;
+
+        // If a .vert + .frag pair is multi-selected and we're dragging one of them,
+        // upgrade the payload type to Shader so drop targets know it's a complete pair.
+        // We scan selectedGUIDs AND the dragged file itself to cover the case where
+        // the drag started before the second file's selection was registered.
+        if (atype == AssetType::ShaderSource) {
+            bool hasVert = false, hasFrag = false;
+            // Check the dragged file first
+            {
+                std::string ext = fs::path(path).extension().string();
+                for (auto& c : ext) c = (char)std::tolower((unsigned char)c);
+                if (ext == ".vert") hasVert = true;
+                else if (ext == ".frag") hasFrag = true;
+            }
+            // Then scan the rest of the selection
+            for (auto& g : ab.selectedGUIDs) {
+                auto* r = db.FindByGUID(g);
+                if (!r) continue;
+                std::string ext = fs::path(r->path).extension().string();
+                for (auto& c : ext) c = (char)std::tolower((unsigned char)c);
+                if (ext == ".vert") hasVert = true;
+                else if (ext == ".frag") hasFrag = true;
+                if (hasVert && hasFrag) break;
+            }
+            if (hasVert && hasFrag)
+                payload.type = AssetType::Shader;
+        }
+
         ImGui::SetDragDropPayload(kAssetDragPayload, &payload, sizeof(payload));
-        ImGui::TextUnformatted(AssetTypeIcon(atype));
-        ImGui::SameLine();
-        ImGui::TextUnformatted(name.c_str());
+        // If dragging a multi-selection, show count; otherwise show the file name
+        int selNonDir = 0;
+        for (auto& g : ab.selectedGUIDs) {
+            auto* r = db.FindByGUID(g);
+            if (r) ++selNonDir;
+        }
+        if (selNonDir > 1) {
+            ImGui::TextUnformatted(AssetTypeIcon(atype));
+            ImGui::SameLine();
+            if (payload.type == AssetType::Shader)
+                ImGui::TextUnformatted("\xef\x81\x9b  Shader pair");
+            else
+                ImGui::Text("%d assets", selNonDir);
+        }
+        else {
+            ImGui::TextUnformatted(AssetTypeIcon(atype));
+            ImGui::SameLine();
+            ImGui::TextUnformatted(name.c_str());
+        }
         ImGui::EndDragDropSource();
     }
 
@@ -593,7 +863,7 @@ inline void DrawAssetBrowserContent(
     // Navigation: back
     bool canGoBack = !ab.navStack.empty();
     if (!canGoBack) ImGui::BeginDisabled();
-    if (ImGui::Button("\xef\x81\x87")) {  // fa-arrows (back)
+    if (ImGui::Button(ICON_FA_ARROW_LEFT, { 28, 24 })) { // fa-arrows (back)
         if (!ab.navStack.empty()) {
             std::string backDir = ab.navStack.back();
             backDir = ClampToRoot(backDir, ab.rootPath);
@@ -609,7 +879,7 @@ inline void DrawAssetBrowserContent(
     ImGui::SameLine();
 
     // Refresh button
-    if (ImGui::Button("\xef\x81\x9e")) {  // fa-sync
+    if (ImGui::Button(ICON_FA_REDO_ALT, { 28, 24 })) {  // fa-sync
         ab.dirDirty = true;
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Refresh");
@@ -686,19 +956,6 @@ inline void DrawAssetBrowserContent(
 
     // ── Breadcrumb navigation ──────────────────────────────────────────────
     {
-        // Home button
-        if (ImGui::Button("\xef\x80\x95", { 28, 24 })) {  // fa-home
-            ab.navStack.push_back(ab.currentDir);
-            ab.currentDir = ab.rootPath;
-            ab.dirDirty = true;
-            ab.selectedGUIDs.clear();
-        }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Go to project asset folder");
-
-        ImGui::SameLine();
-        ImGui::TextDisabled("/");
-        ImGui::SameLine();
-
         // Build breadcrumb from rootPath
         fs::path current(ab.currentDir);
         fs::path root(ab.rootPath);
@@ -823,6 +1080,14 @@ inline void DrawAssetBrowserContent(
             }
         }
         ImGui::PopStyleColor();
+        ImGui::PushStyleColor(ImGuiCol_Text, { 0.9f, 0.5f, 0.5f, 1.f });
+        if (ImGui::MenuItem("\xef\x81\x9b  Shader (.honshader)")) {
+            ab.showShaderWizard = true;
+            ab.shaderWizardVert[0] = '\0';
+            ab.shaderWizardFrag[0] = '\0';
+            strncpy_s(ab.shaderWizardName, sizeof(ab.shaderWizardName), "NewShader", sizeof(ab.shaderWizardName) - 1);
+        }
+        ImGui::PopStyleColor();
         ImGui::Separator();
         if (ImGui::MenuItem("Folder")) {
             static int folderCounter = 1;
@@ -859,22 +1124,74 @@ inline void DrawAssetBrowserContent(
         ImGui::TextDisabled("  Right-click to create new assets.");
     }
 
+    // ── Keyboard shortcuts inside the file area ───────────────────────────────
+    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows)) {
+        ImGuiIO& io = ImGui::GetIO();
+        // Ctrl+A: select all visible non-folder assets
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_A, false)) {
+            ab.selectedGUIDs.clear();
+            for (auto& e : ab.dirEntries) {
+                if (!matchesFilter(e) || e.is_directory()) continue;
+                auto* r = db.FindByPath(e.path().string());
+                if (r) ab.selectedGUIDs.push_back(r->guid.ToString());
+            }
+        }
+        // Escape: clear selection
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+            ab.selectedGUIDs.clear();
+    }
+
     // ── GRID VIEW ────────────────────────────────────────────────────────────
     if (ab.viewMode == AssetBrowserState::Grid) {
         float cellW = ab.iconSize + 8.f;
         float availX = ImGui::GetContentRegionAvail().x;
         int cols = (std::max)(1, (int)(availX / cellW));
 
+        // Build a flat ordered list of visible GUIDs for Shift range-select
+        std::vector<std::string> visibleGUIDs;
+        for (auto& e : ab.dirEntries) {
+            if (!matchesFilter(e)) continue;
+            auto* r = e.is_directory() ? nullptr : db.FindByPath(e.path().string());
+            visibleGUIDs.push_back(r ? r->guid.ToString() : "");
+        }
+
         int col = 0;
+        int entryIdx = -1;
         for (auto& entry : ab.dirEntries) {
             if (!matchesFilter(entry)) continue;
+            ++entryIdx;
 
             bool ctxOpen = false;
             bool dblClick = DrawGridCell(ab, db, entry, ab.iconSize, ctxOpen, onImportAsset);
 
+            EnsureAssetRegistered(db, entry);
             std::string path = entry.path().string();
             AssetRecord* rec = entry.is_directory() ? nullptr : db.FindByPath(path);
             std::string gstr = rec ? rec->guid.ToString() : "";
+
+            // Shift range-select: when DrawGridCell added gstr and lastClickedGUID differs,
+            // fill in all GUIDs between the anchor and this item.
+            if (!gstr.empty() && !ab.lastClickedGUID.empty() && gstr != ab.lastClickedGUID) {
+                ImGuiIO& io = ImGui::GetIO();
+                if (io.KeyShift) {
+                    // Find anchor and current positions in visible list
+                    int anchorIdx = -1, curIdx = -1;
+                    for (int i = 0; i < (int)visibleGUIDs.size(); ++i) {
+                        if (visibleGUIDs[i] == ab.lastClickedGUID) anchorIdx = i;
+                        if (visibleGUIDs[i] == gstr)               curIdx = i;
+                    }
+                    if (anchorIdx >= 0 && curIdx >= 0) {
+                        int lo = (std::min)(anchorIdx, curIdx);
+                        int hi = (std::max)(anchorIdx, curIdx);
+                        for (int i = lo; i <= hi; ++i) {
+                            if (!visibleGUIDs[i].empty() &&
+                                std::find(ab.selectedGUIDs.begin(), ab.selectedGUIDs.end(),
+                                    visibleGUIDs[i]) == ab.selectedGUIDs.end())
+                                ab.selectedGUIDs.push_back(visibleGUIDs[i]);
+                        }
+                    }
+                }
+            }
 
             if (dblClick) {
                 if (entry.is_directory()) {
@@ -922,6 +1239,8 @@ inline void DrawAssetBrowserContent(
                 bool isDir = entry.is_directory();
                 AssetType atype = isDir ? AssetType::Unknown
                     : ExtToAssetType(entry.path().extension().string());
+
+                EnsureAssetRegistered(db, entry);
                 std::string path = entry.path().string();
                 AssetRecord* rec = isDir ? nullptr : db.FindByPath(path);
                 std::string gstr = rec ? rec->guid.ToString() : "";
@@ -936,9 +1255,9 @@ inline void DrawAssetBrowserContent(
                 ImGui::PushID(name.c_str());
                 // Choose icon: folder, scene, prefab, or default type icon
                 const char* iconChar = " ";
-                if (isDir) iconChar = "\xef\x81\xbb ";
-                else if (atype == AssetType::Scene)  iconChar = "\xef\x86\xbb ";
-                else if (atype == AssetType::Prefab) iconChar = "\xef\x86\xb2 ";  // fa-cubes
+                if (isDir) iconChar = ICON_FA_FOLDER;
+                else if (atype == AssetType::Scene)  iconChar = ICON_FA_TREE;
+                else if (atype == AssetType::Prefab) iconChar = ICON_FA_CUBE;  // fa-cubes
                 else iconChar = AssetTypeIcon(atype);
                 std::string label = std::string(iconChar) + " " + name;
                 if (ImGui::Selectable(label.c_str(), selected,
@@ -969,6 +1288,19 @@ inline void DrawAssetBrowserContent(
                             onImportAsset(path, atype);
                         }
                     }
+                }
+
+                // Drag source — must come immediately after the Selectable so ImGui
+                // still has the correct last-item ID.  Moving it below the context-menu
+                // block caused the source to never fire.
+                if (!isDir && !gstr.empty() && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+                    AssetDragPayload payload;
+                    strncpy_s(payload.guidStr, sizeof(payload.guidStr), gstr.c_str(), sizeof(payload.guidStr) - 1);
+                    strncpy_s(payload.path, sizeof(payload.path), path.c_str(), sizeof(payload.path) - 1);
+                    payload.type = atype;
+                    ImGui::SetDragDropPayload(kAssetDragPayload, &payload, sizeof(payload));
+                    ImGui::TextUnformatted(name.c_str());
+                    ImGui::EndDragDropSource();
                 }
 
                 bool ctxOpen2 = ImGui::BeginPopupContextItem("##lctx");
@@ -1004,8 +1336,20 @@ inline void DrawAssetBrowserContent(
                         if (ImGui::MenuItem("Open")) {
                             OpenWithDefaultProgram(path);
                         }
+
                         if (recCtx && ImGui::MenuItem("Reimport")) recCtx->needsReimport = true;
                         ImGui::Separator();
+
+                        if (ImGui::MenuItem("Copy Path")) {
+                            ImGui::SetClipboardText(path.c_str());
+
+                        }
+                        ImGui::Separator();
+                        if (ImGui::MenuItem("Show in Explorer")) {
+                            std::string cmd = "explorer.exe /select,\"" + path + "\"";
+                            system(cmd.c_str());
+                        }
+
                     }
                     if (recCtx) {
                         if (ImGui::MenuItem(recCtx->isFavorite ? "Remove from Favorites" : "Add to Favorites"))
@@ -1015,13 +1359,41 @@ inline void DrawAssetBrowserContent(
                         if (ImGui::MenuItem("Rename...")) {
                             ab.showRenameModal = true;
                             strncpy_s(ab.renameTargetGUID, sizeof(ab.renameTargetGUID), gstr.c_str(), sizeof(ab.renameTargetGUID) - 1);
-                            strncpy_s(ab.renameNewName, sizeof(ab.renameNewName), recCtx->displayName.c_str(), sizeof(ab.renameNewName) - 1);
+                            strncpy_s(ab.renameTargetPath, sizeof(ab.renameTargetPath), path.c_str(), sizeof(ab.renameTargetPath) - 1);
+                            // Pre-fill with full filename so user can change extension too
+                            strncpy_s(ab.renameNewName, sizeof(ab.renameNewName), entry.path().filename().string().c_str(), sizeof(ab.renameNewName) - 1);
                         }
+                        ImGui::Separator();
                         if (ImGui::MenuItem("Duplicate")) {
                             std::string newGuid = db.Duplicate(gstr);
                             if (!newGuid.empty()) ab.dirDirty = true;
                         }
-                        ImGui::Separator();
+                    }
+                    // Folder rename
+                    if (isDirCtx) {
+                        if (ImGui::MenuItem("Rename Folder...")) {
+                            ab.showFolderRenameModal = true;
+                            strncpy_s(ab.folderRenameOldPath, sizeof(ab.folderRenameOldPath),
+                                entry.path().string().c_str(), sizeof(ab.folderRenameOldPath) - 1);
+                            strncpy_s(ab.folderRenameNewName, sizeof(ab.folderRenameNewName),
+                                entry.path().filename().string().c_str(), sizeof(ab.folderRenameNewName) - 1);
+                        }
+                    }
+                    // Shader creation from .vert / .frag
+                    if (!isDirCtx) {
+                        AssetType et = ExtToAssetType(entry.path().extension().string());
+                        if (et == AssetType::ShaderSource) {
+                            ImGui::Separator();
+                            ImGui::PushStyleColor(ImGuiCol_Text, { 0.9f, 0.5f, 0.5f, 1.f });
+                            if (ImGui::MenuItem("\xef\x81\x9b  Create Shader from Sources...")) {
+                                ab.showShaderWizard = true;
+                                FillShaderWizardFromSelection(ab, db, path);
+                            }
+                            ImGui::PopStyleColor();
+                        }
+                    }
+                    ImGui::Separator();
+                    if (!isDirCtx && recCtx) {
                         ImGui::PushStyleColor(ImGuiCol_Text, { 1.f, 0.4f, 0.4f, 1.f });
                         if (ImGui::MenuItem("Delete")) {
                             db.BulkDelete({ gstr });
@@ -1029,6 +1401,16 @@ inline void DrawAssetBrowserContent(
                             ab.selectedGUIDs.erase(
                                 std::remove(ab.selectedGUIDs.begin(), ab.selectedGUIDs.end(), gstr),
                                 ab.selectedGUIDs.end());
+                        }
+                        ImGui::PopStyleColor();
+                    }
+                    // Folder delete
+                    if (isDirCtx) {
+                        ImGui::PushStyleColor(ImGuiCol_Text, { 1.f, 0.4f, 0.4f, 1.f });
+                        if (ImGui::MenuItem("Delete Folder")) {
+                            try { fs::remove_all(entry.path()); }
+                            catch (...) {}
+                            ab.dirDirty = true;
                         }
                         ImGui::PopStyleColor();
                     }
@@ -1046,17 +1428,6 @@ inline void DrawAssetBrowserContent(
                         }
                     }
                     ImGui::EndPopup();
-                }
-
-                // Drag source (non-folder only)
-                if (!isDir && !gstr.empty() && ImGui::BeginDragDropSource()) {
-                    AssetDragPayload payload;
-                    strncpy_s(payload.guidStr, sizeof(payload.guidStr), gstr.c_str(), sizeof(payload.guidStr) - 1);
-                    strncpy_s(payload.path, sizeof(payload.path), path.c_str(), sizeof(payload.path) - 1);
-                    payload.type = atype;
-                    ImGui::SetDragDropPayload(kAssetDragPayload, &payload, sizeof(payload));
-                    ImGui::TextUnformatted(name.c_str());
-                    ImGui::EndDragDropSource();
                 }
 
                 ImGui::TableSetColumnIndex(1);
@@ -1233,11 +1604,40 @@ inline void DrawAssetBrowserPanel(
     // ── Rename modal ─────────────────────────────────────────────────────────
     if (ab.showRenameModal) { ImGui::OpenPopup("Rename Asset"); ab.showRenameModal = false; }
     if (ImGui::BeginPopupModal("Rename Asset", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::InputText("New display name", ab.renameNewName, sizeof(ab.renameNewName),
+        ImGui::TextDisabled("New filename (with extension):");
+        ImGui::InputText("##renameinput", ab.renameNewName, sizeof(ab.renameNewName),
             ImGuiInputTextFlags_AutoSelectAll);
         if (ImGui::Button("Rename", { 120, 0 })) {
-            auto* rec = db.FindByGUID(std::string(ab.renameTargetGUID));
-            if (rec) rec->displayName = ab.renameNewName;
+            if (ab.renameNewName[0] != '\0') {
+                auto* rec = db.FindByGUID(std::string(ab.renameTargetGUID));
+
+                // Determine the old path: prefer DB record, fall back to stored path
+                fs::path oldPath;
+                if (rec)
+                    oldPath = fs::path(rec->path);
+                else if (ab.renameTargetPath[0] != '\0')
+                    oldPath = fs::path(ab.renameTargetPath);
+
+                if (!oldPath.empty() && fs::exists(oldPath)) {
+                    fs::path newPath = oldPath.parent_path() / ab.renameNewName;
+                    bool renamed = false;
+                    try {
+                        fs::rename(oldPath, newPath);
+                        renamed = true;
+                    }
+                    catch (...) {}
+                    if (renamed) {
+                        if (rec) {
+                            db.pathToGUID.erase(rec->path);
+                            rec->path = newPath.string();
+                            rec->displayName = newPath.stem().string();
+                            rec->type = ExtToAssetType(newPath.extension().string());
+                            db.pathToGUID[rec->path] = std::string(ab.renameTargetGUID);
+                        }
+                        ab.dirDirty = true;
+                    }
+                }
+            }
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
@@ -1265,6 +1665,106 @@ inline void DrawAssetBrowserPanel(
         }
         ImGui::SameLine();
         if (ImGui::Button("Cancel", { 80, 0 })) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+
+    // ── Shader Wizard modal ──────────────────────────────────────────────────────
+    if (ab.showShaderWizard) { ImGui::OpenPopup("Create Shader##abshader"); ab.showShaderWizard = false; }
+    if (ImGui::BeginPopupModal("Create Shader##abshader", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        ImGui::TextDisabled("Creates a .honshader asset linking a vertex and fragment source.");
+        ImGui::Separator();
+
+        ImGui::SetNextItemWidth(280.f);
+        ImGui::InputText("Shader Name##sh", ab.shaderWizardName, sizeof(ab.shaderWizardName),
+            ImGuiInputTextFlags_AutoSelectAll);
+
+        ImGui::Spacing();
+
+        // Vertex row — icon + path + clear button
+        bool hasVert = ab.shaderWizardVert[0] != '\0';
+        ImGui::PushStyleColor(ImGuiCol_Text, hasVert
+            ? ImVec4{ 0.4f, 0.9f, 0.4f, 1.f }   // green tick
+        : ImVec4{ 0.9f, 0.5f, 0.2f, 1.f });  // orange warning
+        ImGui::TextUnformatted(hasVert ? "\xef\x84\x9e" : "\xef\x81\xb1");  // check / warning
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(360.f);
+        ImGui::InputText("Vertex (.vert)##shv", ab.shaderWizardVert, sizeof(ab.shaderWizardVert));
+        if (hasVert) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("x##clv")) ab.shaderWizardVert[0] = '\0';
+        }
+
+        // Fragment row
+        bool hasFrag = ab.shaderWizardFrag[0] != '\0';
+        ImGui::PushStyleColor(ImGuiCol_Text, hasFrag
+            ? ImVec4{ 0.4f, 0.9f, 0.4f, 1.f }
+        : ImVec4{ 0.9f, 0.5f, 0.2f, 1.f });
+        ImGui::TextUnformatted(hasFrag ? "\xef\x84\x9e" : "\xef\x81\xb1");
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(360.f);
+        ImGui::InputText("Fragment (.frag)##shf", ab.shaderWizardFrag, sizeof(ab.shaderWizardFrag));
+        if (hasFrag) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("x##clf")) ab.shaderWizardFrag[0] = '\0';
+        }
+
+        // Re-fill hint when slots are missing
+        if (!hasVert || !hasFrag) {
+            ImGui::Spacing();
+            ImGui::PushStyleColor(ImGuiCol_Text, { 0.6f, 0.65f, 0.7f, 1.f });
+            ImGui::TextUnformatted("  Tip: Ctrl+click both .vert and .frag in the browser,");
+            ImGui::TextUnformatted("  then right-click \xe2\x86\x92 Create Shader from Sources to auto-fill.");
+            ImGui::PopStyleColor();
+        }
+
+        ImGui::Separator();
+
+        bool canCreate = ab.shaderWizardName[0] != '\0' && hasVert && hasFrag;
+        if (!canCreate) ImGui::BeginDisabled();
+        if (ImGui::Button("Create Shader", { 140, 0 })) {
+            if (CreateShaderAsset(ab.currentDir, ab.shaderWizardName,
+                ab.shaderWizardVert, ab.shaderWizardFrag)) {
+                fs::path p = fs::path(ab.currentDir) / (std::string(ab.shaderWizardName) + ".honshader");
+                db.Register(p.string());
+                ab.dirDirty = true;
+            }
+            ImGui::CloseCurrentPopup();
+        }
+        if (!canCreate) ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel##sh", { 80, 0 })) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+
+    // ── Folder Rename modal ──────────────────────────────────────────────────────
+    if (ab.showFolderRenameModal) { ImGui::OpenPopup("Rename Folder##abfr"); ab.showFolderRenameModal = false; }
+    if (ImGui::BeginPopupModal("Rename Folder##abfr", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        ImGui::TextDisabled("New folder name:");
+        ImGui::InputText("##frname", ab.folderRenameNewName, sizeof(ab.folderRenameNewName),
+            ImGuiInputTextFlags_AutoSelectAll);
+        if (ImGui::Button("Rename##fr", { 120, 0 })) {
+            if (ab.folderRenameNewName[0] != '\0') {
+                fs::path oldP(ab.folderRenameOldPath);
+                fs::path newP = oldP.parent_path() / ab.folderRenameNewName;
+                try { fs::rename(oldP, newP); }
+                catch (...) {}
+                // If we navigated into that folder, update currentDir
+                if (std::string(ab.folderRenameOldPath) == ab.currentDir ||
+                    ab.currentDir.find(ab.folderRenameOldPath) == 0) {
+                    ab.currentDir = newP.string();
+                    if (!ab.currentDir.empty() && ab.currentDir.back() != '/')
+                        ab.currentDir += '/';
+                }
+                ab.dirDirty = true;
+            }
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel##fr", { 80, 0 })) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
 }

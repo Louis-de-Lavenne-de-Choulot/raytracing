@@ -1,6 +1,6 @@
-#pragma once
 // ide_ai_chat.h — AI Assistant using OpenRouter API
-// Integrated as a dockable inspector tab
+// Integrated as a dockable inspector tab with content generation and rollback.
+#pragma once
 
 #include <string>
 #include <vector>
@@ -11,6 +11,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <imgui.h>
+#include <glm/glm.hpp>
 
 // Forward declarations
 class CommandBus;
@@ -21,7 +22,6 @@ struct AIChatMessage {
     std::string content;
 };
 
-// Stores conversation history and manages async requests
 class AIAssistant {
 public:
     AIAssistant();
@@ -45,59 +45,73 @@ public:
     // Draw settings UI (for preferences window)
     void DrawSettingsUI();
 
-    // Get the window name for docking
     static const char* GetWindowName() { return "AI Assistant"; }
-
-    // Clear conversation history
     void ClearHistory();
-
-    // Toggle visibility
     bool IsVisible() const { return visible; }
     void SetVisible(bool v) { visible = v; }
     void ToggleVisible() { visible = !visible; }
 
 private:
-    // Background thread worker
+    // Background worker
     void WorkerLoop();
 
-    // Build system prompt with command list
+    // Build system prompt (includes content‑generation commands)
     std::string BuildSystemPrompt() const;
 
-    // Perform HTTP POST to OpenRouter (Windows WinHTTP, no extra libs)
+    // HTTP request (WinHTTP on Windows, libcurl stubbed on other platforms)
     bool SendRequest(const std::vector<AIChatMessage>& messages, std::string& response);
 
-    // Extract commands from AI response (lines starting with '>')
+    // Extract normal commands (lines starting with '>')
     std::vector<std::string> ExtractCommands(const std::string& aiText);
 
-    // Add a message to history (thread-safe)
+    // Parse advanced blocks (<vert>, <frag>, <vertexdata>, <indexdata>, <content>)
+    std::string ExtractBlock(const std::string& text, const std::string& tag);
+    std::vector<float>  ExtractFloatArray(const std::string& text, const std::string& tag);
+    std::vector<uint32_t> ExtractUIntArray(const std::string& text, const std::string& tag);
+
+    // Write a temporary file; returns empty string on failure
+    std::string WriteTempFile(const std::string& content, const std::string& extension);
+
+    // Content generation with rollback
+    bool CreateShaderFromSource(const std::string& name,
+        const std::string& vertSrc,
+        const std::string& fragSrc,
+        CommandBus* cmdBus);
+    bool CreateCustomMeshFromData(const std::string& name,
+        const std::vector<float>& vertices,
+        const std::vector<uint32_t>& indices,
+        const std::string& shaderName,
+        const glm::vec3& position,
+        CommandBus* cmdBus);
+    bool WriteFileContent(const std::string& path, const std::string& content);
+
+    // Add message to history (thread-safe)
     void AddMessage(AIChatMessage::Role role, const std::string& content);
 
-    // JSON escape helper
+    // JSON escaping
     static std::string JsonEscape(const std::string& s);
-
-    // Safe environment variable reading (Windows + POSIX)
     static std::string GetEnvSafe(const char* name);
 
-    // Update the scene context string
+    // Update scene context (currently unused, kept for future)
     void UpdateSceneContext(const std::string& context) { sceneContext = context; }
 
 private:
     std::string apiKey;
-    std::string model = "openrouter/auto";
+    std::string model = "openrouter/free";
     std::string lastError;
-    std::string sceneContext;  // Current scene info for context
+    std::string sceneContext;
     bool visible = true;
 
-    // Conversation history (shared)
+    // Conversation history
     std::vector<AIChatMessage> history;
     mutable std::mutex historyMutex;
 
-    // Queue of user prompts waiting to be sent
+    // Queue of user prompts
     std::deque<std::string> pendingUserMessages;
     std::mutex pendingMutex;
     std::condition_variable pendingCV;
 
-    // Results from AI (to be processed on main thread)
+    // AI results
     struct AIResult {
         std::string responseText;
         bool success;
@@ -106,7 +120,11 @@ private:
     std::deque<AIResult> pendingResults;
     std::mutex resultMutex;
 
-    // Background thread
+    // Commands queued for the main thread (for rollback‑sensitive operations)
+    std::vector<std::string> pendingEngineCommands;
+    std::mutex pendingCommandsMutex;
+
+    // Background thread control
     std::thread workerThread;
     std::atomic<bool> stopWorker;
 
@@ -115,5 +133,5 @@ private:
     bool autoScroll = true;
     bool waitingForAI = false;
     float lastResponseTime = 0.0f;
-    bool showSettings = true;  // Settings section expanded by default
+    bool showSettings = true;
 };

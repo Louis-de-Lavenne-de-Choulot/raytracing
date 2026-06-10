@@ -233,6 +233,18 @@
     <ClInclude Include="ide_ship.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="ide_ai_chat.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ide_project_launcher.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="scene_io.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ide_global_values.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="plane.cpp">
@@ -299,6 +311,12 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="ide_ship.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="ide_ai_chat.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="scene_io.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

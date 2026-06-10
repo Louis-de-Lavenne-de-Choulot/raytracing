@@ -64,6 +64,7 @@
 #include "collisiontrigger.h"
 
 // ── Project & Asset Management ────────────────────────────────────────────────
+#include "ide_global_values.h"
 #include "ide_asset_database.h"
 #include "ide_asset_browser.h"
 #include "ide_package_manager.h"
@@ -84,6 +85,8 @@
 #include "ide_project_launcher.h"
 #include "ide_ai_chat.h"
 
+std::string g_projectRoot;   // e.g. "C:/Users/.../Documents/HonHengine/MyGame"
+std::string g_projectName;   // e.g. "MyGame"
 
 using namespace HonHengine;
 
@@ -293,8 +296,352 @@ struct DeferredShaderTask {
 static std::vector<DeferredShaderTask> g_deferredShaderTasks;
 static std::mutex g_deferredShaderMutex;
 
+
 // =============================================================================
-//  Fonctions JSON utilitaires (inchangées)
+//  Structures pour l'IDE 
+// =============================================================================
+struct ConsoleLog {
+    enum Kind { CMD, REPLY_OK, REPLY_ERR, INFO };
+    struct Entry { Kind kind; std::string text; };
+    std::deque<Entry> entries;
+    std::mutex mtx;
+    bool autoScroll = true;
+    std::string selectedText;
+
+    void push(Kind k, const std::string& t) {
+        std::lock_guard<std::mutex> lk(mtx);
+        entries.push_back({ k,t });
+        if (entries.size() > 5000) entries.pop_front();
+    }
+
+    void clear() {
+        std::lock_guard<std::mutex> lk(mtx);
+        entries.clear();
+        selectedText.clear();
+    }
+};
+
+struct SceneFBO {
+    GLuint fbo = 0, color = 0, depth = 0;
+    int w = 0, h = 0;
+    void init(int width, int height) {
+        w = width; h = height;
+        glGenFramebuffers(1, &fbo); glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glGenTextures(1, &color); glBindTexture(GL_TEXTURE_2D, color);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color, 0);
+        glGenRenderbuffers(1, &depth); glBindRenderbuffer(GL_RENDERBUFFER, depth);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, depth);
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) std::cerr << "FBO incomplete!\n";
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    }
+    void resize(int nw, int nh) {
+        if (nw == w && nh == h) return;
+        w = nw; h = nh;
+        glBindTexture(GL_TEXTURE_2D, color); glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glBindRenderbuffer(GL_RENDERBUFFER, depth); glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
+    }
+    void bind() { glBindFramebuffer(GL_FRAMEBUFFER, fbo); glViewport(0, 0, w, h); }
+    void unbind() { glBindFramebuffer(GL_FRAMEBUFFER, 0); }
+    void destroy() { if (fbo) glDeleteFramebuffers(1, &fbo); if (color) glDeleteTextures(1, &color); if (depth) glDeleteRenderbuffers(1, &depth); }
+};
+
+
+static const char* kColorNames[] = {
+    "white","black","red","green","blue","yellow","gray","orange","purple","cyan"
+};
+static const int kNumColors = 10;
+
+struct HierarchyNode {
+    enum Kind { OBJECT, LIGHT, CAMERA, FOLDER };
+    Kind kind = OBJECT; std::string name; bool folderOpen = true; std::vector<HierarchyNode> children;
+};
+
+struct IDECamera {
+    std::string name;
+    float px = 0, py = 5, pz = 15;
+    float fov = 60.f;
+    Camera* runtimeCamera = nullptr; // non-owning, owned by sm->cameras
+};
+
+
+struct IDEState {
+    std::vector<IDEObject> objects;
+    std::vector<IDELight> lights;
+    std::vector<IDECamera> cameras;          // scene cameras added by the user
+    Camera* savedEditorCamera = nullptr;     // editor cam pointer, saved on Play
+    // Non-owning pointer to the ScriptManager that lives in sm->scriptManager.
+    // Ownership was moved there so GPURenderer::UpdateGameLogic can drive updates.
+    ScriptManager* scriptManager = nullptr;
+    float editorFov = 60.f; // editor viewport camera FOV
+    bool consoleFocused = false;
+    AIAssistant aiAssistant;
+    bool showAIChat = false;
+    bool quitRequested = false;
+    bool showQuitModal = false;
+    MultiSelection selection;
+
+    std::vector<HierarchyNode> hierRoots;
+    std::string clipboardName;
+    bool clipboardIsLight = false;
+    SceneFBO sceneFBO;
+    SceneManager* sm = nullptr;
+    GPURenderer* renderer = nullptr;
+    BasicMovements* player = nullptr;
+    CommandBus bus;
+    ConsoleLog log;
+    SDL_Window* window = nullptr;
+    static constexpr int kUndoMaxDepth = 64;
+    char cmdInput[512] = {};
+
+    ImGuiID mainDockspaceId = 0;
+    bool showHierarchy = true;
+    bool showInspector = true;
+    bool showConsole = true;
+    bool showAssetBrowser = true;
+    bool viewportHovered = false;
+    bool showShipDialog = false;
+    char shipSrcDir[512] = "./";
+    char shipDstDir[512] = "./dist/";
+
+    // ── Scene management for shipping ────────────────────────────────────────
+    // All .honscene files found in the project, refreshed when the Ship dialog opens.
+    struct SceneEntry {
+        std::string path;       // relative or absolute path to the .honscene
+        std::string name;       // display name (filename stem)
+        bool selected = true;   // whether to include in the build
+    };
+    std::vector<SceneEntry> projectScenes;  // populated on Ship dialog open
+    int shipFirstScene = 0;                 // index into projectScenes of the startup scene
+    bool showAddObject = false;
+    char newObjName[64] = "obj1";
+    ObjectType newObjType = PLANE;
+    char newObjFile[256] = "";
+    float newObjPos[3] = {};
+    float newObjScale = 1.f;
+    int newObjColor = 0;
+    int newObjSubdivX = 1;   // Plane: segmentsX  /  Rectangle: segmentsX
+    int newObjSubdivY = 1;   // Rectangle only:   segmentsY
+    int newObjSubdivZ = 1;   // Plane: segmentsZ  /  Rectangle: segmentsZ
+    bool showAddLight = false;
+    float newLightPos[3] = {};
+    char newLightName[64] = "light1";
+    float newLightIntensity = .75f;
+    float newLightColor[3] = { 1.f,1.f,1.f };
+    ObjectType newLightType = POINT_LIGHT;
+    bool showAddCamera = false;
+    char newCameraName[64] = "camera1";
+    float newCameraPos[3] = { 0.f, 5.f, 15.f };
+    float inspPos[3] = {};
+    float inspScale[3] = { 1,1,1 };
+    float inspRot[3] = {};
+    float inspColor[4] = { 1,1,1,1 };
+    char inspShader[64] = {};
+    char inspTag[64] = {};
+    bool playing = false;
+
+    // Asset management
+    AssetDatabase    assetDb;
+    AssetBrowserState assetBrowser;
+
+    // Project management
+    ProjectSettings  project;
+    ProjectUIState   projectUI;
+    AutoSaveManager  autoSave;
+
+    // Package manager
+    PackageManager   packageMgr;
+    PackageManagerUIState packageUI;
+
+    // Global search
+    GlobalSearchState globalSearch;
+
+    // Toast notifications
+    ToastManager toastMgr;
+
+    // Editor settings
+    EditorSettings editorSettings;
+
+    // Selection history
+    SelectionHistory selectionHistory;
+
+    // Progress bar
+    ProgressState progressState;
+
+    // Inspector lock
+    bool inspectorLocked = false;
+    std::string lockedInspectorObject;
+
+    char hierarchyFilter[128] = {};
+    bool showStats = false;
+    float statsTimer = 0.f;
+    int statsFps = 0;
+    int statsFrameCount = 0;
+    bool showWorldSettings = false;
+    float ambientIntensity = 0.15f;
+    float fogDensity = 0.f;
+    int fogColor[3] = { 200,210,230 };
+    bool wireframe = false;
+    bool showRenameModal = false;
+    char renameOldName[64] = {};
+    char renameNewName[64] = {};
+    bool snapEnabled = false;
+    float snapPosition = 0.25f;
+    float snapRotation = 15.f;
+    float snapScale = 0.1f;
+    std::vector<std::string> cmdHistory;
+    int cmdHistoryIdx = -1;
+    std::vector<std::string> undoStack;
+    bool sceneDirty = false;
+    char sceneFilePath[512] = "assets/scene.honscene";
+    bool showSaveModal = false;
+
+    // ── Project-root–relative path helpers ───────────────────────────────────
+    // Use these everywhere instead of hard-coded ".honassets" / "ide_settings.ini"
+    // so that all per-project data lives inside the chosen project folder.
+    std::string ProjectRoot() const {
+        return std::string(project.rootFolder);
+    }
+    std::string HonAssetsPath() const {
+        std::string r = ProjectRoot();
+        return r.empty() ? ".honassets"
+            : (fs::path(r) / ".honassets").string();
+    }
+    std::string EditorSettingsPath() const {
+        std::string r = ProjectRoot();
+        return r.empty() ? "ide_settings.ini"
+            : (fs::path(r) / "ide_settings.ini").string();
+    }
+    std::string AssetRootDir() const {
+        std::string r = ProjectRoot();
+        return r.empty() ? "./assets/"
+            : (fs::path(r) / "assets" / "").string();
+    }
+    bool showLoadModal = false;
+
+    // ── Scene open from Asset Browser ─────────────────────────────────────────
+    // When the user double-clicks a .honscene in the browser, we check if the
+    // scene is dirty and show a confirmation prompt before loading.
+    bool showSceneOpenPrompt = false;    // "Save before opening?" modal
+    std::string pendingSceneOpenPath;   // the .honscene path to load once confirmed
+    std::string pendingSelection;
+    size_t logReadIdx = 0;
+    bool showCreateFolder = false;
+    char newFolderName[64] = "Group";
+    bool showMoveToFolder = false;
+    char moveTargetItem[64] = {};
+    bool moveTargetIsLight = false;
+
+    // Outils à la Unity
+    int toolMode = 1;            // 0=View, 1=Translate, 2=Rotate, 3=Scale
+    bool editorCamOrbit = false;
+    ImVec2 editorCamLastMouse;
+
+    // Gizmo state
+    TransformGizmo gizmo;
+    bool gizmoLocalMode = false;
+    bool gizmoPivotCenter = false;
+
+    // Camera bookmarks
+    CameraBookmarks bookmarks;
+
+    // Focus transition
+    FocusTransition focus;
+
+    // Ortho/persp
+    bool viewportOrtho = false;
+    float orthoSize = 10.f;
+
+    // Overlays
+    bool showGrid = true;
+    bool showAxes = true;
+    bool showIcons3D = true;
+    bool showFrustum = true;
+    int gridPlane = 0;   // 0=XZ, 1=XY, 2=YZ
+    int debugMode = 0;   // 0=shaded, 1=wireframe, 2=overdraw, 3=depth, 4=normals
+
+    // FPS fly mode
+    bool fpsFlyMode = false;
+
+    // Box selection
+    BoxSelectionState boxSelect;
+
+    // ── Skybox / Environment ─────────────────────────────────────────────────
+    bool  showEnvironmentWindow = false;
+    // 0 = Procedural (default), 1 = Cubemap from files
+    int   skyboxMode = 0;
+    // Per-face paths for cubemap import (right, left, top, bottom, front, back)
+    char  skyboxFaces[6][512] = {};
+    // Sun glow intensity override (0 = driven by directional light)
+    float skyboxSunGlowOverride = -1.f; // -1 means "use light intensity"
+
+    // ── Import Settings Overlay ───────────────────────────────────────────────
+    // Floating temporary panel shown above the Inspector when an asset is
+    // dropped onto the viewport (or focused in the browser).
+    bool  showImportOverlay = false;
+    std::string importOverlayGUID;          // which asset's settings to show
+    bool  importOverlayHasImportBtn = false;// whether to show the "Import" button
+    std::function<void()> importOverlayOnImport; // callback for Import button
+    ImVec2 importOverlayAnchorPos = {};    // Inspector window top-left (updated each frame)
+    ImVec2 importOverlayAnchorSize = {};    // Inspector window size     (updated each frame)
+
+    // ── Physics / RigidBody ────────────────────────────────────────────────────
+    PhysicsWorld physicsWorld;
+    std::unordered_map<BaseObject*, RigidBody>         rigidBodies;
+    std::unordered_map<BaseObject*, CollisionTrigger>  collisionTriggers;
+
+    // ── Prefab ────────────────────────────────────────────────────────────────
+    std::unordered_map<std::string, std::string> prefabSourceGUID;
+
+    // Multi-object prefab creation (from folder right-click or multi-selection)
+    bool showCreatePrefabFromFolder = false;
+    std::string createPrefabFromFolderName;      // which folder to serialize
+    char createPrefabMultiName[64] = {};
+
+    // ── Prefab Edit Mode (Unity-style) ────────────────────────────────────────
+    // When the user double-clicks a .honprefab in the asset browser, the editor
+    // enters a dedicated "Prefab Edit Mode" — isolated from the main scene.
+    // The prefab objects are loaded into a temporary list; on Save the file is
+    // re-serialized and the mode is exited.
+    bool  prefabEditMode = false;           // true while editing a prefab
+    std::string prefabEditPath;             // path to the .honprefab being edited
+    std::string prefabEditName;             // display name (stem of file)
+    // Snapshot of the main scene objects/lights to restore on exit
+    std::vector<IDEObject> prefabEditSceneSnapshot;
+    std::vector<IDELight>  prefabEditLightSnapshot;
+    // Objects loaded from the prefab for inline editing
+    std::vector<IDEObject> prefabEditObjects;
+    bool prefabEditDirty = false;           // unsaved changes in prefab editor
+
+    // "Add Parent" (Create Empty Parent) state
+    bool showAddParentModal = false;
+    char addParentName[64] = "GameObject";
+
+    // Hierarchy drag-into-folder payload tag
+    static constexpr const char* kHierFolderDropPayload = "HONHON_HIER_INTO_FOLDER";
+
+    // ── Profiler / Memory debug windows ──────────────────────────────────────
+    bool showProfiler = false;
+    bool showMemoryWindow = false;
+    static constexpr int kProfilerSamples = 256;
+    float frameTimeSamples[kProfilerSamples] = {};
+    int   frameTimeSampleIdx = 0;
+
+    // ── Toolchain settings window ─────────────────────────────────────────────
+    bool showToolchainWindow = false;
+
+    // ── Script creation wizard ────────────────────────────────────────────────
+    bool showScriptWizard = false;
+    char newScriptName[64] = "MyScript";
+    int  newScriptTemplate = 0; // 0=Empty, 1=StartUpdate, 2=Full
+};
+
+
+// =============================================================================
+//  Fonctions JSON utilitaires
 // =============================================================================
 std::string JStr(const std::string& s) {
     std::string o; o.reserve(s.size() + 2); o += '"';
@@ -308,6 +655,7 @@ std::string JStr(const std::string& s) {
     }
     o += '"'; return o;
 }
+
 static std::string MakeResponse(bool ok, const std::string& cmd, const std::string& msg, const std::string& extra = "") {
     std::ostringstream o;
     o << "{\"ok\":" << (ok ? "true" : "false") << ",\"cmd\":" << JStr(cmd) << ",\"msg\":" << JStr(msg);
@@ -320,8 +668,27 @@ static std::string JVec3(const char* key, double x, double y, double z) {
     return o.str();
 }
 static std::vector<std::string> Tokenize(const std::string& line) {
-    std::istringstream ss(line); std::vector<std::string> t; std::string tok;
-    while (ss >> tok) t.push_back(tok); return t;
+    std::vector<std::string> t;
+    size_t i = 0, n = line.size();
+    while (i < n) {
+        // skip whitespace
+        while (i < n && std::isspace((unsigned char)line[i])) ++i;
+        if (i >= n) break;
+
+        std::string tok;
+        if (line[i] == '"') {
+            // quoted token — consume until closing quote (no escape handling needed for paths)
+            ++i;
+            while (i < n && line[i] != '"') tok += line[i++];
+            if (i < n) ++i; // skip closing quote
+        }
+        else {
+            // unquoted token — consume until whitespace
+            while (i < n && !std::isspace((unsigned char)line[i])) tok += line[i++];
+        }
+        t.push_back(tok);
+    }
+    return t;
 }
 static bool ParseDouble(const std::string& s, double& out) { try { out = std::stod(s); return true; } catch (...) { return false; } }
 static bool ParseInt(const std::string& s, int& out) { try { out = std::stoi(s); return true; } catch (...) { return false; } }
@@ -329,6 +696,10 @@ std::string JsonGet(const std::string& json, const std::string& key) {
     auto pos = json.find("\"" + key + "\":");
     if (pos == std::string::npos) return "";
     pos += key.size() + 3;
+    if (pos >= json.size()) return "";
+    // Skip optional whitespace after the colon (e.g. "type": "rect" vs "type":"rect")
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\r' || json[pos] == '\n'))
+        ++pos;
     if (pos >= json.size()) return "";
     if (json[pos] == '"') {
         ++pos; std::string v;
@@ -340,11 +711,363 @@ std::string JsonGet(const std::string& json, const std::string& key) {
     }
     std::string v;
     while (pos < json.size() && json[pos] != ',' && json[pos] != '}' && json[pos] != ']') v += json[pos++];
+    // Trim trailing whitespace from numeric/bool values
+    while (!v.empty() && (v.back() == ' ' || v.back() == '\t' || v.back() == '\r' || v.back() == '\n'))
+        v.pop_back();
     return v;
 }
 
 static bool JsonOk(const std::string& json) { return JsonGet(json, "ok") == "true"; }
 
+
+static void WriteTransform(std::ostream& out, const Transform& t, int indent = 6) {
+    std::string sp(indent, ' ');
+    out << sp << "\"transform\": {\n";
+    out << sp << "  \"px\":" << t.position.x << ",\"py\":" << t.position.y << ",\"pz\":" << t.position.z << ",\n";
+    out << sp << "  \"sx\":" << t.scale.x << ",\"sy\":" << t.scale.y << ",\"sz\":" << t.scale.z << ",\n";
+    out << sp << "  \"rw\":" << t.rotation.w << ",\"rx\":" << t.rotation.x << ",\"ry\":" << t.rotation.y << ",\"rz\":" << t.rotation.z << "\n";
+    out << sp << "}";
+}
+
+static void WriteTextureLayer(std::ostream& out, const TextureLayer& layer, int indent = 8) {
+    std::string sp(indent, ' ');
+    out << sp << "{\n";
+    out << sp << "  \"textureName\": " << JStr(layer.texture.name) << ",\n";
+    out << sp << "  \"texturePath\": " << JStr(layer.texture.path) << ",\n";
+    out << sp << "  \"tilingU\": " << layer.texture.tilingU << ",\n";
+    out << sp << "  \"tilingV\": " << layer.texture.tilingV << ",\n";
+    out << sp << "  \"offsetU\": " << layer.texture.offsetU << ",\n";
+    out << sp << "  \"offsetV\": " << layer.texture.offsetV << ",\n";
+    out << sp << "  \"blendWeight\": " << layer.blendWeight << ",\n";
+    out << sp << "  \"blendMode\": " << (int)layer.blendMode << ",\n";
+    out << sp << "  \"maskMin\": " << layer.maskMin << ",\n";
+    out << sp << "  \"maskMax\": " << layer.maskMax << ",\n";
+    out << sp << "  \"maskChannel\": " << layer.maskChannel << ",\n";
+    out << sp << "  \"maskInvert\": " << (layer.maskInvert ? "true" : "false") << ",\n";
+    out << sp << "  \"maskType\": " << (int)layer.maskType << "\n";
+    out << sp << "}";
+}
+
+static void WriteMaterial(std::ostream& out, Material* mat, int indent = 6) {
+    if (!mat) return;
+    std::string sp(indent, ' ');
+    out << sp << "\"material\": {\n";
+    out << sp << "  \"color\": [" << (int)mat->color.r << "," << (int)mat->color.g << "," << (int)mat->color.b << "," << (int)mat->color.a << "],\n";
+    out << sp << "  \"specularity\": " << mat->specularity << ",\n";
+    out << sp << "  \"reflectivity\": " << mat->reflectivity << ",\n";
+    out << sp << "  \"textureLayers\": [\n";
+    for (size_t i = 0; i < mat->textureLayers.size(); ++i) {
+        WriteTextureLayer(out, mat->textureLayers[i], indent + 4);
+        if (i + 1 < mat->textureLayers.size()) out << ",";
+        out << "\n";
+    }
+    out << sp << "  ]\n";
+    out << sp << "}";
+}
+
+static void WriteScript(std::ostream& out, const ScriptComponent& sc, int indent = 6) {
+    std::string sp(indent, ' ');
+    out << sp << "{\n";
+    out << sp << "  \"guid\": " << JStr(sc.scriptGUID) << ",\n";
+    out << sp << "  \"exposedVars\": [\n";
+    for (size_t i = 0; i < sc.exposedVars.size(); ++i) {
+        const auto& var = sc.exposedVars[i];
+        out << sp << "    { \"name\": " << JStr(var.name) << ", \"type\": ";
+        switch (var.type) {
+        case ScriptVarType::Int:    out << "\"int\"";
+            out << ", \"value\": " << var.value.i; break;
+        case ScriptVarType::Float:  out << "\"float\"";
+            out << ", \"value\": " << var.value.f; break;
+        case ScriptVarType::Bool:   out << "\"bool\"";
+            out << ", \"value\": " << (var.value.b ? "true" : "false"); break;
+        case ScriptVarType::String: out << "\"string\"";
+            out << ", \"value\": " << JStr(var.value.s ? var.value.s : ""); break;
+        }
+        out << " }";
+        if (i + 1 < sc.exposedVars.size()) out << ",";
+        out << "\n";
+    }
+    out << sp << "  ]\n";
+    out << sp << "}";
+}
+
+static void WriteRigidBody(std::ostream& out, const RigidBody& rb, int indent = 6) {
+    std::string sp(indent, ' ');
+    out << sp << "\"rigidbody\": {\n";
+    out << sp << "  \"mass\": " << rb.mass << ",\n";
+    out << sp << "  \"drag\": " << rb.drag << ",\n";
+    out << sp << "  \"angularDrag\": " << rb.angularDrag << ",\n";
+    out << sp << "  \"restitution\": " << rb.restitution << ",\n";
+    out << sp << "  \"friction\": " << rb.friction << ",\n";
+    out << sp << "  \"useGravity\": " << (rb.useGravity ? "true" : "false") << ",\n";
+    out << sp << "  \"isKinematic\": " << (rb.isKinematic ? "true" : "false") << ",\n";
+    out << sp << "  \"velocity\": [" << rb.velocity.x << "," << rb.velocity.y << "," << rb.velocity.z << "],\n";
+    out << sp << "  \"angularVelocity\": [" << rb.angularVelocity.x << "," << rb.angularVelocity.y << "," << rb.angularVelocity.z << "]\n";
+    out << sp << "}";
+}
+
+static void WriteCollisionTrigger(std::ostream& out, const CollisionTrigger& ct, int indent = 6) {
+    std::string sp(indent, ' ');
+    out << sp << "\"collisionTrigger\": {\n";
+    out << sp << "  \"enabled\": " << (ct.enabled ? "true" : "false") << ",\n";
+    out << sp << "  \"isSolid\": " << (ct.isSolid ? "true" : "false") << ",\n";
+    out << sp << "  \"filterTag\": " << JStr(ct.filterTag) << "\n";
+    out << sp << "}";
+}
+
+static void WriteAnimator(std::ostream& out, const AnimatorComponent& anim, int indent = 6) {
+    if (!anim.active()) return;
+    std::string sp(indent, ' ');
+    out << sp << "\"animator\": {\n";
+    out << sp << "  \"speed\": " << anim.speed << ",\n";
+    out << sp << "  \"currentClipName\": " << JStr(anim.currentClipName()) << "\n";
+    out << sp << "}";
+}
+
+static void WriteRenderComponent(std::ostream& out, const RenderComponent& rc, TextureManager& texMgr, int indent = 6) {
+    std::string sp(indent, ' ');
+    out << sp << "\"render\": {\n";
+    out << sp << "  \"useMaterialColor\": " << (rc.useMaterialColor ? "true" : "false") << ",\n";
+    out << sp << "  \"depthWrite\": " << (rc.depthWrite ? "true" : "false") << ",\n";
+    out << sp << "  \"blend\": " << (rc.blend ? "true" : "false") << ",\n";
+    out << sp << "  \"cullFace\": " << (rc.cullFace ? "true" : "false") << ",\n";
+    out << sp << "  \"textures\": [\n";
+    for (size_t i = 0; i < rc.textures.size(); ++i) {
+        const auto& bind = rc.textures[i];
+        std::string texPath = texMgr.getPath(bind.textureName);  // now public
+        out << sp << "    { \"uniformName\": " << JStr(bind.uniformName)
+            << ", \"textureName\": " << JStr(bind.textureName)
+            << ", \"texturePath\": " << JStr(texPath)
+            << ", \"slot\": " << bind.slot << " }";
+        if (i + 1 < rc.textures.size()) out << ",";
+        out << "\n";
+    }
+    out << sp << "  ]\n";
+    out << sp << "}";
+}
+
+static void WriteLightToJson(std::ostream& out, const IDELight& lt, int indent = 2) {
+    std::string sp(indent, ' ');
+    out << sp << "{\n";
+    out << sp << "  \"name\": " << JStr(lt.name) << ",\n";
+    out << sp << "  \"type\": " << JStr(lt.lightType) << ",\n";
+    out << sp << "  \"intensity\": " << lt.intensity << ",\n";
+    out << sp << "  \"color\": [" << lt.r << "," << lt.g << "," << lt.b << "],\n";
+    out << sp << "  \"transform\": {\n";
+    out << sp << "    \"px\":" << lt.px << ",\"py\":" << lt.py << ",\"pz\":" << lt.pz << ",\n";
+    out << sp << "    \"rw\":1,\"rx\":0,\"ry\":0,\"rz\":0\n"; // rotation not used for lights except directional? We'll store rotation for directional later if needed
+    out << sp << "  }\n";
+    out << sp << "}";
+}
+
+// Deserialization helpers (used in EnterPrefabEditMode & InstantiatePrefab)
+static void ApplyMaterialFromJson(BaseObject* obj, const std::string& jsonChunk, TextureManager& texMgr) {
+    // Extract material object from jsonChunk (contains the whole object JSON)
+    // For simplicity, we parse using our simple JsonGet functions and manual recursion.
+    // Since JSON is small, we'll do it step by step.
+    std::string colorStr = JsonGet(jsonChunk, "color");
+    if (!colorStr.empty()) {
+        int r = 255, g = 255, b = 255, a = 255;
+        sscanf_s(colorStr.c_str(), "[%d,%d,%d,%d]", &r, &g, &b, &a);
+        if (obj->material) delete obj->material;
+        obj->material = new Material(0, 0, Color((double)r, (double)g, (double)b, (double)a), Color(0, 0, 0, 255));
+    }
+    std::string specStr = JsonGet(jsonChunk, "specularity");
+    if (!specStr.empty() && obj->material) obj->material->specularity = std::stof(specStr);
+    std::string reflStr = JsonGet(jsonChunk, "reflectivity");
+    if (!reflStr.empty() && obj->material) obj->material->reflectivity = std::stof(reflStr);
+
+    // Texture layers: find array
+    size_t layersStart = jsonChunk.find("\"textureLayers\":[");
+    if (layersStart != std::string::npos) {
+        size_t arrStart = jsonChunk.find('[', layersStart);
+        size_t depth = 0, pos = arrStart;
+        std::vector<std::string> layerTokens;
+        while (pos < jsonChunk.size()) {
+            if (jsonChunk[pos] == '[') ++depth;
+            else if (jsonChunk[pos] == ']') { if (--depth == 0) break; }
+            if (jsonChunk[pos] == '{' && depth == 2) {
+                size_t blockStart = pos, blockDepth = 0, bp = pos;
+                while (bp < jsonChunk.size()) {
+                    if (jsonChunk[bp] == '{') ++blockDepth;
+                    else if (jsonChunk[bp] == '}') { if (--blockDepth == 0) break; }
+                    ++bp;
+                }
+                layerTokens.push_back(jsonChunk.substr(blockStart, bp - blockStart + 1));
+                pos = bp;
+            }
+            ++pos;
+        }
+        for (auto& tok : layerTokens) {
+            TextureLayer layer;
+            layer.texture.name = JsonGet(tok, "textureName");
+            layer.texture.path = JsonGet(tok, "texturePath");
+            if (!layer.texture.path.empty()) texMgr.load(layer.texture);
+            layer.texture.tilingU = std::stof(JsonGet(tok, "tilingU"));
+            layer.texture.tilingV = std::stof(JsonGet(tok, "tilingV"));
+            layer.texture.offsetU = std::stof(JsonGet(tok, "offsetU"));
+            layer.texture.offsetV = std::stof(JsonGet(tok, "offsetV"));
+            layer.blendWeight = std::stof(JsonGet(tok, "blendWeight"));
+            layer.blendMode = (LayerBlendMode)std::stoi(JsonGet(tok, "blendMode"));
+            layer.maskMin = std::stof(JsonGet(tok, "maskMin"));
+            layer.maskMax = std::stof(JsonGet(tok, "maskMax"));
+            layer.maskChannel = std::stoi(JsonGet(tok, "maskChannel"));
+            layer.maskInvert = JsonGet(tok, "maskInvert") == "true";
+            layer.maskType = (LayerMaskType)std::stoi(JsonGet(tok, "maskType"));
+            if (obj->material) obj->material->textureLayers.push_back(layer);
+        }
+        if (obj->material) obj->material->dirty = true;
+    }
+}
+
+static void ApplyScriptsFromJson(BaseObject* obj, const std::string& jsonChunk, IDEState& ide) {
+    size_t scriptsStart = jsonChunk.find("\"scripts\":[");
+    if (scriptsStart == std::string::npos) return;
+    size_t arrStart = jsonChunk.find('[', scriptsStart);
+    size_t depth = 0, pos = arrStart;
+    std::vector<std::string> scriptTokens;
+    while (pos < jsonChunk.size()) {
+        if (jsonChunk[pos] == '[') ++depth;
+        else if (jsonChunk[pos] == ']') { if (--depth == 0) break; }
+        if (jsonChunk[pos] == '{' && depth == 2) {
+            size_t blockStart = pos, blockDepth = 0, bp = pos;
+            while (bp < jsonChunk.size()) {
+                if (jsonChunk[bp] == '{') ++blockDepth;
+                else if (jsonChunk[bp] == '}') { if (--blockDepth == 0) break; }
+                ++bp;
+            }
+            scriptTokens.push_back(jsonChunk.substr(blockStart, bp - blockStart + 1));
+            pos = bp;
+        }
+        ++pos;
+    }
+    for (auto& tok : scriptTokens) {
+        std::string guid = JsonGet(tok, "guid");
+        AssetRecord* rec = ide.assetDb.FindByGUID(guid);
+        if (!rec) continue;
+        ScriptComponent sc;
+        sc.scriptGUID = guid;
+        if (ide.scriptManager && ide.scriptManager->LoadScript(guid, rec->path, sc)) {
+            // Exposed variables
+            size_t varsStart = tok.find("\"exposedVars\":[");
+            if (varsStart != std::string::npos) {
+                size_t arrStart2 = tok.find('[', varsStart);
+                size_t depth2 = 0, pos2 = arrStart2;
+                std::vector<std::string> varTokens;
+                while (pos2 < tok.size()) {
+                    if (tok[pos2] == '[') ++depth2;
+                    else if (tok[pos2] == ']') { if (--depth2 == 0) break; }
+                    if (tok[pos2] == '{' && depth2 == 2) {
+                        size_t blockStart = pos2, blockDepth = 0, bp = pos2;
+                        while (bp < tok.size()) {
+                            if (tok[bp] == '{') ++blockDepth;
+                            else if (tok[bp] == '}') { if (--blockDepth == 0) break; }
+                            ++bp;
+                        }
+                        varTokens.push_back(tok.substr(blockStart, bp - blockStart + 1));
+                        pos2 = bp;
+                    }
+                    ++pos2;
+                }
+                for (auto& vt : varTokens) {
+                    std::string vname = JsonGet(vt, "name");
+                    std::string vtype = JsonGet(vt, "type");
+                    std::string vval = JsonGet(vt, "value");
+                    ScriptVariable var;
+                    var.name = vname;
+
+                    if (vtype == "int") {
+                        var.type = ScriptVarType::Int;
+                        var.value.i = std::stoi(vval);
+                    }
+                    else if (vtype == "float") {
+                        var.type = ScriptVarType::Float;
+                        var.value.f = std::stof(vval);
+                    }
+                    else if (vtype == "bool") {
+                        var.type = ScriptVarType::Bool;
+                        var.value.b = (vval == "true");
+                    }
+                    else if (vtype == "string") {
+                        var.type = ScriptVarType::String;
+                        // Allocate new string on heap
+                        var.value.s = new char[vval.size() + 1];
+                        strcpy_s(var.value.s, vval.size() + 1, vval.c_str());
+                    }
+
+                    // Overwrite default value if this variable already exists in the component
+                    bool found = false;
+                    for (auto& ev : sc.exposedVars) {
+                        if (ev.name == var.name) {
+                            // Free old string if we're replacing a string variable
+                            if (ev.type == ScriptVarType::String && ev.value.s) {
+                                delete[] ev.value.s;
+                            }
+                            ev.value = var.value;
+                            ev.type = var.type;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        sc.exposedVars.push_back(var);
+                    }
+                }
+            }
+            obj->scripts.push_back(sc);
+        }
+        else {
+            // Fallback: store component without loading (so it appears in inspector)
+            obj->scripts.push_back(sc);
+        }
+    }
+}
+
+static void ApplyRenderComponentFromJson(BaseObject* obj, const std::string& jsonChunk, IDEState& ide) {
+    std::string shader = JsonGet(jsonChunk, "shaderName");
+    if (!shader.empty()) obj->render.shaderName = shader;
+    std::string useMatCol = JsonGet(jsonChunk, "useMaterialColor");
+    if (!useMatCol.empty()) obj->render.useMaterialColor = (useMatCol == "true");
+    std::string depthWrite = JsonGet(jsonChunk, "depthWrite");
+    if (!depthWrite.empty()) obj->render.depthWrite = (depthWrite == "true");
+    std::string blend = JsonGet(jsonChunk, "blend");
+    if (!blend.empty()) obj->render.blend = (blend == "true");
+    std::string cull = JsonGet(jsonChunk, "cullFace");
+    if (!cull.empty()) obj->render.cullFace = (cull == "true");
+
+    size_t texStart = jsonChunk.find("\"textures\":[");
+    if (texStart != std::string::npos) {
+        size_t arrStart = jsonChunk.find('[', texStart);
+        size_t depth = 0, pos = arrStart;
+        std::vector<std::string> texTokens;
+        while (pos < jsonChunk.size()) {
+            if (jsonChunk[pos] == '[') ++depth;
+            else if (jsonChunk[pos] == ']') { if (--depth == 0) break; }
+            if (jsonChunk[pos] == '{' && depth == 2) {
+                size_t blockStart = pos, blockDepth = 0, bp = pos;
+                while (bp < jsonChunk.size()) {
+                    if (jsonChunk[bp] == '{') ++blockDepth;
+                    else if (jsonChunk[bp] == '}') { if (--blockDepth == 0) break; }
+                    ++bp;
+                }
+                texTokens.push_back(jsonChunk.substr(blockStart, bp - blockStart + 1));
+                pos = bp;
+            }
+            ++pos;
+        }
+        for (auto& tok : texTokens) {
+            std::string uniform = JsonGet(tok, "uniformName");
+            std::string texName = JsonGet(tok, "textureName");
+            std::string texPath = JsonGet(tok, "texturePath");
+            int slot = std::stoi(JsonGet(tok, "slot"));
+            if (!texPath.empty()) {
+                Texture tex(texName, texPath);
+                ide.renderer->texManager.load(tex);
+            }
+            obj->render.textures.push_back({ uniform, texName, slot });
+        }
+    }
+}
 // =============================================================================
 //  Couleurs nommées
 // =============================================================================
@@ -441,8 +1164,26 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer,
             d << "\"objects\":[";
             bool first = true;
             for (auto& [name, obj] : g_namedObjects) {
-                if (!first) d << ","; first = false;
-                d << "{\"name\":" << JStr(name)
+                // Determine type string from obj->type enum
+                std::string typeStr;
+                switch (obj->type) {
+                case PLANE:      typeStr = "plane"; break;
+                case RECTANGLE:  typeStr = "rect"; break;
+                case SPHERE:     typeStr = "sphere"; break;
+                case OBJ_MESH:   typeStr = "obj"; break;
+                case GLTF_MESH:  typeStr = "gltf"; break;
+                default:         typeStr = "unknown"; break;
+                }
+
+                // Asset path (stored in tag for OBJ/GLTF)
+                std::string assetPath;
+                if (obj->type == OBJ_MESH && obj->tag.rfind("OBJ:", 0) == 0)
+                    assetPath = obj->tag.substr(4);
+                else if (obj->type == GLTF_MESH && obj->tag.rfind("GLTF:", 0) == 0)
+                    assetPath = obj->tag.substr(5);
+
+                d << "{"
+                    << "\"name\":" << JStr(name)
                     << ",\"visible\":" << (obj->visible ? "true" : "false")
                     << ",\"pos\":{\"x\":" << obj->transform.position.x
                     << ",\"y\":" << obj->transform.position.y
@@ -450,7 +1191,15 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer,
                     << ",\"scale\":{\"x\":" << obj->transform.scale.x
                     << ",\"y\":" << obj->transform.scale.y
                     << ",\"z\":" << obj->transform.scale.z << "}"
-                    << ",\"shader\":" << JStr(obj->render.shaderName) << "}";
+                    << ",\"shader\":" << JStr(obj->render.shaderName)
+                    << ",\"type\":" << JStr(typeStr)
+                    << ",\"assetPath\":" << JStr(assetPath)
+                    << ",\"tag\":" << JStr(obj->tag)
+                    << ",\"color\":{\"r\":" << (int)(obj->material ? obj->material->color.r : 255)
+                    << ",\"g\":" << (int)(obj->material ? obj->material->color.g : 255)
+                    << ",\"b\":" << (int)(obj->material ? obj->material->color.b : 255)
+                    << ",\"a\":" << (int)(obj->material ? obj->material->color.a : 255) << "}"
+                    << "}";
             }
             d << "],\"lights\":[";
             first = true;
@@ -540,35 +1289,39 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer,
             }
             out << MakeResponse(false, "inspect", "Unknown '" + args[0] + "'") << "\n";
         });
-    reg.Register("plane", "plane <name> <x> <y> <z> [width] [height] [color]", "Spawn a plane primitive.",
+    reg.Register("plane", "plane <name> <x> <y> <z> [width] [height] [segmentsX] [segmentsZ] [color]", "Spawn a plane primitive.",
         [](CmdContext& ctx, const std::vector<std::string>& args, std::ostream& out) {
-            if (args.size() < 4) { out << MakeResponse(false, "plane", "Usage: plane <name> <x> <y> <z> [width=5] [height=5] [color]") << "\n"; return; }
+            if (args.size() < 4) { out << MakeResponse(false, "plane", "Usage: plane <name> <x> <y> <z> [width] [height] [segmentsX] [segmentsZ] [color]") << "\n"; return; }
 
             std::string finalName = NameValidator::GetFinalName(args[0], g_namedObjects, g_namedLights);
-            // If name was changed, log it
-            if (finalName != args[0]) {
-                out << MakeResponse(true, "plane", "Name '" + args[0] + "' changed to '" + finalName + "'") << "\n";
-            }
+            if (finalName != args[0]) out << MakeResponse(true, "plane", "Name '" + args[0] + "' changed to '" + finalName + "'") << "\n";
 
             double x, y, z, width = 5.0, height = 5.0;
+            int segX = 1, segZ = 1;
             if (!ParseDouble(args[1], x) || !ParseDouble(args[2], y) || !ParseDouble(args[3], z)) {
                 out << MakeResponse(false, "plane", "Bad coords") << "\n"; return;
             }
             if (args.size() >= 5) ParseDouble(args[4], width);
             if (args.size() >= 6) ParseDouble(args[5], height);
-            Color col = args.size() >= 7 ? NameToColor(args[6]) : colWhite;
-            std::unique_lock<std::shared_mutex> lock(*ctx.sceneMutex);
-            // Use Plane class
-            BaseObject* obj = new HonHengine::Plane(Vector3(width, 1.0, height), Vector3(x, y, z), Quaternion(),
-                new Material(0, 0, col, colBlack));
-            ctx.sm->objects->push_back(obj);
+            if (args.size() >= 7) ParseInt(args[6], segX);
+            if (args.size() >= 8) ParseInt(args[7], segZ);
+            Color col = args.size() >= 9 ? NameToColor(args[8]) : colWhite;
 
+            segX = (std::max)(1, segX);
+            segZ = (std::max)(1, segZ);
+
+            std::unique_lock<std::shared_mutex> lock(*ctx.sceneMutex);
+            BaseObject* obj = new HonHengine::Plane(Vector3(width, 1.0, height), Vector3(x, y, z), Quaternion(),
+                new Material(0, 0, col, colBlack), segX, segZ);
+            ctx.sm->objects->push_back(obj);
             g_namedObjects[finalName] = obj;
 
             std::ostringstream d; d << std::fixed << std::setprecision(4);
-            d << JVec3("pos", x, y, z) << ",\"width\":" << width << ",\"height\":" << height;
+            d << JVec3("pos", x, y, z) << ",\"width\":" << width << ",\"height\":" << height
+                << ",\"segmentsX\":" << segX << ",\"segmentsZ\":" << segZ;
             out << MakeResponse(true, "plane", "'" + finalName + "' spawned", d.str()) << "\n";
         });
+
     // addlight (avec verrou)
     reg.Register("addlight", "addlight <name> <intensity> <r> <g> <b> [type]",
         "Add a light.",
@@ -761,31 +1514,52 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer,
         });
     // setshader
     reg.Register("setshader", "setshader <name> <shaderName>", "Assign shader.",
-        [](CmdContext& ctx, const std::vector<std::string>& args, std::ostream& out) {
+        [renderer](CmdContext& ctx, const std::vector<std::string>& args, std::ostream& out) {
             if (args.size() < 2) { out << MakeResponse(false, "setshader", "Usage: setshader <name> <shaderName>") << "\n"; return; }
             std::unique_lock<std::shared_mutex> lock(*ctx.sceneMutex);
             auto it = g_namedObjects.find(args[0]);
             if (it == g_namedObjects.end()) { out << MakeResponse(false, "setshader", "Unknown object") << "\n"; return; }
-            it->second->render.shaderName = args[1];
-            out << MakeResponse(true, "setshader", "Shader '" + args[1] + "' assigned") << "\n";
+
+            BaseObject* obj = it->second;
+            const std::string& shaderName = args[1];
+
+            obj->render.shaderName = shaderName;
+
+            if (obj->material) {
+                GLuint prog = renderer->GetShader(shaderName);
+                obj->material->customShaderProgram = prog; // 0 if not yet registered — will stay 0 until re-assigned after registershader
+            }
+
+            out << MakeResponse(true, "setshader", "Shader '" + shaderName + "' assigned") << "\n";
         });
     // registershader
     reg.Register("registershader", "registershader <name> <vertFile> <fragFile>", "Compile and register shader.",
         [renderer](CmdContext&, const std::vector<std::string>& args, std::ostream& out) {
             if (args.size() < 3) { out << MakeResponse(false, "registershader", "Usage: registershader <name> <vert> <frag>") << "\n"; return; }
-            auto readFile = [](const std::string& path)->std::string {
-                std::ifstream f(path); if (!f) return "";
-                return{ std::istreambuf_iterator<char>(f),std::istreambuf_iterator<char>() };
+
+            auto resolvePath = [](const std::string& p) -> std::string {
+                fs::path fp(p);
+                if (fp.is_absolute()) return p;
+                return (fs::path(g_projectRoot) / fp).string();
                 };
-            std::string vert = readFile(args[1]), frag = readFile(args[2]);
-            if (vert.empty()) { out << MakeResponse(false, "registershader", "Cannot read vert: " + args[1]) << "\n"; return; }
-            if (frag.empty()) { out << MakeResponse(false, "registershader", "Cannot read frag: " + args[2]) << "\n"; return; }
+
+            auto readFile = [](const std::string& path) -> std::string {
+                std::ifstream f(path); if (!f) return "";
+                return { std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>() };
+                };
+
+            std::string vertPath = resolvePath(args[1]);
+            std::string fragPath = resolvePath(args[2]);
+            std::string vert = readFile(vertPath), frag = readFile(fragPath);
+            if (vert.empty()) { out << MakeResponse(false, "registershader", "Cannot read vert: " + vertPath) << "\n"; return; }
+            if (frag.empty()) { out << MakeResponse(false, "registershader", "Cannot read frag: " + fragPath) << "\n"; return; }
             {
                 std::lock_guard<std::mutex> lock(g_deferredShaderMutex);
                 g_deferredShaderTasks.push_back({ args[0], std::move(vert), std::move(frag) });
             }
             out << MakeResponse(true, "registershader", "Shader '" + args[0] + "' queued for registration") << "\n";
         });
+
     reg.Register("loadhdrskybox", "loadhdrskybox <path>", "Load HDR equirectangular image as skybox.",
         [](CmdContext& ctx, const std::vector<std::string>& args, std::ostream& out) {
             if (args.empty()) {
@@ -1049,31 +1823,37 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer,
         });
 
     // rect — spawn a flat rectangle (thin slab)
-    reg.Register("rect", "rect <name> <x> <y> <z> [w=5] [h=5] [color]",
+    reg.Register("rect", "rect <name> <x> <y> <z> [w] [h] [segmentsX] [segmentsY] [segmentsZ] [color]",
         "Spawn a flat rectangle.",
         [](CmdContext& ctx, const std::vector<std::string>& args, std::ostream& out) {
-            if (args.size() < 4) { out << MakeResponse(false, "rect", "Usage: rect <name> <x> <y> <z> [w=5] [h=5] [color]") << "\n"; return; }
+            if (args.size() < 4) { out << MakeResponse(false, "rect", "Usage: rect <name> <x> <y> <z> [w] [h] [segmentsX] [segmentsY] [segmentsZ] [color]") << "\n"; return; }
 
             std::string finalName = NameValidator::GetFinalName(args[0], g_namedObjects, g_namedLights);
-            // If name was changed, log it
-            if (finalName != args[0]) {
-                out << MakeResponse(true, "plane", "Name '" + args[0] + "' changed to '" + finalName + "'") << "\n";
-            }
+            if (finalName != args[0]) out << MakeResponse(true, "rect", "Name '" + args[0] + "' changed to '" + finalName + "'") << "\n";
 
             double x, y, z, w = 5.0, h = 5.0;
+            int segX = 1, segY = 1, segZ = 1;
             if (!ParseDouble(args[1], x) || !ParseDouble(args[2], y) || !ParseDouble(args[3], z)) {
                 out << MakeResponse(false, "rect", "Bad coords") << "\n"; return;
             }
             if (args.size() >= 5) ParseDouble(args[4], w);
             if (args.size() >= 6) ParseDouble(args[5], h);
-            Color col = args.size() >= 7 ? NameToColor(args[6]) : colWhite;
+            if (args.size() >= 7) ParseInt(args[6], segX);
+            if (args.size() >= 8) ParseInt(args[7], segY);
+            if (args.size() >= 9) ParseInt(args[8], segZ);
+            Color col = args.size() >= 10 ? NameToColor(args[9]) : colWhite;
+
+            segX = (std::max)(1, segX); segY = (std::max)(1, segY); segZ = (std::max)(1, segZ);
+
             std::unique_lock<std::shared_mutex> lock(*ctx.sceneMutex);
             BaseObject* obj = new HonHengine::Rectangle(Vector3(w * 0.5, w * 0.5, h * 0.5), Vector3(x, y, z), Quaternion(),
-                new Material(0, 0, col, colBlack));
+                new Material(0, 0, col, colBlack), segX, segY, segZ);
             ctx.sm->objects->push_back(obj);
             g_namedObjects[finalName] = obj;
+
             std::ostringstream d; d << std::fixed << std::setprecision(4);
-            d << JVec3("pos", x, y, z) << ",\"w\":" << w << ",\"h\":" << h << ",\"color\":" << JStr(args.size() >= 7 ? args[6] : "white");
+            d << JVec3("pos", x, y, z) << ",\"w\":" << w << ",\"h\":" << h
+                << ",\"segmentsX\":" << segX << ",\"segmentsY\":" << segY << ",\"segmentsZ\":" << segZ;
             out << MakeResponse(true, "rect", "'" + finalName + "' spawned", d.str()) << "\n";
         });
 
@@ -1168,61 +1948,6 @@ static void BuildCommands(CommandRegistry& reg, GPURenderer* renderer,
         });
 }
 
-// =============================================================================
-//  Structures pour l'IDE 
-// =============================================================================
-struct ConsoleLog {
-    enum Kind { CMD, REPLY_OK, REPLY_ERR, INFO };
-    struct Entry { Kind kind; std::string text; };
-    std::deque<Entry> entries;
-    std::mutex mtx;
-    bool autoScroll = true;
-    std::string selectedText;
-
-    void push(Kind k, const std::string& t) {
-        std::lock_guard<std::mutex> lk(mtx);
-        entries.push_back({ k,t });
-        if (entries.size() > 5000) entries.pop_front();
-    }
-
-    void clear() {
-        std::lock_guard<std::mutex> lk(mtx);
-        entries.clear();
-        selectedText.clear();
-    }
-};
-
-struct SceneFBO {
-    GLuint fbo = 0, color = 0, depth = 0;
-    int w = 0, h = 0;
-    void init(int width, int height) {
-        w = width; h = height;
-        glGenFramebuffers(1, &fbo); glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-        glGenTextures(1, &color); glBindTexture(GL_TEXTURE_2D, color);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color, 0);
-        glGenRenderbuffers(1, &depth); glBindRenderbuffer(GL_RENDERBUFFER, depth);
-        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
-        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, depth);
-        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) std::cerr << "FBO incomplete!\n";
-        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-    }
-    void resize(int nw, int nh) {
-        if (nw == w && nh == h) return;
-        w = nw; h = nh;
-        glBindTexture(GL_TEXTURE_2D, color); glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-        glBindRenderbuffer(GL_RENDERBUFFER, depth); glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
-    }
-    void bind() { glBindFramebuffer(GL_FRAMEBUFFER, fbo); glViewport(0, 0, w, h); }
-    void unbind() { glBindFramebuffer(GL_FRAMEBUFFER, 0); }
-    void destroy() { if (fbo) glDeleteFramebuffers(1, &fbo); if (color) glDeleteTextures(1, &color); if (depth) glDeleteRenderbuffers(1, &depth); }
-};
-
-// Real shipping pipeline — compile all scripts + game_entry into one executable.
-// (ide_ship.h included at top of file)
-
 // Thin bridge: IDEState -> ShipConfig, runs ShipBuilder on a background thread.
 static void RunShipBuild(const HonHengine::ShipConfig& cfg, ConsoleLog& log)
 {
@@ -1245,294 +1970,6 @@ static void RunShipBuild(const HonHengine::ShipConfig& cfg, ConsoleLog& log)
             "[Ship] Build FAILED: " + result.errorLog);
     }
 }
-
-
-static const char* kColorNames[] = {
-    "white","black","red","green","blue","yellow","gray","orange","purple","cyan"
-};
-static const int kNumColors = 10;
-
-struct HierarchyNode {
-    enum Kind { OBJECT, LIGHT, CAMERA, FOLDER };
-    Kind kind = OBJECT; std::string name; bool folderOpen = true; std::vector<HierarchyNode> children;
-};
-
-struct IDECamera {
-    std::string name;
-    float px = 0, py = 5, pz = 15;
-    float fov = 60.f;
-    Camera* runtimeCamera = nullptr; // non-owning, owned by sm->cameras
-};
-
-
-struct IDEState {
-    std::vector<IDEObject> objects;
-    std::vector<IDELight> lights;
-    std::vector<IDECamera> cameras;          // scene cameras added by the user
-    Camera* savedEditorCamera = nullptr;     // editor cam pointer, saved on Play
-    // Non-owning pointer to the ScriptManager that lives in sm->scriptManager.
-    // Ownership was moved there so GPURenderer::UpdateGameLogic can drive updates.
-    ScriptManager* scriptManager = nullptr;
-    float editorFov = 60.f; // editor viewport camera FOV
-    bool consoleFocused = false;
-    AIAssistant aiAssistant;
-    bool showAIChat = false;
-    bool quitRequested = false;
-    bool showQuitModal = false;
-    MultiSelection selection;
-
-    std::vector<HierarchyNode> hierRoots;
-    std::string clipboardName;
-    bool clipboardIsLight = false;
-    SceneFBO sceneFBO;
-    SceneManager* sm = nullptr;
-    GPURenderer* renderer = nullptr;
-    BasicMovements* player = nullptr;
-    CommandBus bus;
-    ConsoleLog log;
-    SDL_Window* window = nullptr;
-    static constexpr int kUndoMaxDepth = 64;
-    char cmdInput[512] = {};
-
-    ImGuiID mainDockspaceId = 0;
-    bool showHierarchy = true;
-    bool showInspector = true;
-    bool showConsole = true;
-    bool showAssetBrowser = true;
-    bool viewportHovered = false;
-    bool showShipDialog = false;
-    char shipSrcDir[512] = "./";
-    char shipDstDir[512] = "./dist/";
-
-    // ── Scene management for shipping ────────────────────────────────────────
-    // All .honscene files found in the project, refreshed when the Ship dialog opens.
-    struct SceneEntry {
-        std::string path;       // relative or absolute path to the .honscene
-        std::string name;       // display name (filename stem)
-        bool selected = true;   // whether to include in the build
-    };
-    std::vector<SceneEntry> projectScenes;  // populated on Ship dialog open
-    int shipFirstScene = 0;                 // index into projectScenes of the startup scene
-    bool showAddObject = false;
-    char newObjName[64] = "obj1";
-    ObjectType newObjType = PLANE;
-    char newObjFile[256] = "";
-    float newObjPos[3] = {};
-    float newObjScale = 1.f;
-    int newObjColor = 0;
-    bool showAddLight = false;
-    float newLightPos[3] = {};
-    char newLightName[64] = "light1";
-    float newLightIntensity = .75f;
-    float newLightColor[3] = { 1.f,1.f,1.f };
-    ObjectType newLightType = POINT_LIGHT;
-    bool showAddCamera = false;
-    char newCameraName[64] = "camera1";
-    float newCameraPos[3] = { 0.f, 5.f, 15.f };
-    float inspPos[3] = {};
-    float inspScale[3] = { 1,1,1 };
-    float inspRot[3] = {};
-    float inspColor[4] = { 1,1,1,1 };
-    char inspShader[64] = {};
-    char inspTag[64] = {};
-    bool playing = false;
-
-    // Asset management
-    AssetDatabase    assetDb;
-    AssetBrowserState assetBrowser;
-
-    // Project management
-    ProjectSettings  project;
-    ProjectUIState   projectUI;
-    AutoSaveManager  autoSave;
-
-    // Package manager
-    PackageManager   packageMgr;
-    PackageManagerUIState packageUI;
-
-    // Global search
-    GlobalSearchState globalSearch;
-
-    // Toast notifications
-    ToastManager toastMgr;
-
-    // Editor settings
-    EditorSettings editorSettings;
-
-    // Selection history
-    SelectionHistory selectionHistory;
-
-    // Progress bar
-    ProgressState progressState;
-
-    // Inspector lock
-    bool inspectorLocked = false;
-    std::string lockedInspectorObject;
-
-    char hierarchyFilter[128] = {};
-    bool showStats = false;
-    float statsTimer = 0.f;
-    int statsFps = 0;
-    int statsFrameCount = 0;
-    bool showWorldSettings = false;
-    float ambientIntensity = 0.15f;
-    float fogDensity = 0.f;
-    int fogColor[3] = { 200,210,230 };
-    bool wireframe = false;
-    bool showRenameModal = false;
-    char renameOldName[64] = {};
-    char renameNewName[64] = {};
-    bool snapEnabled = false;
-    float snapPosition = 0.25f;
-    float snapRotation = 15.f;
-    float snapScale = 0.1f;
-    std::vector<std::string> cmdHistory;
-    int cmdHistoryIdx = -1;
-    std::vector<std::string> undoStack;
-    bool sceneDirty = false;
-    char sceneFilePath[512] = "assets/scene.honscene";
-    bool showSaveModal = false;
-
-    // ── Project-root–relative path helpers ───────────────────────────────────
-    // Use these everywhere instead of hard-coded ".honassets" / "ide_settings.ini"
-    // so that all per-project data lives inside the chosen project folder.
-    std::string ProjectRoot() const {
-        return std::string(project.rootFolder);
-    }
-    std::string HonAssetsPath() const {
-        std::string r = ProjectRoot();
-        return r.empty() ? ".honassets"
-            : (fs::path(r) / ".honassets").string();
-    }
-    std::string EditorSettingsPath() const {
-        std::string r = ProjectRoot();
-        return r.empty() ? "ide_settings.ini"
-            : (fs::path(r) / "ide_settings.ini").string();
-    }
-    std::string AssetRootDir() const {
-        std::string r = ProjectRoot();
-        return r.empty() ? "./assets/"
-            : (fs::path(r) / "assets" / "").string();
-    }
-    bool showLoadModal = false;
-
-    // ── Scene open from Asset Browser ─────────────────────────────────────────
-    // When the user double-clicks a .honscene in the browser, we check if the
-    // scene is dirty and show a confirmation prompt before loading.
-    bool showSceneOpenPrompt = false;    // "Save before opening?" modal
-    std::string pendingSceneOpenPath;   // the .honscene path to load once confirmed
-    std::string pendingSelection;
-    size_t logReadIdx = 0;
-    bool showCreateFolder = false;
-    char newFolderName[64] = "Group";
-    bool showMoveToFolder = false;
-    char moveTargetItem[64] = {};
-    bool moveTargetIsLight = false;
-
-    // Outils à la Unity
-    int toolMode = 1;            // 0=View, 1=Translate, 2=Rotate, 3=Scale
-    bool editorCamOrbit = false;
-    ImVec2 editorCamLastMouse;
-
-    // Gizmo state
-    TransformGizmo gizmo;
-    bool gizmoLocalMode = false;
-    bool gizmoPivotCenter = false;
-
-    // Camera bookmarks
-    CameraBookmarks bookmarks;
-
-    // Focus transition
-    FocusTransition focus;
-
-    // Ortho/persp
-    bool viewportOrtho = false;
-    float orthoSize = 10.f;
-
-    // Overlays
-    bool showGrid = true;
-    bool showAxes = true;
-    bool showIcons3D = true;
-    bool showFrustum = true;
-    int gridPlane = 0;   // 0=XZ, 1=XY, 2=YZ
-    int debugMode = 0;   // 0=shaded, 1=wireframe, 2=overdraw, 3=depth, 4=normals
-
-    // FPS fly mode
-    bool fpsFlyMode = false;
-
-    // Box selection
-    BoxSelectionState boxSelect;
-
-    // ── Skybox / Environment ─────────────────────────────────────────────────
-    bool  showEnvironmentWindow = false;
-    // 0 = Procedural (default), 1 = Cubemap from files
-    int   skyboxMode = 0;
-    // Per-face paths for cubemap import (right, left, top, bottom, front, back)
-    char  skyboxFaces[6][512] = {};
-    // Sun glow intensity override (0 = driven by directional light)
-    float skyboxSunGlowOverride = -1.f; // -1 means "use light intensity"
-
-    // ── Import Settings Overlay ───────────────────────────────────────────────
-    // Floating temporary panel shown above the Inspector when an asset is
-    // dropped onto the viewport (or focused in the browser).
-    bool  showImportOverlay = false;
-    std::string importOverlayGUID;          // which asset's settings to show
-    bool  importOverlayHasImportBtn = false;// whether to show the "Import" button
-    std::function<void()> importOverlayOnImport; // callback for Import button
-    ImVec2 importOverlayAnchorPos = {};    // Inspector window top-left (updated each frame)
-    ImVec2 importOverlayAnchorSize = {};    // Inspector window size     (updated each frame)
-
-    // ── Physics / RigidBody ────────────────────────────────────────────────────
-    PhysicsWorld physicsWorld;
-    std::unordered_map<BaseObject*, RigidBody>         rigidBodies;
-    std::unordered_map<BaseObject*, CollisionTrigger>  collisionTriggers;
-
-    // ── Prefab ────────────────────────────────────────────────────────────────
-    std::unordered_map<std::string, std::string> prefabSourceGUID;
-
-    // Multi-object prefab creation (from folder right-click or multi-selection)
-    bool showCreatePrefabFromFolder = false;
-    std::string createPrefabFromFolderName;      // which folder to serialize
-    char createPrefabMultiName[64] = {};
-
-    // ── Prefab Edit Mode (Unity-style) ────────────────────────────────────────
-    // When the user double-clicks a .honprefab in the asset browser, the editor
-    // enters a dedicated "Prefab Edit Mode" — isolated from the main scene.
-    // The prefab objects are loaded into a temporary list; on Save the file is
-    // re-serialized and the mode is exited.
-    bool  prefabEditMode = false;           // true while editing a prefab
-    std::string prefabEditPath;             // path to the .honprefab being edited
-    std::string prefabEditName;             // display name (stem of file)
-    // Snapshot of the main scene objects/lights to restore on exit
-    std::vector<IDEObject> prefabEditSceneSnapshot;
-    std::vector<IDELight>  prefabEditLightSnapshot;
-    // Objects loaded from the prefab for inline editing
-    std::vector<IDEObject> prefabEditObjects;
-    bool prefabEditDirty = false;           // unsaved changes in prefab editor
-
-    // "Add Parent" (Create Empty Parent) state
-    bool showAddParentModal = false;
-    char addParentName[64] = "GameObject";
-
-    // Hierarchy drag-into-folder payload tag
-    static constexpr const char* kHierFolderDropPayload = "HONHON_HIER_INTO_FOLDER";
-
-    // ── Profiler / Memory debug windows ──────────────────────────────────────
-    bool showProfiler = false;
-    bool showMemoryWindow = false;
-    static constexpr int kProfilerSamples = 256;
-    float frameTimeSamples[kProfilerSamples] = {};
-    int   frameTimeSampleIdx = 0;
-
-    // ── Toolchain settings window ─────────────────────────────────────────────
-    bool showToolchainWindow = false;
-
-    // ── Script creation wizard ────────────────────────────────────────────────
-    bool showScriptWizard = false;
-    char newScriptName[64] = "MyScript";
-    int  newScriptTemplate = 0; // 0=Empty, 1=StartUpdate, 2=Full
-};
-
 // =============================================================================
 //  Fonctions de rafraîchissement de la hiérarchie (inchangées)
 // =============================================================================
@@ -1624,7 +2061,7 @@ static void RebuildHierarchy(IDEState& ide)
 
 static void ParseListReply(const std::string& json, IDEState& ide)
 {
-    // Sauvegarder la sélection actuelle avant de parser
+    // Save current selection and old object metadata before parsing
     std::set<std::string> previousSelection = ide.selection.items;
     std::string oldPrimary = ide.selection.Primary();
 
@@ -1634,6 +2071,9 @@ static void ParseListReply(const std::string& json, IDEState& ide)
     std::vector<IDEObject> newObjects;
     std::vector<IDELight> newLights;
 
+    // ─────────────────────────────────────────────────────────────────────────
+    //  PARSE OBJECTS
+    // ─────────────────────────────────────────────────────────────────────────
     size_t objStart = json.find("\"objects\":[");
     if (objStart != std::string::npos) {
         size_t objEnd = json.find("],\"lights\"", objStart);
@@ -1643,66 +2083,81 @@ static void ParseListReply(const std::string& json, IDEState& ide)
 
         size_t pos = 0;
         while (true) {
-            size_t namePos = objectsStr.find("\"name\":\"", pos);
-            if (namePos == std::string::npos) break;
+            // Find object start
+            size_t objPos = objectsStr.find("{", pos);
+            if (objPos == std::string::npos) break;
 
-            size_t nameEnd = objectsStr.find("\"", namePos + 8);
-            std::string name = objectsStr.substr(namePos + 8, nameEnd - namePos - 8);
+            // Find matching closing brace
+            int braceDepth = 0;
+            size_t objEndPos = objPos;
+            for (size_t i = objPos; i < objectsStr.size(); ++i) {
+                if (objectsStr[i] == '{') braceDepth++;
+                else if (objectsStr[i] == '}') {
+                    braceDepth--;
+                    if (braceDepth == 0) {
+                        objEndPos = i;
+                        break;
+                    }
+                }
+            }
+            std::string objJson = objectsStr.substr(objPos, objEndPos - objPos + 1);
+            pos = objEndPos + 1;
 
+            // --- Parse object fields ---
             IDEObject obj;
-            obj.name = name;
-            obj.visible = true;
+
+            // name
+            obj.name = JsonGet(objJson, "name");
+
+            // visible
+            std::string visStr = JsonGet(objJson, "visible");
+            obj.visible = (visStr != "false");
+
+            // position
+            std::string posJson = JsonGet(objJson, "pos");
+            if (!posJson.empty()) {
+                sscanf_s(posJson.c_str(), "{\"x\":%f,\"y\":%f,\"z\":%f}",
+                    &obj.px, &obj.py, &obj.pz);
+            }
+
+            // scale
+            std::string scaleJson = JsonGet(objJson, "scale");
+            if (!scaleJson.empty()) {
+                sscanf_s(scaleJson.c_str(), "{\"x\":%f,\"y\":%f,\"z\":%f}",
+                    &obj.sx, &obj.sy, &obj.sz);
+            }
+
+            // shader
+            obj.shader = JsonGet(objJson, "shader");
+
+            // type (direct from engine – no inference!)
+            obj.type = JsonGet(objJson, "type");
+
+            // assetPath (for OBJ/GLTF models)
+            obj.assetPath = JsonGet(objJson, "assetPath");
+
+            // tag
+            obj.tag = JsonGet(objJson, "tag");
+
+            // color
+            std::string colorJson = JsonGet(objJson, "color");
+            if (!colorJson.empty()) {
+                sscanf_s(colorJson.c_str(), "{\"r\":%d,\"g\":%d,\"b\":%d,\"a\":%d}",
+                    &obj.cr, &obj.cg, &obj.cb, &obj.ca);
+            }
+
+            // default values for fields not in JSON
             obj.locked = false;
-            obj.sx = obj.sy = obj.sz = 1.0f;
-            obj.cr = obj.cg = obj.cb = 255;
-            obj.ca = 255;
             obj.rw = 1.0f;
             obj.rx = obj.ry = obj.rz = 0.0f;
-            obj.tag = "";
-            obj.shader = "";
-
-            // Extract position
-            size_t xPos = objectsStr.find("\"x\":", nameEnd);
-            if (xPos != std::string::npos) {
-                sscanf_s(objectsStr.c_str() + xPos + 4, "%f", &obj.px);
-            }
-            size_t yPos = objectsStr.find("\"y\":", xPos + 1);
-            if (yPos != std::string::npos) {
-                sscanf_s(objectsStr.c_str() + yPos + 4, "%f", &obj.py);
-            }
-            size_t zPos = objectsStr.find("\"z\":", yPos + 1);
-            if (zPos != std::string::npos) {
-                sscanf_s(objectsStr.c_str() + zPos + 4, "%f", &obj.pz);
-            }
-
-            // Extract scale (if present)
-            size_t scaleXPos = objectsStr.find("\"scale\":{\"x\":", nameEnd);
-            if (scaleXPos != std::string::npos) {
-                sscanf_s(objectsStr.c_str() + scaleXPos + 13, "%f", &obj.sx);
-                size_t scaleYPos = objectsStr.find("\"y\":", scaleXPos + 13);
-                if (scaleYPos != std::string::npos) {
-                    sscanf_s(objectsStr.c_str() + scaleYPos + 4, "%f", &obj.sy);
-                }
-                size_t scaleZPos = objectsStr.find("\"z\":", scaleYPos + 4);
-                if (scaleZPos != std::string::npos) {
-                    sscanf_s(objectsStr.c_str() + scaleZPos + 4, "%f", &obj.sz);
-                }
-            }
-
-            // Extract shader
-            size_t shaderPos = objectsStr.find("\"shader\":\"", nameEnd);
-            if (shaderPos != std::string::npos) {
-                size_t shaderEnd = objectsStr.find("\"", shaderPos + 10);
-                if (shaderEnd != std::string::npos) {
-                    obj.shader = objectsStr.substr(shaderPos + 10, shaderEnd - shaderPos - 10);
-                }
-            }
 
             newObjects.push_back(obj);
-            pos = nameEnd + 1;
         }
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    //  PARSE LIGHTS
+    // ─────────────────────────────────────────────────────────────────────────
     size_t lightStart = json.find("\"lights\":[");
     if (lightStart != std::string::npos) {
         size_t contentStart = lightStart + 10;
@@ -1760,7 +2215,9 @@ static void ParseListReply(const std::string& json, IDEState& ide)
         }
     }
 
-    // Check if scene changed
+    // ─────────────────────────────────────────────────────────────────────────
+    //  DETECT SCENE CHANGES
+    // ─────────────────────────────────────────────────────────────────────────
     bool changed = (newObjects.size() != lastObjects.size() || newLights.size() != lastLights.size());
     if (!changed) {
         for (size_t i = 0; i < newObjects.size(); i++) {
@@ -1788,7 +2245,9 @@ static void ParseListReply(const std::string& json, IDEState& ide)
         RebuildHierarchy(ide);
     }
 
-    // Restaurer la sélection (pour les objets qui existent encore)
+    // ─────────────────────────────────────────────────────────────────────────
+    //  RESTORE SELECTION
+    // ─────────────────────────────────────────────────────────────────────────
     std::set<std::string> restoredSelection;
     for (const auto& name : previousSelection) {
         bool found = false;
@@ -1800,7 +2259,7 @@ static void ParseListReply(const std::string& json, IDEState& ide)
                 if (lt.name == name) { found = true; break; }
             }
         }
-        // Also keep cameras in the selection — they live in ide.cameras, not objects/lights
+        // Also keep cameras in the selection
         if (!found) {
             for (const auto& cam : ide.cameras) {
                 if (cam.name == name) { found = true; break; }
@@ -1809,15 +2268,12 @@ static void ParseListReply(const std::string& json, IDEState& ide)
         if (found) {
             restoredSelection.insert(name);
         }
-        // Silently drop truly missing names — the log.push here caused a
-        // recursive mutex deadlock because ParseListReply is called while
-        // log.mtx is already held by the main-thread log-drain loop.
     }
 
-    // Mettre à jour la sélection
+    // Update selection
     ide.selection.items = restoredSelection;
 
-    // Si la sélection a changé, mettre à jour l'inspecteur
+    // If selection has changed, update inspector
     if (restoredSelection.empty()) {
         if (!oldPrimary.empty()) {
             ide.log.push(ConsoleLog::INFO, "[Selection] Selection cleared");
@@ -1830,17 +2286,19 @@ static void ParseListReply(const std::string& json, IDEState& ide)
         }
     }
     else if (restoredSelection.size() > 1 && oldPrimary != ide.selection.Primary()) {
-        // Pour la sélection multiple, on inspecte le primaire
+        // For multi-selection, inspect the primary
         ide.bus.send("inspect " + ide.selection.Primary());
     }
 
-    // Gérer la sélection en attente (après création d'un objet)
+    // ─────────────────────────────────────────────────────────────────────────
+    //  HANDLE PENDING SELECTION (after object creation)
+    // ─────────────────────────────────────────────────────────────────────────
     if (!ide.pendingSelection.empty()) {
         if (ide.selection.Contains(ide.pendingSelection)) {
             ide.pendingSelection.clear();
         }
         else {
-            // Attendre que l'objet apparaisse dans la liste
+            // Wait for the object to appear in the list
             bool pendingFound = false;
             for (const auto& obj : ide.objects) {
                 if (obj.name == ide.pendingSelection) {
@@ -1864,7 +2322,9 @@ static void ParseListReply(const std::string& json, IDEState& ide)
         }
     }
 
-    // Mettre à jour l'inspector si l'objet verrouillé existe toujours
+    // ─────────────────────────────────────────────────────────────────────────
+    //  UPDATE LOCKED INSPECTOR
+    // ─────────────────────────────────────────────────────────────────────────
     if (ide.inspectorLocked && !ide.lockedInspectorObject.empty()) {
         bool lockedExists = false;
         for (const auto& obj : ide.objects)
@@ -2355,7 +2815,6 @@ static void DrawHierarchyNodes(std::vector<HierarchyNode>& nodes, IDEState& ide,
         bool textClicked = ImGui::IsItemClicked(ImGuiMouseButton_Left) && !locked;
         ImGui::PopStyleColor();
 
-        // MODIFIED: multi-selection with Ctrl
         if ((rowClicked || textClicked) && !locked) {
             ImGuiIO& io = ImGui::GetIO();
             if (io.KeyCtrl) {
@@ -2405,6 +2864,65 @@ static void DrawHierarchyNodes(std::vector<HierarchyNode>& nodes, IDEState& ide,
                             node.name.c_str(), rec->path.c_str());
                         ide.bus.send(cmd);
                         ide.sceneDirty = true;
+                    }
+                    else if ((ap->type == AssetType::Shader ||
+                        rec->type == AssetType::Shader ||
+                        rec->type == AssetType::ShaderSource) && !isLight) {
+                        // Drop a .honshader onto an object — or drop a multi-selected
+                        // .vert + .frag pair (payload.type upgraded to Shader).
+                        std::string shaderName;
+                        if (rec->type == AssetType::Shader) {
+                            // Already a compiled .honshader — use its display name
+                            shaderName = rec->displayName;
+                        }
+                        else if (ap->type == AssetType::Shader) {
+                            // Multi-selected vert+frag pair drag: find both files from
+                            // the browser's current selection, create .honshader if needed,
+                            // then queue shader registration.
+                            std::string vertPath, fragPath;
+                            std::string stemName = fs::path(rec->path).stem().string();
+                            for (auto& g : ide.assetBrowser.selectedGUIDs) {
+                                auto* r = ide.assetDb.FindByGUID(g);
+                                if (!r) continue;
+                                std::string ext = fs::path(r->path).extension().string();
+                                for (auto& c : ext) c = (char)std::tolower((unsigned char)c);
+                                if (ext == ".vert" && vertPath.empty()) vertPath = r->path;
+                                else if (ext == ".frag" && fragPath.empty()) fragPath = r->path;
+                            }
+                            if (!vertPath.empty() && !fragPath.empty()) {
+                                shaderName = stemName;
+                                // Create .honshader sidecar if it doesn't exist yet
+                                std::string dir = fs::path(vertPath).parent_path().string();
+                                fs::path honPath = fs::path(dir) / (shaderName + ".honshader");
+                                if (!fs::exists(honPath)) {
+                                    CreateShaderAsset(dir, shaderName, vertPath, fragPath);
+                                    ide.assetDb.Register(honPath.string());
+                                    ide.assetBrowser.dirDirty = true;
+                                }
+                                // Queue GPU shader compilation
+                                std::ifstream vf(vertPath), ff(fragPath);
+                                std::string vsrc((std::istreambuf_iterator<char>(vf)), {});
+                                std::string fsrc((std::istreambuf_iterator<char>(ff)), {});
+                                if (!vsrc.empty() && !fsrc.empty()) {
+                                    std::lock_guard<std::mutex> lk(g_deferredShaderMutex);
+                                    g_deferredShaderTasks.push_back({ shaderName, vsrc, fsrc });
+                                }
+                            }
+                        }
+                        else {
+                            // Single ShaderSource drag — just use the stem name
+                            shaderName = fs::path(rec->path).stem().string();
+                        }
+                        if (!shaderName.empty()) {
+                            char cmd[512];
+                            std::snprintf(cmd, sizeof(cmd), "setshader %s %s",
+                                node.name.c_str(), shaderName.c_str());
+                            ide.log.push(ConsoleLog::REPLY_OK,
+                                "[Hierarchy] Shader '" + shaderName
+                                + "' assigned to '" + node.name + "'");
+                            ide.bus.send(cmd);
+                            ide.sceneDirty = true;
+                        }
                     }
                     else if (rec->type == AssetType::Model ||
                         rec->type == AssetType::Prefab) {
@@ -3525,48 +4043,37 @@ static glm::vec3 GetCameraSpawnPos(IDEState& ide, float dist = 6.f)
 // Forward-declare so EnterPrefabEditMode can call it
 static std::string InstantiatePrefab(IDEState& ide, const std::string& path);
 
-static void EnterPrefabEditMode(IDEState& ide, const std::string& path)
-{
-    if (ide.prefabEditMode) return;  // already editing a prefab
+static void EnterPrefabEditMode(IDEState& ide, const std::string& path) {
+    if (ide.prefabEditMode) return;
 
-    // ── 1. Snapshot the current scene ──────────────────────────────────────
+    // Snapshot current scene
     ide.prefabEditSceneSnapshot = ide.objects;
     ide.prefabEditLightSnapshot = ide.lights;
 
-    // ── 2. Clear scene visuals (keep engine scene untouched via bus) ────────
     ide.bus.send("clearscene");
     ide.selection.Clear();
 
-    // ── 3. Load prefab objects from JSON into ide.objects ──────────────────
     std::ifstream f(path);
     if (!f.is_open()) {
         ide.log.push(ConsoleLog::REPLY_ERR, "[PrefabEdit] Cannot open: " + path);
-        // Restore immediately
+        // Restore snapshot
         ide.objects = ide.prefabEditSceneSnapshot;
         ide.lights = ide.prefabEditLightSnapshot;
-        ide.bus.send("clearscene");
         for (auto& o : ide.objects) {
             char buf[512];
-            std::snprintf(buf, sizeof(buf), "obj %s _ %.4f %.4f %.4f",
-                o.name.c_str(), o.px, o.py, o.pz);
+            std::snprintf(buf, sizeof(buf), "sphere %s %.4f %.4f %.4f", o.name.c_str(), o.px, o.py, o.pz);
             ide.bus.send(buf);
         }
         return;
     }
-    std::string json((std::istreambuf_iterator<char>(f)),
-        std::istreambuf_iterator<char>());
+    std::string json((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     f.close();
 
-    ide.prefabEditObjects.clear();
-    ide.objects.clear();
-    ide.lights.clear();
+    ide.prefabEditName = JsonGet(json, "name");
+    if (ide.prefabEditName.empty())
+        ide.prefabEditName = fs::path(path).stem().string();
 
-    // Parse multi-object prefab  {"name":..., "objects":[...]}
-    std::string prefabDisplayName = JsonGet(json, "name");
-    if (prefabDisplayName.empty())
-        prefabDisplayName = fs::path(path).stem().string();
-
-    // Helper: extract JSON array content between first '[' and its matching ']'
+    // Helper to extract a JSON array from the top-level object
     auto extractArray = [&](const std::string& arrayKey) -> std::string {
         std::string marker = "\"" + arrayKey + "\"";
         auto pos = json.find(marker);
@@ -3577,196 +4084,369 @@ static void EnterPrefabEditMode(IDEState& ide, const std::string& path)
         size_t start = pos;
         for (size_t i = pos; i < json.size(); ++i) {
             if (json[i] == '[') ++depth;
-            else if (json[i] == ']') { --depth; if (depth == 0) return json.substr(start + 1, i - start - 1); }
+            else if (json[i] == ']') {
+                --depth;
+                if (depth == 0) return json.substr(start + 1, i - start - 1);
+            }
         }
         return "";
         };
 
+    // ---- Objects -------------------------------------------------
     std::string objArray = extractArray("objects");
-
-    auto parseFloat = [](const std::string& src, const std::string& key, float def = 0.f) -> float {
-        std::string val = JsonGet(src, key);
-        if (val.empty()) return def;
-        try { return std::stof(val); }
-        catch (...) { return def; }
-        };
-
     if (!objArray.empty()) {
-        // Split on },{  — simple object tokeniser
-        std::vector<std::string> tokens;
-        int depth = 0; size_t start = 0;
+        std::vector<std::string> objTokens;
+        int depth = 0;
+        size_t start = 0;
         for (size_t i = 0; i < objArray.size(); ++i) {
-            if (objArray[i] == '{') { if (depth == 0) start = i; ++depth; }
+            if (objArray[i] == '{') {
+                if (depth == 0) start = i;
+                ++depth;
+            }
             else if (objArray[i] == '}') {
                 --depth;
-                if (depth == 0)
-                    tokens.push_back(objArray.substr(start, i - start + 1));
+                if (depth == 0) objTokens.push_back(objArray.substr(start, i - start + 1));
             }
         }
-        for (auto& tok : tokens) {
-            IDEObject o;
-            o.name = JsonGet(tok, "name");
-            if (o.name.empty()) o.name = "PrefabObject";
-            // Read object type and asset path
-            o.type = JsonGet(tok, "type");
-            if (o.type.empty()) o.type = "sphere";
-            o.assetPath = JsonGet(tok, "assetPath");
-            // Parse flat px/py/pz (CreatePrefabFromFolder / legacy format)
-            {
-                std::string v;
-                v = JsonGet(tok, "px"); if (!v.empty()) { try { o.px = std::stof(v); } catch (...) {} }
-                v = JsonGet(tok, "py"); if (!v.empty()) { try { o.py = std::stof(v); } catch (...) {} }
-                v = JsonGet(tok, "pz"); if (!v.empty()) { try { o.pz = std::stof(v); } catch (...) {} }
-                v = JsonGet(tok, "sx"); if (!v.empty()) { try { o.sx = std::stof(v); } catch (...) {} }
-                else o.sx = 1.f;
-                v = JsonGet(tok, "sy"); if (!v.empty()) { try { o.sy = std::stof(v); } catch (...) {} }
-                else o.sy = 1.f;
-                v = JsonGet(tok, "sz"); if (!v.empty()) { try { o.sz = std::stof(v); } catch (...) {} }
-                else o.sz = 1.f;
-                v = JsonGet(tok, "rw"); if (!v.empty()) { try { o.rw = std::stof(v); } catch (...) {} }
-                else o.rw = 1.f;
-                v = JsonGet(tok, "rx"); if (!v.empty()) { try { o.rx = std::stof(v); } catch (...) {} }
-                v = JsonGet(tok, "ry"); if (!v.empty()) { try { o.ry = std::stof(v); } catch (...) {} }
-                v = JsonGet(tok, "rz"); if (!v.empty()) { try { o.rz = std::stof(v); } catch (...) {} }
+
+        for (auto& tok : objTokens) {
+            std::string objName = JsonGet(tok, "name");
+            std::string objType = JsonGet(tok, "type");
+            std::string assetPath = JsonGet(tok, "assetPath");
+            std::string visibleStr = JsonGet(tok, "visible");
+            std::string tag = JsonGet(tok, "tag");
+            if (tag.empty()) tag = "";
+
+            // Spawn a placeholder object (type determines the command)
+            char cmd[512];
+            if (objType == "plane") {
+                std::snprintf(cmd, sizeof(cmd), "plane %s 0 0 0", objName.c_str());
             }
-            // Also parse from nested "transform" sub-object (SaveAndExitPrefabEditMode format)
-            auto tpos = tok.find("\"transform\"");
+            else if (objType == "rect") {
+                std::snprintf(cmd, sizeof(cmd), "rect %s 0 0 0", objName.c_str());
+            }
+            else if (objType == "obj" && !assetPath.empty()) {
+                std::snprintf(cmd, sizeof(cmd), "obj %s \"%s\" 0 0 0", objName.c_str(), assetPath.c_str());
+            }
+            else if (objType == "gltf" && !assetPath.empty()) {
+                std::snprintf(cmd, sizeof(cmd), "gltf %s \"%s\" 0 0 0", objName.c_str(), assetPath.c_str());
+            }
+            else { // default to sphere
+                std::snprintf(cmd, sizeof(cmd), "sphere %s 0 0 0", objName.c_str());
+            }
+            ide.bus.send(cmd);
+
+            // Retrieve the actual engine object
+            BaseObject* obj = nullptr;
+            {
+                std::shared_lock<std::shared_mutex> lock(g_sceneMutex);
+                auto it = g_namedObjects.find(objName);
+                if (it != g_namedObjects.end()) obj = it->second;
+            }
+            if (!obj) continue;
+
+            // Transform
+            auto tpos = tok.find("\"transform\":");
             if (tpos != std::string::npos) {
-                auto tstart = tok.find('{', tpos);
-                auto tend = tok.find('}', tstart);
+                size_t tstart = tok.find('{', tpos);
+                size_t tend = tok.find('}', tstart);
                 if (tstart != std::string::npos && tend != std::string::npos) {
                     std::string tsub = tok.substr(tstart, tend - tstart + 1);
-                    o.px = parseFloat(tsub, "px"); o.py = parseFloat(tsub, "py"); o.pz = parseFloat(tsub, "pz");
-                    o.sx = parseFloat(tsub, "sx", 1.f); o.sy = parseFloat(tsub, "sy", 1.f); o.sz = parseFloat(tsub, "sz", 1.f);
-                    o.rw = parseFloat(tsub, "rw", 1.f); o.rx = parseFloat(tsub, "rx"); o.ry = parseFloat(tsub, "ry"); o.rz = parseFloat(tsub, "rz");
+                    obj->transform.position.x = std::stof(JsonGet(tsub, "px"));
+                    obj->transform.position.y = std::stof(JsonGet(tsub, "py"));
+                    obj->transform.position.z = std::stof(JsonGet(tsub, "pz"));
+                    obj->transform.scale.x = std::stof(JsonGet(tsub, "sx"));
+                    obj->transform.scale.y = std::stof(JsonGet(tsub, "sy"));
+                    obj->transform.scale.z = std::stof(JsonGet(tsub, "sz"));
+                    obj->transform.rotation.w = std::stof(JsonGet(tsub, "rw"));
+                    obj->transform.rotation.x = std::stof(JsonGet(tsub, "rx"));
+                    obj->transform.rotation.y = std::stof(JsonGet(tsub, "ry"));
+                    obj->transform.rotation.z = std::stof(JsonGet(tsub, "rz"));
                 }
             }
-            // Material color
-            {
-                std::string v;
-                v = JsonGet(tok, "cr"); if (!v.empty()) { try { o.cr = std::stoi(v); } catch (...) {} }
-                v = JsonGet(tok, "cg"); if (!v.empty()) { try { o.cg = std::stoi(v); } catch (...) {} }
-                v = JsonGet(tok, "cb"); if (!v.empty()) { try { o.cb = std::stoi(v); } catch (...) {} }
-                v = JsonGet(tok, "ca"); if (!v.empty()) { try { o.ca = std::stoi(v); } catch (...) {} }
+            obj->visible = (visibleStr != "false");
+            obj->tag = tag;
+
+            // Material
+            if (tok.find("\"material\":") != std::string::npos) {
+                size_t mstart = tok.find("\"material\":");
+                if (mstart != std::string::npos) {
+                    size_t mend = tok.find('}', mstart);
+                    if (mend != std::string::npos) {
+                        std::string msub = tok.substr(mstart, mend - mstart + 1);
+                        ApplyMaterialFromJson(obj, msub, ide.renderer->texManager);
+                    }
+                }
             }
-            // Visible flag
-            {
-                std::string v = JsonGet(tok, "visible");
-                if (v == "false") o.visible = false;
+
+            // Shader
+            std::string shader = JsonGet(tok, "shaderName");
+            if (!shader.empty()) obj->render.shaderName = shader;
+
+            // Scripts
+            if (tok.find("\"scripts\":") != std::string::npos)
+                ApplyScriptsFromJson(obj, tok, ide);
+
+            // RigidBody
+            if (tok.find("\"rigidbody\":") != std::string::npos) {
+                size_t rstart = tok.find("\"rigidbody\":");
+                if (rstart != std::string::npos) {
+                    size_t rend = tok.find('}', rstart);
+                    if (rend != std::string::npos) {
+                        std::string rsub = tok.substr(rstart, rend - rstart + 1);
+                        RigidBody rb;
+                        rb.mass = std::stof(JsonGet(rsub, "mass"));
+                        rb.drag = std::stof(JsonGet(rsub, "drag"));
+                        rb.angularDrag = std::stof(JsonGet(rsub, "angularDrag"));
+                        rb.restitution = std::stof(JsonGet(rsub, "restitution"));
+                        rb.friction = std::stof(JsonGet(rsub, "friction"));
+                        rb.useGravity = (JsonGet(rsub, "useGravity") == "true");
+                        rb.isKinematic = (JsonGet(rsub, "isKinematic") == "true");
+                        rb.object = obj;
+                        ide.rigidBodies[obj] = rb;
+                        ide.physicsWorld.Register(&ide.rigidBodies[obj]);
+                    }
+                }
             }
-            ide.prefabEditObjects.push_back(o);
-            ide.objects.push_back(o);
+
+            // CollisionTrigger
+            if (tok.find("\"collisionTrigger\":") != std::string::npos) {
+                size_t cstart = tok.find("\"collisionTrigger\":");
+                if (cstart != std::string::npos) {
+                    size_t cend = tok.find('}', cstart);
+                    if (cend != std::string::npos) {
+                        std::string csub = tok.substr(cstart, cend - cstart + 1);
+                        CollisionTrigger ct;
+                        ct.enabled = (JsonGet(csub, "enabled") == "true");
+                        ct.isSolid = (JsonGet(csub, "isSolid") == "true");
+                        ct.filterTag = JsonGet(csub, "filterTag");
+                        ct.object = obj;
+                        ide.collisionTriggers[obj] = ct;
+                    }
+                }
+            }
+
+            // Animator
+            if (tok.find("\"animator\":") != std::string::npos) {
+                size_t astart = tok.find("\"animator\":");
+                if (astart != std::string::npos) {
+                    size_t aend = tok.find('}', astart);
+                    if (aend != std::string::npos) {
+                        std::string asub = tok.substr(astart, aend - astart + 1);
+                        obj->animator.speed = std::stof(JsonGet(asub, "speed"));
+                        std::string clipName = JsonGet(asub, "currentClipName");
+                        if (!clipName.empty()) {
+                            // Try to find a matching clip asset
+                            for (auto& [guid, rec] : ide.assetDb.records) {
+                                if (rec.type == AssetType::Model) {
+                                    for (auto& sub : rec.subObjects) {
+                                        if (sub.name == clipName) {
+                                            auto clip = std::make_shared<AnimationClip>();
+                                            clip->name = sub.name;
+                                            clip->duration = 1.f;
+                                            clip->loops = true;
+                                            obj->animator.play(clip, 0.f);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Render component (texture bindings)
+            if (tok.find("\"render\":") != std::string::npos) {
+                size_t rstart = tok.find("\"render\":");
+                if (rstart != std::string::npos) {
+                    size_t rend = tok.find('}', rstart);
+                    if (rend != std::string::npos) {
+                        std::string rsub = tok.substr(rstart, rend - rstart + 1);
+                        ApplyRenderComponentFromJson(obj, rsub, ide);
+                    }
+                }
+            }
+
+            // Store in IDE objects for UI synchronisation
+            IDEObject ideObj;
+            ideObj.name = objName;
+            ideObj.type = objType;
+            ideObj.assetPath = assetPath;
+            ideObj.px = obj->transform.position.x;
+            ideObj.py = obj->transform.position.y;
+            ideObj.pz = obj->transform.position.z;
+            ideObj.sx = obj->transform.scale.x;
+            ideObj.sy = obj->transform.scale.y;
+            ideObj.sz = obj->transform.scale.z;
+            ideObj.rw = obj->transform.rotation.w;
+            ideObj.rx = obj->transform.rotation.x;
+            ideObj.ry = obj->transform.rotation.y;
+            ideObj.rz = obj->transform.rotation.z;
+            ideObj.visible = obj->visible;
+            if (obj->material) {
+                ideObj.cr = (int)obj->material->color.r;
+                ideObj.cg = (int)obj->material->color.g;
+                ideObj.cb = (int)obj->material->color.b;
+                ideObj.ca = (int)obj->material->color.a;
+            }
+            ide.objects.push_back(ideObj);
         }
-    }
-    else {
-        // Legacy single-object prefab
-        IDEObject o;
-        o.name = prefabDisplayName;
-        o.type = JsonGet(json, "type");
-        if (o.type.empty()) o.type = "sphere";
-        o.assetPath = JsonGet(json, "assetPath");
-        auto tpos = json.find("\"transform\"");
-        if (tpos != std::string::npos) {
-            auto tstart = json.find('{', tpos);
-            auto tend = json.find('}', tstart);
-            if (tstart != std::string::npos && tend != std::string::npos) {
-                std::string tsub = json.substr(tstart, tend - tstart + 1);
-                auto parseF = [&](const std::string& k, float def = 0.f) {
-                    std::string v = JsonGet(tsub, k); if (v.empty()) return def; try { return std::stof(v); }
-                    catch (...) { return def; }
-                    };
-                o.px = parseF("px"); o.py = parseF("py"); o.pz = parseF("pz");
-                o.sx = parseF("sx", 1.f); o.sy = parseF("sy", 1.f); o.sz = parseF("sz", 1.f);
-                o.rw = parseF("rw", 1.f); o.rx = parseF("rx"); o.ry = parseF("ry"); o.rz = parseF("rz");
-            }
-        }
-        ide.prefabEditObjects.push_back(o);
-        ide.objects.push_back(o);
     }
 
-    // ── 4. Spawn loaded objects into the engine scene for visual editing ────
-    for (auto& o : ide.objects) {
-        char buf[512];
-        std::string t = o.type.empty() ? "sphere" : o.type;
-        if (t == "plane") {
-            std::snprintf(buf, sizeof(buf), "plane %s %.4f %.4f %.4f", o.name.c_str(), o.px, o.py, o.pz);
+    // ---- Lights -------------------------------------------------
+    std::string lightArray = extractArray("lights");
+    if (!lightArray.empty()) {
+        std::vector<std::string> lightTokens;
+        int depth = 0;
+        size_t start = 0;
+        for (size_t i = 0; i < lightArray.size(); ++i) {
+            if (lightArray[i] == '{') {
+                if (depth == 0) start = i;
+                ++depth;
+            }
+            else if (lightArray[i] == '}') {
+                --depth;
+                if (depth == 0) lightTokens.push_back(lightArray.substr(start, i - start + 1));
+            }
         }
-        else if (t == "rect") {
-            std::snprintf(buf, sizeof(buf), "rect %s %.4f %.4f %.4f", o.name.c_str(), o.px, o.py, o.pz);
+        for (auto& tok : lightTokens) {
+            IDELight lt;
+            lt.name = JsonGet(tok, "name");
+            lt.lightType = JsonGet(tok, "type");
+            lt.intensity = std::stof(JsonGet(tok, "intensity"));
+            std::string colStr = JsonGet(tok, "color");
+            sscanf_s(colStr.c_str(), "[%d,%d,%d]", &lt.r, &lt.g, &lt.b);
+            auto tpos = tok.find("\"transform\":");
+            if (tpos != std::string::npos) {
+                size_t tstart = tok.find('{', tpos);
+                size_t tend = tok.find('}', tstart);
+                if (tstart != std::string::npos && tend != std::string::npos) {
+                    std::string tsub = tok.substr(tstart, tend - tstart + 1);
+                    lt.px = std::stof(JsonGet(tsub, "px"));
+                    lt.py = std::stof(JsonGet(tsub, "py"));
+                    lt.pz = std::stof(JsonGet(tsub, "pz"));
+                }
+            }
+            ide.lights.push_back(lt);
+            // Create the light in the engine
+            char cmd[256];
+            std::snprintf(cmd, sizeof(cmd), "addlight %s %.2f %d %d %d %s",
+                lt.name.c_str(), lt.intensity, lt.r, lt.g, lt.b, lt.lightType.c_str());
+            ide.bus.send(cmd);
+            std::snprintf(cmd, sizeof(cmd), "move %s %.4f %.4f %.4f",
+                lt.name.c_str(), lt.px, lt.py, lt.pz);
+            ide.bus.send(cmd);
         }
-        else if (t == "obj" && !o.assetPath.empty()) {
-            std::snprintf(buf, sizeof(buf), "obj %s \"%s\" %.4f %.4f %.4f", o.name.c_str(), o.assetPath.c_str(), o.px, o.py, o.pz);
-        }
-        else if (t == "gltf" && !o.assetPath.empty()) {
-            std::snprintf(buf, sizeof(buf), "gltf %s \"%s\" %.4f %.4f %.4f", o.name.c_str(), o.assetPath.c_str(), o.px, o.py, o.pz);
-        }
-        else {
-            std::snprintf(buf, sizeof(buf), "sphere %s %.4f %.4f %.4f", o.name.c_str(), o.px, o.py, o.pz);
-        }
-        ide.bus.send(buf);
-        std::snprintf(buf, sizeof(buf), "scale %s %.4f %.4f %.4f",
-            o.name.c_str(), o.sx, o.sy, o.sz);
-        ide.bus.send(buf);
     }
 
-    // ── 5. Flip into prefab edit mode ──────────────────────────────────────
     ide.prefabEditMode = true;
     ide.prefabEditPath = path;
-    ide.prefabEditName = prefabDisplayName;
     ide.prefabEditDirty = false;
     ide.sceneDirty = false;
-
-    ide.toastMgr.Push("Editing prefab: " + prefabDisplayName, Toast::Success, 2.f);
+    RefreshSceneList(ide);
+    if (!ide.objects.empty()) {
+        ide.selection.SetSingle(ide.objects[0].name);
+        ide.bus.send("inspect " + ide.objects[0].name);
+    }
+    ide.toastMgr.Push("Editing prefab: " + ide.prefabEditName, Toast::Success, 2.f);
     ide.log.push(ConsoleLog::INFO, "[PrefabEdit] Entered edit mode for: " + path);
 }
 
 // Serialize the current ide.objects back into the .honprefab file and exit.
-static void SaveAndExitPrefabEditMode(IDEState& ide)
-{
+static void SaveAndExitPrefabEditMode(IDEState& ide) {
     if (!ide.prefabEditMode) return;
 
-    // ── Serialize ide.objects → .honprefab ─────────────────────────────────
     std::ofstream f(ide.prefabEditPath);
-    if (f.is_open()) {
-        f << "{\n";
-        f << "  \"name\": \"" << ide.prefabEditName << "\",\n";
-        f << "  \"objects\": [\n";
-        // Calculate base position from first object so all positions are stored relative
-        float baseX = 0.f, baseY = 0.f, baseZ = 0.f;
-        if (!ide.objects.empty()) {
-            baseX = ide.objects[0].px;
-            baseY = ide.objects[0].py;
-            baseZ = ide.objects[0].pz;
-        }
-        for (size_t i = 0; i < ide.objects.size(); ++i) {
-            const auto& o = ide.objects[i];
-            f << "    {\n";
-            f << "      \"name\": \"" << o.name << "\",\n";
-            f << "      \"type\": \"" << (o.type.empty() ? "sphere" : o.type) << "\",\n";
-            if (!o.assetPath.empty())
-                f << "      \"assetPath\": \"" << o.assetPath << "\",\n";
-            f << "      \"transform\": {\n";
-            // Store positions relative to first object (prefab origin)
-            f << "        \"px\":" << (o.px - baseX) << ", \"py\":" << (o.py - baseY) << ", \"pz\":" << (o.pz - baseZ) << ",\n";
-            f << "        \"sx\":" << o.sx << ", \"sy\":" << o.sy << ", \"sz\":" << o.sz << ",\n";
-            f << "        \"rw\":" << o.rw << ", \"rx\":" << o.rx << ", \"ry\":" << o.ry << ", \"rz\":" << o.rz << "\n";
-            f << "      },\n";
-            f << "      \"scripts\": []\n";
-            f << "    }";
-            if (i + 1 < ide.objects.size()) f << ",";
-            f << "\n";
-        }
-        f << "  ]\n}\n";
-        f.close();
-        ide.toastMgr.Push("Prefab saved: " + ide.prefabEditName, Toast::Success, 2.5f);
-        ide.log.push(ConsoleLog::REPLY_OK, "[PrefabEdit] Saved: " + ide.prefabEditPath);
-        ide.assetBrowser.dirDirty = true;
-    }
-    else {
+    if (!f.is_open()) {
         ide.log.push(ConsoleLog::REPLY_ERR, "[PrefabEdit] Could not write: " + ide.prefabEditPath);
+        return;
     }
 
-    // ── Restore main scene ─────────────────────────────────────────────────
+    f << "{\n";
+    f << "  \"name\": \"" << ide.prefabEditName << "\",\n";
+    f << "  \"objects\": [\n";
+
+    // ---- Write objects -----------------------------------------
+    for (size_t i = 0; i < ide.objects.size(); ++i) {
+        const auto& o = ide.objects[i];
+        BaseObject* obj = nullptr;
+        {
+            std::shared_lock<std::shared_mutex> lock(g_sceneMutex);
+            auto it = g_namedObjects.find(o.name);
+            if (it != g_namedObjects.end()) obj = it->second;
+        }
+        if (!obj) continue;
+
+        f << "    {\n";
+        f << "      \"name\": \"" << o.name << "\",\n";
+        std::string objType = o.type.empty() ? "sphere" : o.type;
+        f << "      \"type\": \"" << objType << "\",\n";
+        if (!o.assetPath.empty())
+            f << "      \"assetPath\": \"" << o.assetPath << "\",\n";
+        f << "      \"visible\": " << (obj->visible ? "true" : "false") << ",\n";
+        f << "      \"tag\": " << JStr(obj->tag) << ",\n";
+        WriteTransform(f, obj->transform, 6);
+        f << ",\n";
+        if (obj->material) WriteMaterial(f, obj->material, 6);
+        f << ",\n";
+        f << "      \"shaderName\": " << JStr(obj->render.shaderName) << ",\n";
+
+        // Scripts
+        if (!obj->scripts.empty()) {
+            f << "      \"scripts\": [\n";
+            for (size_t si = 0; si < obj->scripts.size(); ++si) {
+                WriteScript(f, obj->scripts[si], 8);
+                if (si + 1 < obj->scripts.size()) f << ",";
+                f << "\n";
+            }
+            f << "      ],\n";
+        }
+
+        // RigidBody
+        auto rbIt = ide.rigidBodies.find(obj);
+        if (rbIt != ide.rigidBodies.end()) {
+            WriteRigidBody(f, rbIt->second, 6);
+            f << ",\n";
+        }
+
+        // CollisionTrigger
+        auto ctIt = ide.collisionTriggers.find(obj);
+        if (ctIt != ide.collisionTriggers.end()) {
+            WriteCollisionTrigger(f, ctIt->second, 6);
+            f << ",\n";
+        }
+
+        // Animator
+        if (obj->animator.active()) {
+            WriteAnimator(f, obj->animator, 6);
+            f << ",\n";
+        }
+
+        // Render component (texture bindings)
+        WriteRenderComponent(f, obj->render, ide.renderer->texManager, 6);
+        f << "\n    }";
+        if (i + 1 < ide.objects.size()) f << ",";
+        f << "\n";
+    }
+    f << "  ],\n";
+
+    // ---- Write lights ------------------------------------------
+    f << "  \"lights\": [\n";
+    for (size_t i = 0; i < ide.lights.size(); ++i) {
+        WriteLightToJson(f, ide.lights[i], 4);
+        if (i + 1 < ide.lights.size()) f << ",";
+        f << "\n";
+    }
+    f << "  ]\n}\n";
+    f.close();
+
+    ide.toastMgr.Push("Prefab saved: " + ide.prefabEditName, Toast::Success, 2.5f);
+    ide.log.push(ConsoleLog::REPLY_OK, "[PrefabEdit] Saved: " + ide.prefabEditPath);
+    ide.assetBrowser.dirDirty = true;
+    ide.prefabEditDirty = false;
+
+    // Restore main scene snapshot
     ide.bus.send("clearscene");
     ide.objects = ide.prefabEditSceneSnapshot;
     ide.lights = ide.prefabEditLightSnapshot;
@@ -3790,16 +4470,15 @@ static void SaveAndExitPrefabEditMode(IDEState& ide)
         }
         ide.bus.send(buf);
     }
-
     ide.prefabEditMode = false;
     ide.prefabEditPath.clear();
     ide.prefabEditName.clear();
     ide.prefabEditObjects.clear();
     ide.prefabEditSceneSnapshot.clear();
     ide.prefabEditLightSnapshot.clear();
-    ide.prefabEditDirty = false;
     ide.selection.Clear();
     ide.sceneDirty = false;
+    RefreshSceneList(ide);
 }
 
 // Exit without saving — restores the main scene snapshot.
@@ -3849,161 +4528,341 @@ static void ExitPrefabEditModeDiscard(IDEState& ide)
 //  Reads a .honprefab JSON file and spawns all listed objects into the scene.
 //  Returns the name of the first spawned object (for selection), or empty.
 // =============================================================================
-static std::string InstantiatePrefab(IDEState& ide, const std::string& path)
-{
+static std::string InstantiatePrefab(IDEState& ide, const std::string& path) {
     std::ifstream f(path);
     if (!f.is_open()) {
         ide.log.push(ConsoleLog::REPLY_ERR, "[Prefab] Cannot open: " + path);
         return {};
     }
-    std::string json((std::istreambuf_iterator<char>(f)),
-        std::istreambuf_iterator<char>());
+    std::string json((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     f.close();
 
-    // Determine a base spawn position in front of the editor camera
     glm::vec3 spawnOrigin = GetCameraSpawnPos(ide);
-
-    // Parse the "objects" array.
-    // Format: {"name":"Prefab","objects":[{"name":"Cube","px":0,...},…]}
-    // We do a simple linear scan so we don't need a full JSON library.
     std::string firstSpawned;
+    // Track every spawned name so we can group them in a hierarchy folder at the end.
+    std::vector<std::string> spawnedObjects;
+    std::vector<std::string> spawnedLights;
 
-    auto parseFloat = [&](const std::string& src, const std::string& key, float fallback) -> float {
-        auto pos = src.find("\"" + key + "\":");
-        if (pos == std::string::npos) return fallback;
-        pos += key.size() + 3;
-        try { return std::stof(src.substr(pos, 32)); }
-        catch (...) { return fallback; }
-        };
-    auto parseStr = [&](const std::string& src, const std::string& key) -> std::string {
-        auto pos = src.find("\"" + key + "\":");
-        if (pos == std::string::npos) return {};
-        pos += key.size() + 3;
-        if (pos >= src.size() || src[pos] != '"') return {};
-        ++pos;
-        std::string v;
-        while (pos < src.size() && src[pos] != '"') v += src[pos++];
-        return v;
-        };
-
-    // Find the "objects" array
-    auto arrStart = json.find("\"objects\":");
-    if (arrStart == std::string::npos) {
-        // Single-object prefab (legacy format — no "objects" array, just a root transform)
-        std::string stem = fs::path(path).stem().string();
-        int n = 1; std::string nm = stem;
-        while (g_namedObjects.count(nm) || g_namedLights.count(nm))
-            nm = stem + "_" + std::to_string(n++);
-
-        // Use only the spawn origin — stored position is always zero for single-object prefabs
-        float px = spawnOrigin.x;
-        float py = spawnOrigin.y;
-        float pz = spawnOrigin.z;
-        float sx = parseFloat(json, "sx", 1);
-        float sy = parseFloat(json, "sy", 1);
-        float sz = parseFloat(json, "sz", 1);
-
-        std::string objType = parseStr(json, "type");
-        if (objType.empty()) objType = "sphere";  // backward compat
-        std::string assetPath = parseStr(json, "assetPath");
-
-        char buf[512];
-        if (objType == "plane") {
-            std::snprintf(buf, sizeof(buf), "plane %s %.3f %.3f %.3f", nm.c_str(), px, py, pz);
-        }
-        else if (objType == "rect") {
-            std::snprintf(buf, sizeof(buf), "rect %s %.3f %.3f %.3f", nm.c_str(), px, py, pz);
-        }
-        else if (objType == "obj" && !assetPath.empty()) {
-            std::snprintf(buf, sizeof(buf), "obj %s \"%s\" %.3f %.3f %.3f", nm.c_str(), assetPath.c_str(), px, py, pz);
-        }
-        else if (objType == "gltf" && !assetPath.empty()) {
-            std::snprintf(buf, sizeof(buf), "gltf %s \"%s\" %.3f %.3f %.3f", nm.c_str(), assetPath.c_str(), px, py, pz);
-        }
-        else {
-            std::snprintf(buf, sizeof(buf), "sphere %s %.3f %.3f %.3f", nm.c_str(), px, py, pz);
-        }
-        ide.bus.send(buf);
-        if (std::fabs(sx - 1) > 0.001f || std::fabs(sy - 1) > 0.001f || std::fabs(sz - 1) > 0.001f) {
-            std::snprintf(buf, sizeof(buf), "scale %s %.4f %.4f %.4f", nm.c_str(), sx, sy, sz);
-            ide.bus.send(buf);
-        }
-        firstSpawned = nm;
-    }
-    else {
-        // Multi-object prefab
-        arrStart = json.find('[', arrStart);
-        if (arrStart == std::string::npos) return {};
-        size_t depth = 0, pos = arrStart;
-        bool isFirstObject = true;
-        while (pos < json.size()) {
-            char ch = json[pos];
-            if (ch == '[' || ch == '{') ++depth;
-            else if (ch == ']' || ch == '}') { if (--depth == 0) break; }
-            // Parse each object block between { }
-            if (ch == '{' && depth == 2) {
-                // Find matching }
-                size_t blockStart = pos, blockDepth = 0, bp = pos;
-                while (bp < json.size()) {
-                    if (json[bp] == '{') ++blockDepth;
-                    else if (json[bp] == '}') { if (--blockDepth == 0) break; }
-                    ++bp;
-                }
-                std::string block = json.substr(blockStart, bp - blockStart + 1);
-
-                std::string objName = parseStr(block, "name");
-                if (objName.empty()) objName = "PrefabObject";
-                // Make unique
-                std::string nm = objName; int n = 1;
-                while (g_namedObjects.count(nm) || g_namedLights.count(nm))
-                    nm = objName + "_" + std::to_string(n++);
-
-                // Stored positions are relative to the prefab origin — add spawn origin
-                float px = parseFloat(block, "px", 0) + spawnOrigin.x;
-                float py = parseFloat(block, "py", 0) + spawnOrigin.y;
-                float pz = parseFloat(block, "pz", 0) + spawnOrigin.z;
-                float sx = parseFloat(block, "sx", 1);
-                float sy = parseFloat(block, "sy", 1);
-                float sz = parseFloat(block, "sz", 1);
-
-                std::string objType = parseStr(block, "type");
-                if (objType.empty()) objType = "sphere";  // backward compat
-                std::string assetPath = parseStr(block, "assetPath");
-
-                char buf[512];
-                if (objType == "plane") {
-                    std::snprintf(buf, sizeof(buf), "plane %s %.3f %.3f %.3f", nm.c_str(), px, py, pz);
-                }
-                else if (objType == "rect") {
-                    std::snprintf(buf, sizeof(buf), "rect %s %.3f %.3f %.3f", nm.c_str(), px, py, pz);
-                }
-                else if (objType == "obj" && !assetPath.empty()) {
-                    std::snprintf(buf, sizeof(buf), "obj %s \"%s\" %.3f %.3f %.3f", nm.c_str(), assetPath.c_str(), px, py, pz);
-                }
-                else if (objType == "gltf" && !assetPath.empty()) {
-                    std::snprintf(buf, sizeof(buf), "gltf %s \"%s\" %.3f %.3f %.3f", nm.c_str(), assetPath.c_str(), px, py, pz);
-                }
-                else {
-                    std::snprintf(buf, sizeof(buf), "sphere %s %.3f %.3f %.3f", nm.c_str(), px, py, pz);
-                }
-                ide.bus.send(buf);
-                if (std::fabs(sx - 1) > 0.001f || std::fabs(sy - 1) > 0.001f || std::fabs(sz - 1) > 0.001f) {
-                    std::snprintf(buf, sizeof(buf), "scale %s %.4f %.4f %.4f", nm.c_str(), sx, sy, sz);
-                    ide.bus.send(buf);
-                }
-
-                if (firstSpawned.empty()) firstSpawned = nm;
-                pos = bp;
+    auto extractArray = [&](const std::string& arrayKey) -> std::string {
+        std::string marker = "\"" + arrayKey + "\"";
+        auto pos = json.find(marker);
+        if (pos == std::string::npos) return "";
+        pos = json.find('[', pos);
+        if (pos == std::string::npos) return "";
+        int depth = 0;
+        size_t start = pos;
+        for (size_t i = pos; i < json.size(); ++i) {
+            if (json[i] == '[') ++depth;
+            else if (json[i] == ']') {
+                --depth;
+                if (depth == 0) return json.substr(start + 1, i - start - 1);
             }
-            ++pos;
+        }
+        return "";
+        };
+
+    // ---- Objects -------------------------------------------------
+    std::string objArray = extractArray("objects");
+    if (!objArray.empty()) {
+        std::vector<std::string> objTokens;
+        int depth = 0;
+        size_t start = 0;
+        for (size_t i = 0; i < objArray.size(); ++i) {
+            if (objArray[i] == '{') {
+                if (depth == 0) start = i;
+                ++depth;
+            }
+            else if (objArray[i] == '}') {
+                --depth;
+                if (depth == 0) objTokens.push_back(objArray.substr(start, i - start + 1));
+            }
+        }
+
+        for (auto& tok : objTokens) {
+            std::string objName = JsonGet(tok, "name");
+            std::string objType = JsonGet(tok, "type");
+            std::string assetPath = JsonGet(tok, "assetPath");
+
+            // Make unique name (avoid collisions)
+            std::string finalName = objName;
+            int n = 1;
+            while (g_namedObjects.count(finalName) || g_namedLights.count(finalName))
+                finalName = objName + "_" + std::to_string(n++);
+
+            // Parse transform (position, scale, rotation)
+            glm::vec3 pos(0, 0, 0), scl(1, 1, 1);
+            Quaternion rot(1, 0, 0, 0);
+
+            auto tpos = tok.find("\"transform\":");
+            if (tpos != std::string::npos) {
+                size_t tstart = tok.find('{', tpos);
+                size_t tend = tok.find('}', tstart);
+                if (tstart != std::string::npos && tend != std::string::npos) {
+                    std::string tsub = tok.substr(tstart, tend - tstart + 1);
+                    pos.x = std::stof(JsonGet(tsub, "px"));
+                    pos.y = std::stof(JsonGet(tsub, "py"));
+                    pos.z = std::stof(JsonGet(tsub, "pz"));
+                    scl.x = std::stof(JsonGet(tsub, "sx"));
+                    scl.y = std::stof(JsonGet(tsub, "sy"));
+                    scl.z = std::stof(JsonGet(tsub, "sz"));
+                    rot.w = std::stof(JsonGet(tsub, "rw"));
+                    rot.x = std::stof(JsonGet(tsub, "rx"));
+                    rot.y = std::stof(JsonGet(tsub, "ry"));
+                    rot.z = std::stof(JsonGet(tsub, "rz"));
+                }
+            }
+            pos += spawnOrigin;
+
+            // Spawn the object
+            char cmd[512];
+            if (objType == "plane") {
+                std::snprintf(cmd, sizeof(cmd), "plane %s %.3f %.3f %.3f", finalName.c_str(), pos.x, pos.y, pos.z);
+            }
+            else if (objType == "rect") {
+                std::snprintf(cmd, sizeof(cmd), "rect %s %.3f %.3f %.3f", finalName.c_str(), pos.x, pos.y, pos.z);
+            }
+            else if (objType == "obj" && !assetPath.empty()) {
+                std::snprintf(cmd, sizeof(cmd), "obj %s \"%s\" %.3f %.3f %.3f", finalName.c_str(), assetPath.c_str(), pos.x, pos.y, pos.z);
+            }
+            else if (objType == "gltf" && !assetPath.empty()) {
+                std::snprintf(cmd, sizeof(cmd), "gltf %s \"%s\" %.3f %.3f %.3f", finalName.c_str(), assetPath.c_str(), pos.x, pos.y, pos.z);
+            }
+            else {
+                std::snprintf(cmd, sizeof(cmd), "sphere %s %.3f %.3f %.3f", finalName.c_str(), pos.x, pos.y, pos.z);
+            }
+            ide.bus.send(cmd);
+
+            // Apply scale and rotation
+            if (scl.x != 1 || scl.y != 1 || scl.z != 1) {
+                std::snprintf(cmd, sizeof(cmd), "scale %s %.4f %.4f %.4f", finalName.c_str(), scl.x, scl.y, scl.z);
+                ide.bus.send(cmd);
+            }
+            if (rot.w != 1 || rot.x != 0 || rot.y != 0 || rot.z != 0) {
+                glm::vec3 euler = glm::eulerAngles(rot.ToGLM());
+                std::snprintf(cmd, sizeof(cmd), "rotate %s %.3f %.3f %.3f", finalName.c_str(),
+                    glm::degrees(euler.x), glm::degrees(euler.y), glm::degrees(euler.z));
+                ide.bus.send(cmd);
+            }
+
+            // Apply the rest of the properties (material, scripts, physics, …)
+            BaseObject* obj = nullptr;
+            {
+                std::shared_lock<std::shared_mutex> lock(g_sceneMutex);
+                auto it = g_namedObjects.find(finalName);
+                if (it != g_namedObjects.end()) obj = it->second;
+            }
+            if (obj) {
+                std::string visibleStr = JsonGet(tok, "visible");
+                obj->visible = (visibleStr != "false");
+                obj->tag = JsonGet(tok, "tag");
+
+                if (tok.find("\"material\":") != std::string::npos) {
+                    size_t mstart = tok.find("\"material\":");
+                    if (mstart != std::string::npos) {
+                        size_t mend = tok.find('}', mstart);
+                        if (mend != std::string::npos) {
+                            std::string msub = tok.substr(mstart, mend - mstart + 1);
+                            ApplyMaterialFromJson(obj, msub, ide.renderer->texManager);
+                        }
+                    }
+                }
+
+                std::string shader = JsonGet(tok, "shaderName");
+                if (!shader.empty()) obj->render.shaderName = shader;
+
+                if (tok.find("\"scripts\":") != std::string::npos)
+                    ApplyScriptsFromJson(obj, tok, ide);
+
+                if (tok.find("\"rigidbody\":") != std::string::npos) {
+                    size_t rstart = tok.find("\"rigidbody\":");
+                    if (rstart != std::string::npos) {
+                        size_t rend = tok.find('}', rstart);
+                        if (rend != std::string::npos) {
+                            std::string rsub = tok.substr(rstart, rend - rstart + 1);
+                            RigidBody rb;
+                            rb.mass = std::stof(JsonGet(rsub, "mass"));
+                            rb.drag = std::stof(JsonGet(rsub, "drag"));
+                            rb.angularDrag = std::stof(JsonGet(rsub, "angularDrag"));
+                            rb.restitution = std::stof(JsonGet(rsub, "restitution"));
+                            rb.friction = std::stof(JsonGet(rsub, "friction"));
+                            rb.useGravity = (JsonGet(rsub, "useGravity") == "true");
+                            rb.isKinematic = (JsonGet(rsub, "isKinematic") == "true");
+                            rb.object = obj;
+                            ide.rigidBodies[obj] = rb;
+                            ide.physicsWorld.Register(&ide.rigidBodies[obj]);
+                        }
+                    }
+                }
+
+                if (tok.find("\"collisionTrigger\":") != std::string::npos) {
+                    size_t cstart = tok.find("\"collisionTrigger\":");
+                    if (cstart != std::string::npos) {
+                        size_t cend = tok.find('}', cstart);
+                        if (cend != std::string::npos) {
+                            std::string csub = tok.substr(cstart, cend - cstart + 1);
+                            CollisionTrigger ct;
+                            ct.enabled = (JsonGet(csub, "enabled") == "true");
+                            ct.isSolid = (JsonGet(csub, "isSolid") == "true");
+                            ct.filterTag = JsonGet(csub, "filterTag");
+                            ct.object = obj;
+                            ide.collisionTriggers[obj] = ct;
+                        }
+                    }
+                }
+
+                if (tok.find("\"animator\":") != std::string::npos) {
+                    size_t astart = tok.find("\"animator\":");
+                    if (astart != std::string::npos) {
+                        size_t aend = tok.find('}', astart);
+                        if (aend != std::string::npos) {
+                            std::string asub = tok.substr(astart, aend - astart + 1);
+                            obj->animator.speed = std::stof(JsonGet(asub, "speed"));
+                            std::string clipName = JsonGet(asub, "currentClipName");
+                            if (!clipName.empty()) {
+                                for (auto& [guid, rec] : ide.assetDb.records) {
+                                    if (rec.type == AssetType::Model) {
+                                        for (auto& sub : rec.subObjects) {
+                                            if (sub.name == clipName) {
+                                                auto clip = std::make_shared<AnimationClip>();
+                                                clip->name = sub.name;
+                                                clip->duration = 1.f;
+                                                clip->loops = true;
+                                                obj->animator.play(clip, 0.f);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (tok.find("\"render\":") != std::string::npos) {
+                    size_t rstart = tok.find("\"render\":");
+                    if (rstart != std::string::npos) {
+                        size_t rend = tok.find('}', rstart);
+                        if (rend != std::string::npos) {
+                            std::string rsub = tok.substr(rstart, rend - rstart + 1);
+                            ApplyRenderComponentFromJson(obj, rsub, ide);
+                        }
+                    }
+                }
+            }
+
+            if (firstSpawned.empty()) firstSpawned = finalName;
+            spawnedObjects.push_back(finalName);
+        }
+    }
+
+    // ---- Lights -------------------------------------------------
+    std::string lightArray = extractArray("lights");
+    if (!lightArray.empty()) {
+        std::vector<std::string> lightTokens;
+        int depth = 0;
+        size_t start = 0;
+        for (size_t i = 0; i < lightArray.size(); ++i) {
+            if (lightArray[i] == '{') {
+                if (depth == 0) start = i;
+                ++depth;
+            }
+            else if (lightArray[i] == '}') {
+                --depth;
+                if (depth == 0) lightTokens.push_back(lightArray.substr(start, i - start + 1));
+            }
+        }
+        for (auto& tok : lightTokens) {
+            IDELight lt;
+            lt.name = JsonGet(tok, "name");
+            lt.lightType = JsonGet(tok, "type");
+            lt.intensity = std::stof(JsonGet(tok, "intensity"));
+            std::string colStr = JsonGet(tok, "color");
+            sscanf_s(colStr.c_str(), "[%d,%d,%d]", &lt.r, &lt.g, &lt.b);
+            glm::vec3 pos(0, 0, 0);
+            auto tpos = tok.find("\"transform\":");
+            if (tpos != std::string::npos) {
+                size_t tstart = tok.find('{', tpos);
+                size_t tend = tok.find('}', tstart);
+                if (tstart != std::string::npos && tend != std::string::npos) {
+                    std::string tsub = tok.substr(tstart, tend - tstart + 1);
+                    pos.x = std::stof(JsonGet(tsub, "px"));
+                    pos.y = std::stof(JsonGet(tsub, "py"));
+                    pos.z = std::stof(JsonGet(tsub, "pz"));
+                }
+            }
+            pos += spawnOrigin;
+            char cmd[256];
+            std::snprintf(cmd, sizeof(cmd), "addlight %s %.2f %d %d %d %s",
+                lt.name.c_str(), lt.intensity, lt.r, lt.g, lt.b, lt.lightType.c_str());
+            ide.bus.send(cmd);
+            std::snprintf(cmd, sizeof(cmd), "move %s %.4f %.4f %.4f",
+                lt.name.c_str(), pos.x, pos.y, pos.z);
+            ide.bus.send(cmd);
+            ide.lights.push_back(lt);
+            spawnedLights.push_back(lt.name);
         }
     }
 
     if (!firstSpawned.empty()) {
         ide.sceneDirty = true;
-        ide.toastMgr.Push("Prefab instantiated: " + fs::path(path).stem().string(), Toast::Success, 2.f);
+
+        // ── Group all spawned objects/lights into a dedicated Prefab folder ───
+        // Mirrors Unity behaviour: instantiated prefabs appear as a labelled
+        // folder in the hierarchy, not loose at the scene root.
+        std::string prefabStem = fs::path(path).stem().string();
+
+        // Make the folder name unique if a same-named folder already exists.
+        std::string folderName = prefabStem;
+        {
+            int folderIdx = 1;
+            std::function<bool(const std::vector<HierarchyNode>&, const std::string&)> folderExists =
+                [&](const std::vector<HierarchyNode>& nodes, const std::string& nm) -> bool {
+                for (auto& n : nodes) {
+                    if (n.kind == HierarchyNode::FOLDER && n.name == nm) return true;
+                    if (n.kind == HierarchyNode::FOLDER && folderExists(n.children, nm)) return true;
+                }
+                return false;
+                };
+            while (folderExists(ide.hierRoots, folderName))
+                folderName = prefabStem + "_" + std::to_string(folderIdx++);
+        }
+
+        // Build the folder and insert placeholder children for every spawned
+        // object/light BEFORE calling RefreshSceneList so hierarchy is correct.
+        HierarchyNode prefabFolder;
+        prefabFolder.kind = HierarchyNode::FOLDER;
+        prefabFolder.name = folderName;
+        prefabFolder.folderOpen = true;
+
+        for (auto& nm : spawnedObjects) {
+            HierarchyNode n; n.kind = HierarchyNode::OBJECT; n.name = nm;
+            prefabFolder.children.push_back(n);
+        }
+        for (auto& nm : spawnedLights) {
+            HierarchyNode n; n.kind = HierarchyNode::LIGHT; n.name = nm;
+            prefabFolder.children.push_back(n);
+        }
+
+        // Remove those nodes from hierRoots in case a synchronous list reply
+        // already placed them at root level.
+        std::set<std::string> spawnedSet(spawnedObjects.begin(), spawnedObjects.end());
+        spawnedSet.insert(spawnedLights.begin(), spawnedLights.end());
+        std::function<void(std::vector<HierarchyNode>&)> removeMoved =
+            [&](std::vector<HierarchyNode>& nodes) {
+            nodes.erase(std::remove_if(nodes.begin(), nodes.end(),
+                [&](const HierarchyNode& n) {
+                    return (n.kind == HierarchyNode::OBJECT || n.kind == HierarchyNode::LIGHT)
+                        && spawnedSet.count(n.name);
+                }), nodes.end());
+            for (auto& n : nodes)
+                if (n.kind == HierarchyNode::FOLDER) removeMoved(n.children);
+            };
+        removeMoved(ide.hierRoots);
+        ide.hierRoots.push_back(std::move(prefabFolder));
+
         RefreshSceneList(ide);
-        ide.log.push(ConsoleLog::REPLY_OK, "[Prefab] Instantiated: " + path);
+        ide.toastMgr.Push("Prefab instantiated: " + folderName, Toast::Success, 2.f);
+        ide.log.push(ConsoleLog::REPLY_OK, "[Prefab] Instantiated into folder '" + folderName + "': " + path);
     }
     return firstSpawned;
 }
@@ -4019,79 +4878,92 @@ static void DrawPrefabSection(IDEState& ide, const std::string& target, BaseObje
     if (ImGui::Button("Create Prefab...", { -1, 0 }))
         ImGui::OpenPopup("CreatePrefabPopup");
 
-    if (ImGui::BeginPopupModal("CreatePrefabPopup", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
-    {
+    if (ImGui::BeginPopupModal("CreatePrefabPopup", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         static char prefabName[64] = {};
         if (prefabName[0] == '\0')
             strncpy_s(prefabName, sizeof(prefabName), target.c_str(), _TRUNCATE);
-
         ImGui::InputText("Prefab Name", prefabName, sizeof(prefabName));
-
-        if (ImGui::Button("Save", { 120, 0 }))
-        {
-            // Build a .honprefab JSON file
+        if (ImGui::Button("Save", { 120, 0 })) {
+            // Build JSON with full component data – no version field
             std::string outDir = std::string(ide.project.rootFolder).empty()
                 ? "assets/prefabs/" : (fs::path(ide.project.rootFolder) / "assets" / "prefabs" / "").string();
             fs::create_directories(outDir);
             std::string outPath = outDir + prefabName + ".honprefab";
-
             std::ofstream f(outPath);
-            if (f.is_open())
-            {
+            if (f.is_open()) {
+                f << "{\n";
+                f << "  \"name\": \"" << prefabName << "\",\n";
+                f << "  \"objects\": [\n";
+                f << "    {\n";
+                f << "      \"name\": \"" << target << "\",\n";
+
                 // Determine object type
                 std::string objType = "sphere";
-                if (dynamic_cast<Plane*>(obj)) objType = "plane";
-                else if (dynamic_cast<HonHengine::Rectangle*>(obj)) objType = "rect";
+                if (dynamic_cast<Plane*>(obj)) {
+                    objType = "plane";
+                    // Get subdivision values
+                    Plane* p = dynamic_cast<Plane*>(obj);
+                }
+                else if (dynamic_cast<HonHengine::Rectangle*>(obj)) {
+                    objType = "rect";
+                    HonHengine::Rectangle* r = dynamic_cast<HonHengine::Rectangle*>(obj);
+                }
                 else if (!obj->tag.empty()) {
                     if (obj->tag.rfind("OBJ:", 0) == 0) objType = "obj";
                     else if (obj->tag.rfind("GLTF:", 0) == 0) objType = "gltf";
                 }
+                f << "      \"type\": \"" << objType << "\",\n";
 
-                f << "{\n";
-                f << "  \"name\": \"" << prefabName << "\",\n";
-                f << "  \"type\": \"" << objType << "\",\n";
                 if (objType == "obj" || objType == "gltf") {
                     std::string ap = obj->tag.substr(objType == "obj" ? 4 : 5);
-                    f << "  \"assetPath\": \"" << ap << "\",\n";
+                    f << "      \"assetPath\": \"" << ap << "\",\n";
                 }
-                f << "  \"transform\": {\n";
-                // Store zeroed position so instantiation uses the spawn origin correctly
-                f << "    \"px\":0.0, \"py\":0.0, \"pz\":0.0,\n";
-                f << "    \"sx\":" << obj->transform.scale.x
-                    << ", \"sy\":" << obj->transform.scale.y
-                    << ", \"sz\":" << obj->transform.scale.z << ",\n";
-                f << "    \"rw\":" << obj->transform.rotation.w
-                    << ", \"rx\":" << obj->transform.rotation.x
-                    << ", \"ry\":" << obj->transform.rotation.y
-                    << ", \"rz\":" << obj->transform.rotation.z << "\n";
-                f << "  },\n";
 
-                // RigidBody component
+                f << "      \"visible\": " << (obj->visible ? "true" : "false") << ",\n";
+                f << "      \"tag\": " << JStr(obj->tag) << ",\n";
+
+                WriteTransform(f, obj->transform, 6);
+                f << ",\n";
+
+                if (obj->material) WriteMaterial(f, obj->material, 6);
+                f << ",\n";
+
+                f << "      \"shaderName\": " << JStr(obj->render.shaderName) << ",\n";
+
+                if (!obj->scripts.empty()) {
+                    f << "      \"scripts\": [\n";
+                    for (size_t si = 0; si < obj->scripts.size(); ++si) {
+                        WriteScript(f, obj->scripts[si], 8);
+                        if (si + 1 < obj->scripts.size()) f << ",";
+                        f << "\n";
+                    }
+                    f << "      ],\n";
+                }
+
                 auto rbIt = ide.rigidBodies.find(obj);
                 if (rbIt != ide.rigidBodies.end()) {
-                    const RigidBody& rb = rbIt->second;
-                    f << "  \"rigidbody\": {"
-                        << "\"mass\":" << rb.mass
-                        << ", \"drag\":" << rb.drag
-                        << ", \"restitution\":" << rb.restitution
-                        << ", \"friction\":" << rb.friction
-                        << ", \"useGravity\":" << (rb.useGravity ? "true" : "false")
-                        << ", \"isKinematic\":" << (rb.isKinematic ? "true" : "false")
-                        << "},\n";
+                    WriteRigidBody(f, rbIt->second, 6);
+                    f << ",\n";
                 }
 
-                // Scripts
-                f << "  \"scripts\": [";
-                bool first = true;
-                for (auto& sc : obj->scripts) {
-                    if (!first) f << ", ";
-                    f << "\"" << sc.scriptGUID << "\"";
-                    first = false;
+                auto ctIt = ide.collisionTriggers.find(obj);
+                if (ctIt != ide.collisionTriggers.end()) {
+                    WriteCollisionTrigger(f, ctIt->second, 6);
+                    f << ",\n";
                 }
-                f << "]\n}\n";
+
+                if (obj->animator.active()) {
+                    WriteAnimator(f, obj->animator, 6);
+                    f << ",\n";
+                }
+
+                WriteRenderComponent(f, obj->render, ide.renderer->texManager, 6);
+                f << "\n    }\n";
+                f << "  ],\n";
+                f << "  \"lights\": []\n";
+                f << "}\n";
                 f.close();
 
-                // Register in asset DB
                 auto& rec = ide.assetDb.Register(outPath);
                 ide.assetDb.Save(ide.HonAssetsPath());
                 ide.toastMgr.Push("Prefab saved: " + outPath, Toast::Success, 2.5f);
@@ -4123,7 +4995,7 @@ static void DrawPrefabSection(IDEState& ide, const std::string& target, BaseObje
             if (rec && !rec->path.empty() && obj) {
                 std::ofstream pf(rec->path);
                 if (pf.is_open()) {
-                    // Determine object type
+                    // Determine object type again
                     std::string objType2 = "sphere";
                     if (dynamic_cast<Plane*>(obj)) objType2 = "plane";
                     else if (dynamic_cast<HonHengine::Rectangle*>(obj)) objType2 = "rect";
@@ -4131,33 +5003,52 @@ static void DrawPrefabSection(IDEState& ide, const std::string& target, BaseObje
                         if (obj->tag.rfind("OBJ:", 0) == 0) objType2 = "obj";
                         else if (obj->tag.rfind("GLTF:", 0) == 0) objType2 = "gltf";
                     }
+
                     pf << "{\n";
                     pf << "  \"name\": \"" << fs::path(rec->path).stem().string() << "\",\n";
-                    pf << "  \"type\": \"" << objType2 << "\",\n";
+                    pf << "  \"objects\": [\n";
+                    pf << "    {\n";
+                    pf << "      \"name\": \"" << target << "\",\n";
+                    pf << "      \"type\": \"" << objType2 << "\",\n";
                     if (objType2 == "obj" || objType2 == "gltf") {
                         std::string ap2 = obj->tag.substr(objType2 == "obj" ? 4 : 5);
-                        pf << "  \"assetPath\": \"" << ap2 << "\",\n";
+                        pf << "      \"assetPath\": \"" << ap2 << "\",\n";
                     }
-                    pf << "  \"transform\": {\n";
-                    // Store zeroed position so instantiation uses the spawn origin correctly
-                    pf << "    \"px\":0.0, \"py\":0.0, \"pz\":0.0,\n";
-                    pf << "    \"sx\":" << obj->transform.scale.x
-                        << ", \"sy\":" << obj->transform.scale.y
-                        << ", \"sz\":" << obj->transform.scale.z << ",\n";
-                    pf << "    \"rw\":" << obj->transform.rotation.w
-                        << ", \"rx\":" << obj->transform.rotation.x
-                        << ", \"ry\":" << obj->transform.rotation.y
-                        << ", \"rz\":" << obj->transform.rotation.z << "\n";
-                    pf << "  },\n";
-                    // Preserve scripts
-                    pf << "  \"scripts\": [";
-                    bool first = true;
-                    for (auto& sc : obj->scripts) {
-                        if (!first) pf << ", ";
-                        pf << "\"" << sc.scriptGUID << "\"";
-                        first = false;
+                    pf << "      \"visible\": " << (obj->visible ? "true" : "false") << ",\n";
+                    pf << "      \"tag\": " << JStr(obj->tag) << ",\n";
+                    WriteTransform(pf, obj->transform, 6);
+                    pf << ",\n";
+                    if (obj->material) WriteMaterial(pf, obj->material, 6);
+                    pf << ",\n";
+                    pf << "      \"shaderName\": " << JStr(obj->render.shaderName) << ",\n";
+                    if (!obj->scripts.empty()) {
+                        pf << "      \"scripts\": [\n";
+                        for (size_t si = 0; si < obj->scripts.size(); ++si) {
+                            WriteScript(pf, obj->scripts[si], 8);
+                            if (si + 1 < obj->scripts.size()) pf << ",";
+                            pf << "\n";
+                        }
+                        pf << "      ],\n";
                     }
-                    pf << "]\n}\n";
+                    auto rbIt2 = ide.rigidBodies.find(obj);
+                    if (rbIt2 != ide.rigidBodies.end()) {
+                        WriteRigidBody(pf, rbIt2->second, 6);
+                        pf << ",\n";
+                    }
+                    auto ctIt2 = ide.collisionTriggers.find(obj);
+                    if (ctIt2 != ide.collisionTriggers.end()) {
+                        WriteCollisionTrigger(pf, ctIt2->second, 6);
+                        pf << ",\n";
+                    }
+                    if (obj->animator.active()) {
+                        WriteAnimator(pf, obj->animator, 6);
+                        pf << ",\n";
+                    }
+                    WriteRenderComponent(pf, obj->render, ide.renderer->texManager, 6);
+                    pf << "\n    }\n";
+                    pf << "  ],\n";
+                    pf << "  \"lights\": []\n";
+                    pf << "}\n";
                     pf.close();
                     ide.toastMgr.Push("Applied to prefab: " + rec->displayName, Toast::Success, 2.f);
                     ide.assetBrowser.dirDirty = true;
@@ -4175,6 +5066,7 @@ static void DrawPrefabSection(IDEState& ide, const std::string& target, BaseObje
         }
     }
 }
+
 // =============================================================================
 //  Multi-Object Transform Editing
 // =============================================================================
@@ -4541,6 +5433,59 @@ static void DrawInspectorPanel(IDEState& ide)
                     }
                 }
             }
+            else if ((drop.type == AssetType::Shader ||
+                drop.type == AssetType::ShaderSource) && !inspectionTarget.empty())
+            {
+                std::string shaderName;
+                AssetRecord* rec = ide.assetDb.FindByGUID(guidStr);
+                if (rec && rec->type == AssetType::Shader) {
+                    // Already a compiled .honshader
+                    shaderName = rec->displayName;
+                }
+                else if (drop.type == AssetType::Shader && rec && rec->type == AssetType::ShaderSource) {
+                    // Multi-selected vert+frag pair: find both, create .honshader if needed
+                    std::string vertPath, fragPath;
+                    std::string stemName = fs::path(rec->path).stem().string();
+                    for (auto& g : ide.assetBrowser.selectedGUIDs) {
+                        auto* r = ide.assetDb.FindByGUID(g);
+                        if (!r) continue;
+                        std::string ext = fs::path(r->path).extension().string();
+                        for (auto& c : ext) c = (char)std::tolower((unsigned char)c);
+                        if (ext == ".vert" && vertPath.empty()) vertPath = r->path;
+                        else if (ext == ".frag" && fragPath.empty()) fragPath = r->path;
+                    }
+                    if (!vertPath.empty() && !fragPath.empty()) {
+                        shaderName = stemName;
+                        std::string dir = fs::path(vertPath).parent_path().string();
+                        fs::path honPath = fs::path(dir) / (shaderName + ".honshader");
+                        if (!fs::exists(honPath)) {
+                            CreateShaderAsset(dir, shaderName, vertPath, fragPath);
+                            ide.assetDb.Register(honPath.string());
+                            ide.assetBrowser.dirDirty = true;
+                        }
+                        std::ifstream vf(vertPath), ff(fragPath);
+                        std::string vsrc((std::istreambuf_iterator<char>(vf)), {});
+                        std::string fsrc((std::istreambuf_iterator<char>(ff)), {});
+                        if (!vsrc.empty() && !fsrc.empty()) {
+                            std::lock_guard<std::mutex> lk(g_deferredShaderMutex);
+                            g_deferredShaderTasks.push_back({ shaderName, vsrc, fsrc });
+                        }
+                    }
+                }
+                else if (rec) {
+                    shaderName = fs::path(rec->path).stem().string();
+                }
+                if (!shaderName.empty()) {
+                    char cmd[512];
+                    std::snprintf(cmd, sizeof(cmd), "setshader %s %s",
+                        inspectionTarget.c_str(), shaderName.c_str());
+                    ide.log.push(ConsoleLog::CMD, std::string("> ") + cmd);
+                    ide.bus.send(cmd);
+                    ide.toastMgr.Push("Shader '" + shaderName + "' assigned",
+                        Toast::Success, 2.f);
+                    ide.sceneDirty = true;
+                }
+            }
             else
             {
                 // For any other asset type, open the import overlay
@@ -4894,11 +5839,20 @@ static void UpdateEditorCamera(IDEState& ide, float dt, int vw, int vh,
         lastMousePos = currentMousePos;
         wasRightDragging = true;
     }
-    else {
-        wasRightDragging = false;
-    }
+
+    // Static variables to remember pan start state
+    static bool      panActive = false;
+    static glm::vec3 panStartPivot;
+    static glm::vec3 panStartCamPos;
 
     // Pour le clic milieu (pan)
+    if (middleJustStarted && dragStartedInViewport) {
+        // Start a new pan: capture the current pivot and camera position
+        panActive = true;
+        panStartPivot = pivotPoint;
+        panStartCamPos = cam->transform.position.ToGLM();
+    }
+
     if (middleMouseDown && (wasMiddleDragging || dragStartedInViewport)) {
         if (wasMiddleDragging) {
             mouseDelta.x = currentMousePos.x - lastMousePos.x;
@@ -4907,14 +5861,9 @@ static void UpdateEditorCamera(IDEState& ide, float dt, int vw, int vh,
         lastMousePos = currentMousePos;
         wasMiddleDragging = true;
     }
-    else {
-        wasMiddleDragging = false;
-    }
 
     // --- ROTATION : Clic droit (rotation autour de la caméra, pas du pivot) ---
     if (rightMouseDown && !io.KeyAlt && (mouseDelta.x != 0 || mouseDelta.y != 0) && dragStartedInViewport) {
-        // Accelerative rotation: slow for small movements, faster for quick flicks.
-        // ~0.17°/px at 1 px, scales to ~4° at 20 px;
         auto accel = [](float raw) -> float {
             float sign = raw < 0.f ? -1.f : 1.f;
             float mag = std::abs(raw);
@@ -4923,58 +5872,39 @@ static void UpdateEditorCamera(IDEState& ide, float dt, int vw, int vh,
         float deltaX = accel(mouseDelta.x);
         float deltaY = accel(mouseDelta.y);
 
-        // Rotation around camera's own position (not around a pivot)
-        // Get current camera forward direction
-        glm::vec3 forward = cam->transform.forward().ToGLM();
-        glm::vec3 right = cam->transform.right().ToGLM();
-        glm::vec3 up = cam->transform.up().ToGLM();
+        // Read current rotation as GLM quat
+        auto& r = cam->transform.rotation;
+        glm::quat current(
+            static_cast<float>(r.w),
+            static_cast<float>(r.x),
+            static_cast<float>(r.y),
+            static_cast<float>(r.z));
 
-        // Horizontal rotation (yaw) around world Y axis
-        glm::vec3 axisY(0.0f, 1.0f, 0.0f);
-        glm::quat rotY = glm::angleAxis(-deltaX, axisY);
-        forward = rotY * forward;
-        right = rotY * right;
-        up = glm::normalize(glm::cross(right, forward));
+        // Yaw: rotate around world Y
+        glm::quat yaw = glm::angleAxis(deltaX, glm::vec3(0.f, 1.f, 0.f));
 
-        // Vertical rotation (pitch) around camera's right axis
-        glm::quat rotX = glm::angleAxis(-deltaY, right);
-        forward = rotX * forward;
-        up = rotX * up;
+        // Pitch: rotate around camera's local X (right axis)
+        glm::vec3 localRight = current * glm::vec3(1.f, 0.f, 0.f);
+        glm::quat pitch = glm::angleAxis(-deltaY, localRight);
 
-        // Normalize to prevent drift
-        forward = glm::normalize(forward);
+        glm::quat next = glm::normalize(yaw * pitch * current);
 
-        // Limiter l'angle vertical pour éviter le flip
-        float pitch = glm::asin(glm::clamp(forward.y, -1.f, 1.f));
-        const float maxPitch = glm::radians(89.0f);
-        if (std::abs(pitch) > maxPitch) {
-            float sign = forward.y > 0.f ? 1.f : -1.f;
-            forward.y = glm::sin(sign * maxPitch);
-            float horizMag = glm::sqrt(forward.x * forward.x + forward.z * forward.z);
-            float targetHoriz = glm::cos(sign * maxPitch);
-            if (horizMag > 0.001f) {
-                forward.x = (forward.x / horizMag) * targetHoriz;
-                forward.z = (forward.z / horizMag) * targetHoriz;
-            }
-            else {
-                forward.x = targetHoriz;
-                forward.z = 0;
-            }
-            forward = glm::normalize(forward);
+        // Pitch clamp: extract forward and check elevation
+        glm::vec3 forward = next * glm::vec3(0.f, 0.f, -1.f);
+        float elevation = glm::asin(glm::clamp(forward.y, -1.f, 1.f));
+        const float maxPitch = glm::radians(89.f);
+        if (std::abs(elevation) <= maxPitch) {
+            cam->transform.rotation = Quaternion(next.w, next.x, next.y, next.z);
         }
-
-        // Update camera rotation to look in the new forward direction
-        cam->transform.rotation = Quaternion::LookRotation(
-            Vector3(forward.x, forward.y, forward.z));
+        else {
+            // Apply only yaw, discard pitch that would exceed the limit
+            glm::quat yawOnly = glm::normalize(yaw * current);
+            cam->transform.rotation = Quaternion(yawOnly.w, yawOnly.x, yawOnly.y, yawOnly.z);
+        }
     }
-
     else if (middleMouseDown && (mouseDelta.x != 0 || mouseDelta.y != 0) && dragStartedInViewport) {
-        glm::vec3 camPos = cam->transform.position.ToGLM();
-        glm::vec3 forward = cam->transform.forward().ToGLM();
-        glm::vec3 right = cam->transform.right().ToGLM();
-        glm::vec3 up = cam->transform.up().ToGLM();
-
-        float distanceToPivot = glm::distance(camPos, pivotPoint);
+        // Use the stored start pivot for distance-based speed
+        float distanceToPivot = glm::distance(panStartCamPos, panStartPivot);
         float panSpeed;
         if (ide.viewportOrtho) {
             panSpeed = ide.orthoSize * 0.002f;
@@ -4983,20 +5913,34 @@ static void UpdateEditorCamera(IDEState& ide, float dt, int vw, int vh,
             panSpeed = std::clamp(distanceToPivot * 0.002f, 0.5f, 2.0f);
         }
 
-        // INVERTED: horizontal follows mouse, vertical is flipped
-        float deltaX = -mouseDelta.x * panSpeed;
-        float deltaY = -mouseDelta.y * panSpeed;
+        // Pan: mouse right -> camera moves right; mouse up -> camera moves up
+        float deltaX = mouseDelta.x * panSpeed;
+        float deltaY = -mouseDelta.y * panSpeed;  // invert Y because mouse down is positive
 
+        glm::vec3 right = cam->transform.right().ToGLM();
+        glm::vec3 up = cam->transform.up().ToGLM();
         glm::vec3 panDelta = right * deltaX + up * deltaY;
 
         cam->transform.position = Vector3(
-            camPos.x + panDelta.x,
-            camPos.y + panDelta.y,
-            camPos.z + panDelta.z
+            panStartCamPos.x + panDelta.x,
+            panStartCamPos.y + panDelta.y,
+            panStartCamPos.z + panDelta.z
         );
-        pivotPoint += panDelta;
+        // Do NOT move the pivot – keep it fixed at the start position.
+    }
+
+    // ---------------------------------------------------------
+    // RESET DRAG FLAGS WHEN BUTTONS ARE RELEASED (CRITICAL FIX)
+    // ---------------------------------------------------------
+    if (!rightMouseDown) {
+        wasRightDragging = false;
+    }
+    if (!middleMouseDown) {
+        wasMiddleDragging = false;
+        panActive = false;
     }
 }
+
 // =============================================================================
 //  Viewport  — avec contrôles de caméra éditeur (Unity-style)
 // =============================================================================
@@ -5686,31 +6630,184 @@ static void DrawViewportPanel(IDEState& ide, float dt, float reservedTopPx = 0.f
 
     if (ImGui::BeginDragDropTarget())
     {
-        if (const ImGuiPayload* payload =
-            ImGui::AcceptDragDropPayload(kAssetDragPayload))
+        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kAssetDragPayload))
         {
-            IM_ASSERT(payload->DataSize == sizeof(AssetDragPayload));
             auto& drop = *static_cast<const AssetDragPayload*>(payload->Data);
-
-            // Prefabs skip the import-settings overlay — instantiate immediately
             std::string dropExt = fs::path(std::string(drop.path)).extension().string();
-            if (dropExt == ".honprefab") {
+            std::string target = ide.selection.Primary();
+
+            // -------------------------------------------------------------
+            // 1) Prefab – instantiate directly (no selection needed)
+            // -------------------------------------------------------------
+            if (dropExt == ".honprefab")
+            {
                 std::string first = InstantiatePrefab(ide, std::string(drop.path));
-                if (!first.empty()) ide.pendingSelection = first;
+                if (!first.empty())
+                    ide.pendingSelection = first;
+                ide.toastMgr.Push("Prefab instantiated", Toast::Success, 2.f);
             }
-            else {
+
+            // -------------------------------------------------------------
+            // 2) Script – attach to selected object (or warn)
+            // -------------------------------------------------------------
+            else if (drop.type == AssetType::Script)
+            {
+                if (target.empty())
+                {
+                    ide.toastMgr.Push("Select an object first, then drop the script onto it",
+                        Toast::Warning, 3.f);
+                    ide.log.push(ConsoleLog::INFO,
+                        "[Viewport] Drop script: no object selected");
+                }
+                else
+                {
+                    AssetRecord* rec = ide.assetDb.FindByGUID(std::string(drop.guidStr));
+                    if (rec)
+                    {
+                        BaseObject* baseObj = nullptr;
+                        {
+                            std::shared_lock<std::shared_mutex> lock(g_sceneMutex);
+                            auto it = g_namedObjects.find(target);
+                            if (it != g_namedObjects.end()) baseObj = it->second;
+                        }
+                        if (baseObj)
+                        {
+                            ScriptComponent newComp;
+                            newComp.scriptGUID = drop.guidStr;
+                            if (ide.scriptManager &&
+                                ide.scriptManager->LoadScript(drop.guidStr, rec->path, newComp))
+                            {
+                                baseObj->scripts.push_back(newComp);
+                                ide.toastMgr.Push("Script attached: " + rec->displayName,
+                                    Toast::Success, 2.f);
+                                ide.sceneDirty = true;
+                            }
+                            else
+                            {
+                                ide.toastMgr.Push("Failed to attach script",
+                                    Toast::Error, 2.f);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // -------------------------------------------------------------
+            // 3) Material – assign to selected object (or warn)
+            // -------------------------------------------------------------
+            else if (drop.type == AssetType::Material)
+            {
+                if (target.empty())
+                {
+                    ide.toastMgr.Push("Select an object first, then drop the material",
+                        Toast::Warning, 3.f);
+                }
+                else
+                {
+                    char cmd[512];
+                    std::snprintf(cmd, sizeof(cmd), "setmaterial %s \"%s\"",
+                        target.c_str(), drop.path);
+                    ide.bus.send(cmd);
+                    ide.toastMgr.Push("Material assigned", Toast::Success, 2.f);
+                    ide.sceneDirty = true;
+                }
+            }
+
+            // -------------------------------------------------------------
+            // 4) Shader (.honshader, .vert, .frag, or a pair)
+            // -------------------------------------------------------------
+            else if (drop.type == AssetType::Shader ||
+                drop.type == AssetType::ShaderSource ||
+                dropExt == ".honshader")
+            {
+                if (target.empty())
+                {
+                    ide.toastMgr.Push("Select an object first, then drop the shader",
+                        Toast::Warning, 3.f);
+                }
+                else
+                {
+                    std::string shaderName;
+                    AssetRecord* rec = ide.assetDb.FindByGUID(std::string(drop.guidStr));
+
+                    // Already compiled .honshader
+                    if (dropExt == ".honshader")
+                    {
+                        shaderName = fs::path(std::string(drop.path)).stem().string();
+                    }
+                    // Multi‑selected .vert + .frag pair
+                    else if (drop.type == AssetType::Shader && rec && rec->type == AssetType::ShaderSource)
+                    {
+                        std::string vertPath, fragPath;
+                        std::string stemName = fs::path(rec->path).stem().string();
+                        for (auto& g : ide.assetBrowser.selectedGUIDs)
+                        {
+                            auto* r = ide.assetDb.FindByGUID(g);
+                            if (!r) continue;
+                            std::string ext = fs::path(r->path).extension().string();
+                            for (auto& c : ext) c = (char)std::tolower((unsigned char)c);
+                            if (ext == ".vert" && vertPath.empty()) vertPath = r->path;
+                            else if (ext == ".frag" && fragPath.empty()) fragPath = r->path;
+                        }
+                        if (!vertPath.empty() && !fragPath.empty())
+                        {
+                            shaderName = stemName;
+                            std::string dir = fs::path(vertPath).parent_path().string();
+                            fs::path honPath = fs::path(dir) / (shaderName + ".honshader");
+                            if (!fs::exists(honPath))
+                            {
+                                CreateShaderAsset(dir, shaderName, vertPath, fragPath);
+                                ide.assetDb.Register(honPath.string());
+                                ide.assetBrowser.dirDirty = true;
+                            }
+                            std::ifstream vf(vertPath), ff(fragPath);
+                            std::string vsrc((std::istreambuf_iterator<char>(vf)), {});
+                            std::string fsrc((std::istreambuf_iterator<char>(ff)), {});
+                            if (!vsrc.empty() && !fsrc.empty())
+                            {
+                                std::lock_guard<std::mutex> lk(g_deferredShaderMutex);
+                                g_deferredShaderTasks.push_back({ shaderName, vsrc, fsrc });
+                            }
+                        }
+                    }
+                    // Single .vert or .frag (or any other ShaderSource)
+                    else if (rec)
+                    {
+                        shaderName = fs::path(rec->path).stem().string();
+                    }
+
+                    if (!shaderName.empty())
+                    {
+                        char cmd[512];
+                        std::snprintf(cmd, sizeof(cmd), "setshader %s %s",
+                            target.c_str(), shaderName.c_str());
+                        ide.bus.send(cmd);
+                        ide.toastMgr.Push("Shader '" + shaderName + "' assigned",
+                            Toast::Success, 2.f);
+                        ide.sceneDirty = true;
+                    }
+                    else
+                    {
+                        ide.toastMgr.Push("Could not resolve shader from drop",
+                            Toast::Error, 2.f);
+                    }
+                }
+            }
+
+            // -------------------------------------------------------------
+            // 5) Other asset types (models, textures, audio, ...)
+            //    → open import overlay
+            // -------------------------------------------------------------
+            else
+            {
                 ide.importOverlayGUID = drop.guidStr;
                 ide.showImportOverlay = true;
                 ide.importOverlayHasImportBtn = true;
-                // Anchor to the center of the screen as a fallback in case the Inspector
-                // panel hasn't updated its anchor pos yet this frame (e.g. drop fires before
-                // Inspector renders). The Inspector will overwrite this next frame if open.
+                if (ide.importOverlayAnchorSize.x < 10.f || ide.importOverlayAnchorSize.y < 10.f)
                 {
                     ImGuiIO& _io = ImGui::GetIO();
-                    if (ide.importOverlayAnchorSize.x < 10.f || ide.importOverlayAnchorSize.y < 10.f) {
-                        ide.importOverlayAnchorPos = ImVec2(_io.DisplaySize.x * 0.6f, _io.DisplaySize.y * 0.1f);
-                        ide.importOverlayAnchorSize = ImVec2(_io.DisplaySize.x * 0.22f, _io.DisplaySize.y * 0.5f);
-                    }
+                    ide.importOverlayAnchorPos = ImVec2(_io.DisplaySize.x * 0.6f, _io.DisplaySize.y * 0.1f);
+                    ide.importOverlayAnchorSize = ImVec2(_io.DisplaySize.x * 0.22f, _io.DisplaySize.y * 0.5f);
                 }
                 ide.importOverlayOnImport = [&ide, drop]()
                     {
@@ -5729,55 +6826,24 @@ static void DrawViewportPanel(IDEState& ide, float dt, float reservedTopPx = 0.f
                             spawnPos.x, spawnPos.y, spawnPos.z);
 
                         std::string cmd;
-                        if (ext == ".obj")                  cmd = "obj " + objName + " \"" + path + "\" " + posBuf;
-                        else if (ext == ".gltf" || ext == ".glb") cmd = "gltf " + objName + " \"" + path + "\" " + posBuf;
-
-                        // ── Prefab drag-drop instantiation ────────────────────────
-                        if (ext == ".honprefab") {
-                            std::string first = InstantiatePrefab(ide, path);
-                            if (!first.empty()) ide.pendingSelection = first;
-                            ide.showImportOverlay = false;
-                            return;
-                        }
+                        if (ext == ".obj")
+                            cmd = "obj " + objName + " \"" + path + "\" " + posBuf;
+                        else if (ext == ".gltf" || ext == ".glb")
+                            cmd = "gltf " + objName + " \"" + path + "\" " + posBuf;
+                        else if (ext == ".hdr")
+                            cmd = "loadhdrskybox \"" + path + "\"";
 
                         if (!cmd.empty())
                         {
-                            ide.log.push(ConsoleLog::CMD, "> " + cmd);
                             ide.bus.send(cmd);
                             ide.pendingSelection = objName;
                             ide.sceneDirty = true;
-                            ide.assetBrowser.hasPendingDrop = true;
-                            ide.assetBrowser.pendingDrop = drop;
                             RefreshSceneList(ide);
                         }
-                        else if (ext == ".hdr") {
-                            std::string cmd = "loadhdrskybox \"" + path + "\"";
-                            ide.log.push(ConsoleLog::CMD, "> " + cmd);
-                            ide.bus.send(cmd);
-                            ide.toastMgr.Push("HDR skybox loaded", Toast::Success, 2.0f);
-                        }
-
                         ide.showImportOverlay = false;
                     };
-            } // end non-prefab branch
+            }
         }
-
-        if (const ImGuiPayload* payload =
-            ImGui::AcceptDragDropPayload(kHierarchyDragPayload))
-        {
-            IM_ASSERT(payload->DataSize == sizeof(HierarchyDragPayload));
-            auto& hdp = *static_cast<const HierarchyDragPayload*>(payload->Data);
-
-            glm::vec3 spawnPos = GetCameraSpawnPos(ide);
-            char buf[256];
-            std::snprintf(buf, sizeof(buf), "move %s %.4f %.4f %.4f",
-                hdp.name, spawnPos.x, spawnPos.y, spawnPos.z);
-            ide.bus.send(buf);
-            ide.selection.SetSingle(hdp.name);
-            ide.sceneDirty = true;
-            RefreshSceneList(ide);
-        }
-
         ImGui::EndDragDropTarget();
     }
 
@@ -6222,12 +7288,33 @@ static void DrawModals(IDEState& ide, bool& quit)
         if (ImGui::Combo("Type", &comboObjIdx, kTypes, 5)) ide.newObjType = kObjTypeMap[comboObjIdx];
 
         ImGui::DragFloat3("Position", ide.newObjPos, 0.1f);
-        if (ide.newObjType == CUBE)
-            ImGui::DragFloat("Half-extent", &ide.newObjScale, 0.01f, 0.01f, 100.f);
+        if (ide.newObjType == CUBE || ide.newObjType == RECTANGLE || ide.newObjType == PLANE)
+            ImGui::DragFloat("Scale", &ide.newObjScale, 0.01f, 0.01f, 100.f);
         if (ide.newObjType == SPHERE)
             ImGui::DragFloat("Radius", &ide.newObjScale, 0.01f, 0.01f, 100.f);
         if (ide.newObjType == OBJ_MESH || ide.newObjType == GLTF_MESH)
             ImGui::InputText("File path", ide.newObjFile, sizeof(ide.newObjFile));
+
+        // ── Subdivision controls (Plane & Rectangle only) ─────────────────────
+        if (ide.newObjType == PLANE) {
+            ImGui::Separator();
+            ImGui::TextDisabled("Subdivisions");
+            ImGui::DragInt("Segments X##plane", &ide.newObjSubdivX, 1, 1, 256);
+            ImGui::DragInt("Segments Z##plane", &ide.newObjSubdivZ, 1, 1, 256);
+            ide.newObjSubdivX = (std::max)(1, ide.newObjSubdivX);
+            ide.newObjSubdivZ = (std::max)(1, ide.newObjSubdivZ);
+        }
+        else if (ide.newObjType == RECTANGLE) {
+            ImGui::Separator();
+            ImGui::TextDisabled("Subdivisions");
+            ImGui::DragInt("Segments X##rect", &ide.newObjSubdivX, 1, 1, 256);
+            ImGui::DragInt("Segments Y##rect", &ide.newObjSubdivY, 1, 1, 256);
+            ImGui::DragInt("Segments Z##rect", &ide.newObjSubdivZ, 1, 1, 256);
+            ide.newObjSubdivX = (std::max)(1, ide.newObjSubdivX);
+            ide.newObjSubdivY = (std::max)(1, ide.newObjSubdivY);
+            ide.newObjSubdivZ = (std::max)(1, ide.newObjSubdivZ);
+        }
+
         ImGui::Combo("Color", &ide.newObjColor, kColorNames, kNumColors);
 
         if (ImGui::Button("Add", { 120,0 })) {
@@ -6240,9 +7327,16 @@ static void DrawModals(IDEState& ide, bool& quit)
                     nm.c_str(), p[0], p[1], p[2], ide.newObjScale,
                     kColorNames[ide.newObjColor]);
                 break;
+            case RECTANGLE:
+                std::snprintf(buf, sizeof(buf), "rect %s %.3f %.3f %.3f %.3f %.3f %d %d %d %s",
+                    nm.c_str(), p[0], p[1], p[2], ide.newObjScale * 2, ide.newObjScale * 2,
+                    ide.newObjSubdivX, ide.newObjSubdivY, ide.newObjSubdivZ,
+                    kColorNames[ide.newObjColor]);
+                break;
             case PLANE:
-                std::snprintf(buf, sizeof(buf), "plane %s %.3f %.3f %.3f 5.000 5.000 %s",
-                    nm.c_str(), p[0], p[1], p[2], kColorNames[ide.newObjColor]);
+                std::snprintf(buf, sizeof(buf), "plane %s %.3f %.3f %.3f %.3f %.3f %d %d %s",
+                    nm.c_str(), p[0], p[1], p[2], ide.newObjScale * 2, ide.newObjScale * 2,
+                    ide.newObjSubdivX, ide.newObjSubdivZ, kColorNames[ide.newObjColor]);
                 break;
             case OBJ_MESH:
                 std::snprintf(buf, sizeof(buf), "obj %s \"%s\" %.3f %.3f %.3f",
@@ -6251,11 +7345,6 @@ static void DrawModals(IDEState& ide, bool& quit)
             case GLTF_MESH:
                 std::snprintf(buf, sizeof(buf), "gltf %s \"%s\" %.3f %.3f %.3f",
                     nm.c_str(), ide.newObjFile, p[0], p[1], p[2]);
-                break;
-            case RECTANGLE:
-                std::snprintf(buf, sizeof(buf), "rect %s %.3f %.3f %.3f 5.000 5.000 %s",
-                    nm.c_str(), p[0], p[1], p[2],
-                    kColorNames[ide.newObjColor]);
                 break;
             case SPHERE:
                 std::snprintf(buf, sizeof(buf), "sphere %s %.3f %.3f %.3f %.3f %s",
@@ -6431,11 +7520,12 @@ static void DrawModals(IDEState& ide, bool& quit)
         ImGui::EndPopup();
     }
 
-    // ── Multi-object / Folder Prefab modal ────────────────────────────────────
+    // ── Multi-object / Folder Prefab modal ─────────────────────────────────────
+    // Hierarchy-aware: selecting a parent object automatically includes all its
+    // children from the hierarchy (without selecting them in the panel).
     if (ide.showCreatePrefabFromFolder) {
         ImGui::OpenPopup("CreatePrefabFromFolder");
         ide.showCreatePrefabFromFolder = false;
-        // Pre-fill name from folder or "MultiPrefab"
         std::string defaultName = ide.createPrefabFromFolderName.empty()
             ? "MultiPrefab" : ide.createPrefabFromFolderName;
         strncpy_s(ide.createPrefabMultiName, sizeof(ide.createPrefabMultiName),
@@ -6444,37 +7534,99 @@ static void DrawModals(IDEState& ide, bool& quit)
     if (ImGui::BeginPopupModal("CreatePrefabFromFolder", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
     {
         bool fromFolder = !ide.createPrefabFromFolderName.empty();
-        if (fromFolder)
-            ImGui::TextDisabled("Folder: %s", ide.createPrefabFromFolderName.c_str());
-        else
-            ImGui::TextDisabled("%zu selected object(s)", ide.selection.Size());
 
+        // ── Header info ───────────────────────────────────────────────────────
+        if (fromFolder) {
+            ImGui::TextDisabled(ICON_FA_FOLDER "  Folder: %s", ide.createPrefabFromFolderName.c_str());
+        }
+        else {
+            // Count effective objects (selected + all their children in hierarchy)
+            // We just display the selected count; children are described below.
+            ImGui::TextDisabled(ICON_FA_BOXES_STACKED "  %zu root object(s) selected", ide.selection.Size());
+            ImGui::TextDisabled("  Children will be included automatically.");
+        }
+        ImGui::Spacing();
         ImGui::SetNextItemWidth(280.f);
         ImGui::InputText("Prefab Name", ide.createPrefabMultiName, sizeof(ide.createPrefabMultiName));
         ImGui::Spacing();
 
         if (ImGui::Button("Save", { 120, 0 }))
         {
-            // Collect names to serialize
+            // ── Step 1: Collect all objects + lights to serialize ─────────────
+            // For a FOLDER prefab: recursively collect all leaves.
+            // For a SELECTION prefab: for each selected name, also collect every
+            //   descendant from the hierarchy tree (Unity-style "children follow
+            //   parent"), WITHOUT changing the actual selection state.
             std::vector<std::string> objNames;
+            std::vector<std::string> lightNames;
+
+            // Helper: recursively collect all leaves under a set of nodes.
+            std::function<void(const std::vector<HierarchyNode>&)> collectLeaves =
+                [&](const std::vector<HierarchyNode>& nodes) {
+                for (auto& n : nodes) {
+                    if (n.kind == HierarchyNode::FOLDER)
+                        collectLeaves(n.children);
+                    else if (n.kind == HierarchyNode::OBJECT)
+                        objNames.push_back(n.name);
+                    else if (n.kind == HierarchyNode::LIGHT)
+                        lightNames.push_back(n.name);
+                }
+                };
+
             if (fromFolder) {
-                // Gather all leaf names from the folder
-                std::function<void(const std::vector<HierarchyNode>&)> collect =
-                    [&](const std::vector<HierarchyNode>& nodes) {
-                    for (auto& n : nodes) {
-                        if (n.kind == HierarchyNode::FOLDER) collect(n.children);
-                        else if (n.kind == HierarchyNode::OBJECT) objNames.push_back(n.name);
-                    }
-                    };
+                // Gather everything under the named folder.
                 for (auto& r : ide.hierRoots) {
                     if (r.kind == HierarchyNode::FOLDER && r.name == ide.createPrefabFromFolderName)
-                        collect(r.children);
+                        collectLeaves(r.children);
                 }
             }
             else {
-                for (auto& nm : ide.selection.items) objNames.push_back(nm);
+                // For each selected name: find its node in the hierarchy, then
+                // recursively collect it AND all its children.  This implements
+                // Unity-style "selecting a parent captures the whole subtree".
+                std::set<std::string> alreadyAdded;
+
+                std::function<void(const std::vector<HierarchyNode>&, const std::string&)> collectSubtree =
+                    [&](const std::vector<HierarchyNode>& nodes, const std::string& targetName) {
+                    for (auto& n : nodes) {
+                        if (n.kind == HierarchyNode::FOLDER) {
+                            collectSubtree(n.children, targetName);
+                        }
+                        else if (n.name == targetName) {
+                            // Found the selected root — emit it plus all children
+                            // (leaf objects have no children, but folder wrappers do)
+                            if (n.kind == HierarchyNode::OBJECT && !alreadyAdded.count(n.name)) {
+                                alreadyAdded.insert(n.name);
+                                objNames.push_back(n.name);
+                                // Collect any hierarchy children of this node
+                                collectLeaves(n.children);
+                            }
+                            else if (n.kind == HierarchyNode::LIGHT && !alreadyAdded.count(n.name)) {
+                                alreadyAdded.insert(n.name);
+                                lightNames.push_back(n.name);
+                                collectLeaves(n.children);
+                            }
+                        }
+                    }
+                    };
+
+                for (auto& nm : ide.selection.items) {
+                    collectSubtree(ide.hierRoots, nm);
+                }
+
+                // Fallback: if a selected name wasn't found in the hierarchy
+                // (e.g. it's a top-level unparented node just added to selection),
+                // add it directly.
+                for (auto& nm : ide.selection.items) {
+                    if (alreadyAdded.count(nm)) continue;
+                    bool isLight = false;
+                    for (auto& lt : ide.lights) if (lt.name == nm) { isLight = true; break; }
+                    if (isLight) lightNames.push_back(nm);
+                    else         objNames.push_back(nm);
+                }
             }
 
+            // ── Step 2: Serialize to .honprefab ──────────────────────────────
             std::string outDir = std::string(ide.project.rootFolder).empty()
                 ? "assets/prefabs/"
                 : (fs::path(ide.project.rootFolder) / "assets" / "prefabs" / "").string();
@@ -6484,17 +7636,21 @@ static void DrawModals(IDEState& ide, bool& quit)
 
             std::ofstream pf(outPath);
             if (pf.is_open()) {
-                pf << "{\n  \"name\": \"" << pName << "\",\n  \"objects\": [\n";
-                bool first = true;
+                pf << "{\n  \"name\": \"" << pName << "\",\n";
+                pf << "  \"objects\": [\n";
+
+                bool firstObj = true;
                 glm::vec3 basePos(0.f);
                 bool basePosSet = false;
                 std::shared_lock<std::shared_mutex> lock(g_sceneMutex);
+
                 for (auto& nm : objNames) {
                     auto it = g_namedObjects.find(nm);
                     if (it == g_namedObjects.end()) continue;
                     BaseObject* obj = it->second;
 
-                    // Determine base position from the first object
+                    // Use the first object's world position as the prefab origin,
+                    // so all other transforms are stored relative to it.
                     if (!basePosSet) {
                         basePos = glm::vec3(obj->transform.position.x,
                             obj->transform.position.y,
@@ -6502,49 +7658,94 @@ static void DrawModals(IDEState& ide, bool& quit)
                         basePosSet = true;
                     }
 
-                    // Determine object type
+                    // Determine object type via RTTI — robust, never wrong.
                     std::string objType = "sphere";
-                    if (dynamic_cast<Plane*>(obj)) objType = "plane";
+                    if (dynamic_cast<Plane*>(obj))                 objType = "plane";
                     else if (dynamic_cast<HonHengine::Rectangle*>(obj)) objType = "rect";
-                    else if (!obj->tag.empty()) {
-                        if (obj->tag.rfind("OBJ:", 0) == 0) objType = "obj";
-                        else if (obj->tag.rfind("GLTF:", 0) == 0) objType = "gltf";
-                    }
+                    else if (obj->tag.rfind("OBJ:", 0) == 0)           objType = "obj";
+                    else if (obj->tag.rfind("GLTF:", 0) == 0)           objType = "gltf";
 
-                    if (!first) pf << ",\n";
-                    first = false;
-                    // Store positions relative to the first object (prefab origin)
-                    pf << "    {\"name\": \"" << nm << "\","
-                        << "\"type\":\"" << objType << "\","
-                        << "\"px\":" << (obj->transform.position.x - basePos.x)
-                        << ",\"py\":" << (obj->transform.position.y - basePos.y)
-                        << ",\"pz\":" << (obj->transform.position.z - basePos.z)
-                        << ",\"sx\":" << obj->transform.scale.x
-                        << ",\"sy\":" << obj->transform.scale.y
-                        << ",\"sz\":" << obj->transform.scale.z
-                        << ",\"rw\":" << obj->transform.rotation.w
-                        << ",\"rx\":" << obj->transform.rotation.x
-                        << ",\"ry\":" << obj->transform.rotation.y
-                        << ",\"rz\":" << obj->transform.rotation.z
-                        << ",\"visible\":" << (obj->visible ? "true" : "false");
+                    if (!firstObj) pf << ",\n";
+                    firstObj = false;
+
+                    pf << "    {\n";
+                    pf << "      \"name\": \"" << nm << "\",\n";
+                    pf << "      \"type\": \"" << objType << "\",\n";
                     if (objType == "obj" || objType == "gltf") {
                         std::string ap = obj->tag.substr(objType == "obj" ? 4 : 5);
-                        pf << ",\"assetPath\":\"" << ap << "\"";
+                        pf << "      \"assetPath\": \"" << ap << "\",\n";
                     }
-                    if (obj->material)
-                        pf << ",\"cr\":" << (int)obj->material->color.r
-                        << ",\"cg\":" << (int)obj->material->color.g
-                        << ",\"cb\":" << (int)obj->material->color.b
-                        << ",\"ca\":" << (int)obj->material->color.a;
-                    pf << "}";
+                    pf << "      \"visible\": " << (obj->visible ? "true" : "false") << ",\n";
+                    pf << "      \"tag\": " << JStr(obj->tag) << ",\n";
+
+                    // Store position relative to prefab origin (first object).
+                    Transform relTransform = obj->transform;
+                    relTransform.position.x -= basePos.x;
+                    relTransform.position.y -= basePos.y;
+                    relTransform.position.z -= basePos.z;
+                    WriteTransform(pf, relTransform, 6);
+                    pf << ",\n";
+
+                    if (obj->material) WriteMaterial(pf, obj->material, 6);
+                    pf << ",\n";
+                    pf << "      \"shaderName\": " << JStr(obj->render.shaderName) << ",\n";
+
+                    if (!obj->scripts.empty()) {
+                        pf << "      \"scripts\": [\n";
+                        for (size_t si = 0; si < obj->scripts.size(); ++si) {
+                            WriteScript(pf, obj->scripts[si], 8);
+                            if (si + 1 < obj->scripts.size()) pf << ",";
+                            pf << "\n";
+                        }
+                        pf << "      ],\n";
+                    }
+
+                    auto rbIt = ide.rigidBodies.find(obj);
+                    if (rbIt != ide.rigidBodies.end()) {
+                        WriteRigidBody(pf, rbIt->second, 6);
+                        pf << ",\n";
+                    }
+
+                    auto ctIt = ide.collisionTriggers.find(obj);
+                    if (ctIt != ide.collisionTriggers.end()) {
+                        WriteCollisionTrigger(pf, ctIt->second, 6);
+                        pf << ",\n";
+                    }
+
+                    if (obj->animator.active()) {
+                        WriteAnimator(pf, obj->animator, 6);
+                        pf << ",\n";
+                    }
+
+                    WriteRenderComponent(pf, obj->render, ide.renderer->texManager, 6);
+                    pf << "\n    }";
+                }
+
+                pf << "\n  ],\n";
+
+                // ── Lights ───────────────────────────────────────────────────
+                pf << "  \"lights\": [\n";
+                bool firstLight = true;
+                for (auto& nm : lightNames) {
+                    for (auto& lt : ide.lights) {
+                        if (lt.name == nm) {
+                            if (!firstLight) pf << ",\n";
+                            firstLight = false;
+                            WriteLightToJson(pf, lt, 4);
+                            break;
+                        }
+                    }
                 }
                 pf << "\n  ]\n}\n";
                 pf.close();
-                auto& rec = ide.assetDb.Register(outPath);
+
+                ide.assetDb.Register(outPath);
                 ide.assetDb.Save(ide.HonAssetsPath());
                 ide.assetBrowser.dirDirty = true;
-                ide.toastMgr.Push("Prefab saved: " + outPath + " (" +
-                    std::to_string(objNames.size()) + " objects)", Toast::Success, 3.f);
+                ide.toastMgr.Push("Prefab saved: " + pName + "  (" +
+                    std::to_string(objNames.size()) + " objects, " +
+                    std::to_string(lightNames.size()) + " lights)", Toast::Success, 3.f);
+                ide.log.push(ConsoleLog::REPLY_OK, "[Prefab] Saved: " + outPath);
             }
             else {
                 ide.log.push(ConsoleLog::REPLY_ERR, "[Prefab] Could not write: " + outPath);
@@ -7743,8 +8944,6 @@ void MainScene_Run() {
     //  window is created.  The chosen project root / name flow in via the two
     //  strings below.
     // ═══════════════════════════════════════════════════════════════════════════
-    std::string g_projectRoot;   // e.g. "C:/Users/.../Documents/HonHengine/MyGame"
-    std::string g_projectName;   // e.g. "MyGame"
     {
         // ── Create a small launcher window ────────────────────────────────────
         SDL_Window* launchWin = SDL_CreateWindow(
@@ -7927,7 +9126,7 @@ void MainScene_Run() {
 
     Settings::canvasWidth = 900; Settings::canvasHeight = 600;
     SceneManager* sm = new SceneManager();
-    Camera* camera = new Camera(Vector3(0.0, 5.0, 15.0), Quaternion::LookRotation(Vector3(0, 0, -1)));
+    Camera* camera = new Camera(Vector3(0.0, 5.0, 15.0), Quaternion::LookRotation(Vector3(0, 0, 1)));
     sm->cameras->push_back(camera);
     sm->currentCamera = camera;
     GPURenderer renderer(sm, win, ctx);

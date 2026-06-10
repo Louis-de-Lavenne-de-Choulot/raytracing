@@ -230,6 +230,7 @@
     <ClInclude Include="ide_camera_bookmarks.h" />
     <ClInclude Include="ide_editor_settings.h" />
     <ClInclude Include="ide_global_search.h" />
+    <ClInclude Include="ide_global_values.h" />
     <ClInclude Include="ide_icons.h" />
     <ClInclude Include="ide_layout.h" />
     <ClInclude Include="ide_package_manager.h" />

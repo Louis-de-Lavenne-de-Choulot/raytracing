@@ -9,6 +9,7 @@
 //   - Sub-objects inside a compound asset (meshes, animations)
 //   - Script import with recompilation flag
 //   - Database save / load (.honassets sidecar files)
+//   - Extended type system: 100+ file extensions across 20 categories
 // =============================================================================
 
 #include <string>
@@ -63,38 +64,149 @@ struct AssetGUID {
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Asset types
+//  NOTE: Do NOT reorder or remove existing values — they are serialised as
+//  integers in .honassets files.  Append new values only (before _Count).
 // ─────────────────────────────────────────────────────────────────────────────
 enum class AssetType {
+    // ── Original types (v1) — must stay at these indices ──
     Unknown = 0,
-    Texture,
-    Model,          // .obj / .gltf / .glb
-    Audio,
-    Script,         // .cpp / .h / .lua / .py
-    Scene,          // .honscene
-    Material,
-    Prefab,
-    Font,
-    ShaderSource,
-    Other
+    Texture = 1,
+    Model = 2,   // .obj / .gltf / .glb / .fbx / .dae
+    Audio = 3,
+    Script = 4,   // .cpp / .lua / .py / .js / .ts …
+    Scene = 5,   // .honscene
+    Material = 6,   // .honmat
+    Prefab = 7,   // .honprefab
+    Font = 8,   // .ttf / .otf / .woff …
+    ShaderSource = 9,   // .vert / .frag / .glsl / .hlsl …
+    Shader = 10,  // .honshader
+    Other = 11,
+    // ── Extended types (v2) — appended; do not reorder above ──
+    TextDocument = 12,  // .txt / .md / .rst / .log / .csv …
+    Header = 13,  // .h / .hpp / .hxx / .inl …
+    Config = 14,  // .json / .yaml / .toml / .ini / .xml …
+    Archive = 15,  // .zip / .rar / .7z / .tar / .gz …
+    Executable = 16,  // .exe / .dll / .so / .dylib / .bin …
+    Video = 17,  // .mp4 / .avi / .mov / .mkv …
+    Document = 18,  // .pdf / .docx / .xlsx / .odt …
+    CAD = 19,  // .blend / .stl / .step / .3ds / .vox …
 };
 
 inline AssetType ExtToAssetType(const std::string& ext) {
     std::string e = ext;
     for (auto& c : e) c = (char)std::tolower((unsigned char)c);
-    if (e == ".png" || e == ".jpg" || e == ".jpeg" || e == ".bmp" ||
-        e == ".tga" || e == ".hdr" || e == ".exr")   return AssetType::Texture;
+
+    // ── Textures ──────────────────────────────────────────────────────────
+    if (e == ".png" || e == ".jpg" || e == ".jpeg" || e == ".hdr" ||
+        e == ".gif" || e == ".apng" || e == ".webp" || e == ".tiff" ||
+        e == ".tif" || e == ".dds" || e == ".ktx" || e == ".pvr" ||
+        e == ".astc" || e == ".psd" || e == ".xcf" || e == ".kra" ||
+        e == ".svg" || e == ".eps" || e == ".ai" || e == ".cdr" ||
+        e == ".raw" || e == ".cr2" || e == ".nef" || e == ".arw" ||
+        e == ".dng")
+        return AssetType::Texture;
+
+    // Textures that also matched in v1 (kept here for clarity)
+    if (e == ".bmp" || e == ".tga" || e == ".exr")
+        return AssetType::Texture;
+
+    // ── Models / 3D (non-CAD) ─────────────────────────────────────────────
     if (e == ".obj" || e == ".gltf" || e == ".glb" ||
-        e == ".fbx" || e == ".dae")                   return AssetType::Model;
-    if (e == ".wav" || e == ".mp3" || e == ".ogg" ||
-        e == ".flac" || e == ".aiff")                  return AssetType::Audio;
-    if (e == ".cpp" || e == ".h" || e == ".hpp" ||
-        e == ".lua" || e == ".py" || e == ".cs")     return AssetType::Script;
-    if (e == ".honscene")                              return AssetType::Scene;
-    if (e == ".honmat")                                return AssetType::Material;
-    if (e == ".honprefab")                             return AssetType::Prefab;
-    if (e == ".ttf" || e == ".otf")                   return AssetType::Font;
-    if (e == ".glsl" || e == ".vert" || e == ".frag" ||
-        e == ".hlsl" || e == ".wgsl")                  return AssetType::ShaderSource;
+        e == ".fbx" || e == ".dae")
+        return AssetType::Model;
+
+    // ── CAD / DCC ─────────────────────────────────────────────────────────
+    if (e == ".blend" || e == ".3ds" || e == ".stl" || e == ".step" ||
+        e == ".stp" || e == ".iges" || e == ".igs" || e == ".vrm" ||
+        e == ".vox")
+        return AssetType::CAD;
+
+    // ── Audio ─────────────────────────────────────────────────────────────
+    if (e == ".wav" || e == ".mp3" || e == ".ogg" || e == ".aiff" ||
+        e == ".aac" || e == ".m4a" || e == ".opus" || e == ".mid" ||
+        e == ".midi" || e == ".xm" || e == ".mod" || e == ".it" ||
+        e == ".s3m" || e == ".flac" || e == ".wma" || e == ".dsd" ||
+        e == ".dff" || e == ".dsf")
+        return AssetType::Audio;
+
+    // ── Video ─────────────────────────────────────────────────────────────
+    if (e == ".mp4" || e == ".avi" || e == ".mov" || e == ".mkv" ||
+        e == ".webm" || e == ".flv" || e == ".m4v" || e == ".3gp" ||
+        e == ".ogv" || e == ".mpeg" || e == ".mpg" || e == ".m2ts" ||
+        e == ".vob" || e == ".wmv" || e == ".asf" || e == ".rm" ||
+        e == ".rmvb")
+        return AssetType::Video;
+
+    // ── Scripts (language source files) ───────────────────────────────────
+    if (e == ".cpp" || e == ".cc" || e == ".cxx" || e == ".c++" ||
+        e == ".ixx" || e == ".c" || e == ".cs" ||
+        e == ".lua" || e == ".py" || e == ".js" || e == ".ts" ||
+        e == ".jsx" || e == ".tsx" || e == ".rb" || e == ".pl" ||
+        e == ".pm" || e == ".php" || e == ".go" || e == ".rs" ||
+        e == ".swift" || e == ".kt" || e == ".kts" || e == ".java" ||
+        e == ".groovy" || e == ".scala" || e == ".clj" || e == ".cljc" ||
+        e == ".edn" || e == ".sh" || e == ".bat" || e == ".ps1" ||
+        e == ".ipp" || e == ".tpp")
+        return AssetType::Script;
+
+    // ── Headers ───────────────────────────────────────────────────────────
+    if (e == ".h" || e == ".hpp" || e == ".hxx" || e == ".hh" ||
+        e == ".inl")
+        return AssetType::Header;
+
+    // ── Shaders ───────────────────────────────────────────────────────────
+    if (e == ".glsl" || e == ".vert" || e == ".frag" || e == ".geom" ||
+        e == ".tesc" || e == ".tese" || e == ".comp" || e == ".hlsl" ||
+        e == ".metal" || e == ".wgsl")
+        return AssetType::ShaderSource;
+
+    // ── Config / Data ─────────────────────────────────────────────────────
+    if (e == ".json" || e == ".yaml" || e == ".yml" || e == ".toml" ||
+        e == ".ini" || e == ".cfg" || e == ".conf" || e == ".properties" ||
+        e == ".xml" || e == ".xsd" || e == ".dtd" || e == ".xsl" ||
+        e == ".xslt" || e == ".plist" || e == ".lock" || e == ".env")
+        return AssetType::Config;
+
+    // ── Text / Documents ──────────────────────────────────────────────────
+    if (e == ".txt" || e == ".md" || e == ".rst" || e == ".tex" ||
+        e == ".log" || e == ".csv" || e == ".tsv" || e == ".rtf" ||
+        e == ".nfo" || e == ".sfv")
+        return AssetType::TextDocument;
+
+    // ── Office / Document formats ─────────────────────────────────────────
+    if (e == ".pdf" || e == ".doc" || e == ".docx" || e == ".xls" ||
+        e == ".xlsx" || e == ".ppt" || e == ".pptx" || e == ".odt" ||
+        e == ".ods" || e == ".odp" || e == ".odg" || e == ".epub" ||
+        e == ".mobi" || e == ".cbr" || e == ".cbz")
+        return AssetType::Document;
+
+    // ── Archives / Compressed ─────────────────────────────────────────────
+    if (e == ".zip" || e == ".rar" || e == ".7z" || e == ".tar" ||
+        e == ".gz" || e == ".bz2" || e == ".xz" || e == ".lz" ||
+        e == ".lzma" || e == ".zst" || e == ".tgz" || e == ".tbz2" ||
+        e == ".txz" || e == ".tlz" || e == ".deb" || e == ".rpm" ||
+        e == ".pkg" || e == ".dmg" || e == ".iso" || e == ".img")
+        return AssetType::Archive;
+
+    // ── Executables / Libraries ───────────────────────────────────────────
+    if (e == ".exe" || e == ".dll" || e == ".so" || e == ".dylib" ||
+        e == ".lib" || e == ".a" || e == ".o" || e == ".obj" ||
+        e == ".out" || e == ".app" || e == ".msi" || e == ".bin" ||
+        e == ".elf" || e == ".com")
+        return AssetType::Executable;
+
+    // ── Fonts ─────────────────────────────────────────────────────────────
+    if (e == ".ttf" || e == ".otf" || e == ".woff" || e == ".woff2" ||
+        e == ".eot" || e == ".pfa" || e == ".pfb" || e == ".pfm" ||
+        e == ".afm")
+        return AssetType::Font;
+
+    // ── Engine types ──────────────────────────────────────────────────────
+    if (e == ".honscene")  return AssetType::Scene;
+    if (e == ".honmat")    return AssetType::Material;
+    if (e == ".honprefab") return AssetType::Prefab;
+    if (e == ".honshader") return AssetType::Shader;
+
     return AssetType::Other;
 }
 
@@ -108,7 +220,17 @@ inline const char* AssetTypeName(AssetType t) {
     case AssetType::Material:     return "Material";
     case AssetType::Prefab:       return "Prefab";
     case AssetType::Font:         return "Font";
-    case AssetType::ShaderSource: return "Shader";
+    case AssetType::ShaderSource: return "Shader Source";
+    case AssetType::Shader:       return "Shader";
+        // Extended
+    case AssetType::TextDocument: return "Text";
+    case AssetType::Header:       return "Header";
+    case AssetType::Config:       return "Config";
+    case AssetType::Archive:      return "Archive";
+    case AssetType::Executable:   return "Executable";
+    case AssetType::Video:        return "Video";
+    case AssetType::Document:     return "Document";
+    case AssetType::CAD:          return "CAD";
     default:                      return "Other";
     }
 }
@@ -116,15 +238,25 @@ inline const char* AssetTypeName(AssetType t) {
 inline const char* AssetTypeIcon(AssetType t) {
     switch (t) {
     case AssetType::Texture:      return "\xef\x80\xbe";  // fa-image
-    case AssetType::Model:        return "\xef\x86\xb2";  // fa-cube
+    case AssetType::Model:        return "\xef\x86\xb2";  // fa-cubes
     case AssetType::Audio:        return "\xef\x80\xa1";  // fa-music
     case AssetType::Script:       return "\xef\x84\xa0";  // fa-terminal
-    case AssetType::Scene:        return "\xef\x81\xbb";  // fa-tree
-    case AssetType::Material:     return "\xef\x83\xab";  // fa-lightbulb
-    case AssetType::Prefab:       return "\xef\x86\xb2";  // fa-cubes (package / prefab)
+    case AssetType::Scene:        return "\xef\x86\xbb";  // fa-tree
+    case AssetType::Material:     return "\xef\x83\xab";  // fa-lightbulb-o
+    case AssetType::Prefab:       return "\xef\x86\xb2";  // fa-cubes
     case AssetType::Font:         return "\xef\x80\xb1";  // fa-font
     case AssetType::ShaderSource: return "\xef\x81\x9b";  // fa-code
-    default:                      return "\xef\x85\x9b";  // fa-file
+    case AssetType::Shader:       return "\xef\x81\x9b";  // fa-code
+        // Extended
+    case AssetType::TextDocument: return "\xef\x85\x9c";  // fa-file-text-o
+    case AssetType::Header:       return "\xef\x85\xa6";  // fa-puzzle-piece
+    case AssetType::Config:       return "\xef\x80\x93";  // fa-cog
+    case AssetType::Archive:      return "\xef\x86\x9e";  // fa-archive
+    case AssetType::Executable:   return "\xef\x84\xa7";  // fa-bolt
+    case AssetType::Video:        return "\xef\x80\x88";  // fa-film
+    case AssetType::Document:     return "\xef\x8c\x81";  // fa-file-pdf-o
+    case AssetType::CAD:          return "\xef\x86\xb2";  // fa-cubes (3D)
+    default:                      return "\xef\x85\x9b";  // fa-file-o
     }
 }
 
@@ -359,7 +491,7 @@ struct AssetDatabase {
     bool Save(const std::string& filepath) const {
         std::ofstream f(filepath);
         if (!f.good()) return false;
-        f << "# HonHon Asset Database v1\n";
+        f << "# HonHon Asset Database v2\n";
         f << "count=" << records.size() << "\n";
         for (auto& [gstr, rec] : records) {
             f << "[asset]\n";
@@ -526,7 +658,7 @@ inline bool DrawImportSettingsPanel(AssetRecord& rec) {
         if (ImGui::Combo("Filter mode##tex", &ts.filterMode, kFilt, 3)) changed = true;
         if (ImGui::DragInt("Anisotropy##tex", &ts.anisotropy, 1, 1, 16)) changed = true;
     }
-    else if (rec.type == AssetType::Model) {
+    else if (rec.type == AssetType::Model || rec.type == AssetType::CAD) {
         auto& ms = rec.modelSettings;
         ImGui::SeparatorText("Model Import Settings");
         if (ImGui::DragFloat("Import scale##mod", &ms.importScale, 0.01f, 0.001f, 100.f)) changed = true;
@@ -564,11 +696,20 @@ inline bool DrawImportSettingsPanel(AssetRecord& rec) {
         static const char* kFmt[] = { "PCM","Vorbis","ADPCM" };
         if (ImGui::Combo("Compression##aud", &as.compressionFmt, kFmt, 3)) changed = true;
     }
-    else if (rec.type == AssetType::Script) {
+    else if (rec.type == AssetType::Script || rec.type == AssetType::Header) {
         auto& ss = rec.scriptSettings;
         ImGui::SeparatorText("Script Import Settings");
         if (ImGui::Checkbox("Auto-recompile on save##scr", &ss.autoRecompile)) changed = true;
-        if (ImGui::Checkbox("Treat as header##scr", &ss.treatAsHeader)) changed = true;
+        if (rec.type == AssetType::Header) {
+            // Headers are always treated as headers — lock the checkbox on and grey it out
+            ImGui::BeginDisabled();
+            bool locked = true;
+            ImGui::Checkbox("Treat as header##scr", &locked);
+            ImGui::EndDisabled();
+        }
+        else {
+            if (ImGui::Checkbox("Treat as header##scr", &ss.treatAsHeader)) changed = true;
+        }
         char cmdBuf[256]; strncpy_s(cmdBuf, sizeof(cmdBuf), ss.compileCommand.c_str(), sizeof(cmdBuf) - 1);
         cmdBuf[sizeof(cmdBuf) - 1] = '\0';
         if (ImGui::InputText("Custom compile cmd##scr", cmdBuf, sizeof(cmdBuf))) {

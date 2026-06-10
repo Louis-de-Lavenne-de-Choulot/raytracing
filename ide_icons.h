@@ -9,6 +9,7 @@
 // Commonly used icons — add more as needed from:
 // https://fontawesome.com/icons?s=solid&f=classic
 #define ICON_FA_CIRCLE_INFO "\xef\x84\x9a"   // f05a
+#define ICON_FA_HOME		 "\xef\x80\x88"   // f015
 #define ICON_FA_LOCK         "\xef\x80\xa3"   // f023
 #define ICON_FA_LOCK_OPEN    "\xef\x80\xa4"   // f09c
 #define ICON_FA_UNLOCK       "\xef\x80\xa4"   // f09c
@@ -36,6 +37,7 @@
 #define ICON_FA_CAMERA       "\xef\x80\xb0"   // f030
 #define ICON_FA_CIRCLE_DOT   "\xef\x84\x92"   // f192 (point light)
 #define ICON_FA_ARROWS_ALT   "\xef\x82\xb2"   // f0b2 (move)
+#define ICON_FA_ARROW_LEFT           "\xef\x81\x93"   // f060 (←)
 #define ICON_FA_ROTATE       "\xef\x9e\xb9"   // f7b9 (rotate)
 #define ICON_FA_EXPAND       "\xef\x81\x9e"   // f065 (scale)
 #define ICON_FA_PLUS         "\xef\x81\xa7"   // f067
