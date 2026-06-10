@@ -12,6 +12,15 @@ namespace HonHengine
 {
     class TextureManager
     {
+
+    private:
+
+        struct Entry {
+            GLuint  id = 0;
+            Texture desc;
+        };
+
+        std::unordered_map<std::string, Entry> textures;
     public:
         TextureManager() = default;
         ~TextureManager() { clear(); }
@@ -41,20 +50,17 @@ namespace HonHengine
         // Return the raw GL handle (0 if not loaded).
         GLuint get(const std::string& name) const;
 
+        // Return the file path of a loaded texture (empty string if not found)
+        std::string getPath(const std::string& name) const {
+            auto it = textures.find(name);
+            return (it != textures.end()) ? it->second.desc.path : "";
+        }
+
         // Return the stored descriptor (useful for reading tiling/wrap settings).
         const Texture* getDescriptor(const std::string& name) const;
 
         // Free all GPU resources.
         void clear();
-
-    private:
-
-        struct Entry {
-            GLuint  id = 0;
-            Texture desc;
-        };
-
-        std::unordered_map<std::string, Entry> textures;
     };
 
 } // namespace HonHengine

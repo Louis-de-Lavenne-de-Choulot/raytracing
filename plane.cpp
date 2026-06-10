@@ -6,11 +6,12 @@
 
 namespace HonHengine
 {
-    Plane::Plane(Vector3 scale, Vector3 position, Quaternion rotation, Material* material)
-        : BaseObject(scale, position, rotation, material)
+    Plane::Plane(Vector3 scale, Vector3 position, Quaternion rotation, Material* material,
+                 int segmentsX, int segmentsZ)
+        : BaseObject(scale, position, rotation, material),
+          VPlane(segmentsX, segmentsZ, material)
     {
-        std::vector<Vertice>  vts(this->vertices.begin(), this->vertices.end());
-        std::vector<Triangle> trs(this->triangles.begin(), this->triangles.end());
+        std::vector<Vertice> vts(VPlane::vertices.begin(), VPlane::vertices.end());
 
         if (material)
         {
@@ -23,11 +24,11 @@ namespace HonHengine
                 v.vColor = col;
         }
 
-        for (Triangle& triangle : trs)
+        for (Triangle& triangle : VPlane::triangles)
             triangle.material = material;
 
         this->setVertices(vts);
-        this->setTriangles(trs);
+        this->setTriangles(VPlane::triangles);
         type = PLANE;
     }
-};
+}

@@ -27,7 +27,8 @@ namespace HonHengine
     // ─────────────────────────────────────────────────────────────────────────
     struct BaseObject
     {
-        // ── Core data (legacy pipeline) ───────────────────────────────────────
+        virtual ~BaseObject() = default;
+
         HonHengine::Transform        transform;
         Material* material = nullptr;
         std::vector<Vertice>      bVertices;
@@ -63,6 +64,19 @@ namespace HonHengine
 
         void setVertices(std::vector<Vertice> vertices) { bVertices = std::move(vertices); }
         void setTriangles(std::vector<Triangle> triangles) { bTriangles = std::move(triangles); }
+
+        void refreshVertexColors() {
+            if (!material) return;
+
+            Vector3 col(
+                material->color.r / 255.0,
+                material->color.g / 255.0,
+                material->color.b / 255.0);
+
+            for (Vertice& v : bVertices) {
+                v.vColor = col;
+            }
+        }
     };
 
 } // namespace HonHengine

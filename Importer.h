@@ -181,6 +181,7 @@ namespace HonHengine
             res.albedoTexKey = albedoKey;
 
             BaseObject* obj = new BaseObject();
+            obj->type = ObjectType::GLTF_MESH;
             obj->render.shaderName = "skinned";
             obj->render.vertexStride = sizeof(SkinnedVertex);
             obj->render.layout = SkinnedVertex::layout();

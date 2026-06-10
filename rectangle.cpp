@@ -6,14 +6,13 @@
 
 namespace HonHengine
 {
-    Rectangle::Rectangle(Vector3 scale, Vector3 position, Quaternion rotation, Material* material)
-        : BaseObject(scale, position, rotation, material)
+    Rectangle::Rectangle(Vector3 scale, Vector3 position, Quaternion rotation, Material* material,
+                         int segmentsX, int segmentsY, int segmentsZ)
+        : BaseObject(scale, position, rotation, material),
+          VRectangle(segmentsX, segmentsY, segmentsZ, material)
     {
-        std::vector<Vertice>  vts(this->vertices.begin(), this->vertices.end());
-        std::vector<Triangle> trs(this->triangles.begin(), this->triangles.end());
+        std::vector<Vertice> vts(VRectangle::vertices.begin(), VRectangle::vertices.end());
 
-        // Apply material color to every vertex so the built-in batcher
-        // (which reads vColor, not material->color) renders correctly.
         if (material)
         {
             Vector3 col(
@@ -25,12 +24,11 @@ namespace HonHengine
                 v.vColor = col;
         }
 
-        // Assign material to every triangle (two triangles per face).
-        for (Triangle& triangle : trs)
-            triangle.material = material;
+        for (Triangle& tri : VRectangle::triangles)
+            tri.material = material;
 
         this->setVertices(vts);
-        this->setTriangles(trs);
+        this->setTriangles(VRectangle::triangles);
         type = RECTANGLE;
     }
 }

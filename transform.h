@@ -28,22 +28,25 @@ namespace HonHengine {
 
         Vector3 left() {
             Vector3 fwd = forward();
+            // Flatten to XZ plane for horizontal strafe
             Vector3 flat(fwd.x, 0, fwd.z);
             double len = flat.magnitude();
             if (len > 0.0001) flat = flat * (1.0 / len);
             else flat = absForward;
-            return absUP.cross(flat);
+            // left = cross(flat, up)  (where up is (0,1,0))
+            return flat.cross(absUP);
         }
 
         Vector3 right() {
-            Vector3 r = left();
-            return Vector3(-r.x, -r.y, -r.z);
+            // right = -left
+            Vector3 l = left();
+            return Vector3(-l.x, -l.y, -l.z);
         }
 
         Vector3 up() {
             Vector3 fwd = forward();
             Vector3 rgt = right();
-            return rgt.cross(fwd);
+            return fwd.cross(rgt);
         }
 
         void Rotate(Vector3 axis, double angle) {

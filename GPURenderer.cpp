@@ -106,7 +106,7 @@ namespace HonHengine
         glDepthFunc(GL_LESS);
         glEnable(GL_CULL_FACE);
         glCullFace(GL_BACK);
-        glFrontFace(GL_CW);
+        glFrontFace(GL_CCW);
         glViewport(0, 0, Settings::canvasWidth, Settings::canvasHeight);
 
         shaderLib.build();
@@ -143,7 +143,7 @@ namespace HonHengine
         glDepthFunc(GL_LESS);
         glEnable(GL_CULL_FACE);
         glCullFace(GL_BACK);
-        glFrontFace(GL_CW);
+        glFrontFace(GL_CCW);
         glViewport(0, 0, Settings::canvasWidth, Settings::canvasHeight);
 
         shaderLib.build();
@@ -395,6 +395,11 @@ namespace HonHengine
         shaderLib.AddShader(name, vertSrc, fragSrc);
     }
 
+    GLuint GPURenderer::GetShader(const std::string& name) const
+    {
+        return shaderLib.GetShader(name);
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     //  FlushGLErrors
     // ─────────────────────────────────────────────────────────────────────────
@@ -466,14 +471,11 @@ namespace HonHengine
         auto& q = cam->transform.rotation;
         glm::quat camQuat(
             static_cast<float>(q.w),
-            static_cast<float>(-q.x),
-            static_cast<float>(-q.y),
-            static_cast<float>(-q.z));
+            static_cast<float>(q.x),
+            static_cast<float>(q.y),
+            static_cast<float>(q.z));
 
-        glm::quat flipZ = glm::quat(0.0f, 0.0f, 1.0f, 0.0f);
-        glm::quat finalQ = camQuat * flipZ;
-
-        glm::mat4 rot = glm::mat4_cast(finalQ);
+        glm::mat4 rot = glm::mat4_cast(glm::conjugate(camQuat));
         glm::mat4 trans = glm::translate(glm::mat4(1.0f), -eye);
         return rot * trans;
     }
@@ -487,7 +489,9 @@ namespace HonHengine
             static_cast<float>(Settings::viewportHeight) * 0.5f,
             static_cast<float>(Settings::viewportDistance));
 
-        return glm::perspective(fovY, aspect, NEAR_PLANE, FAR_PLANE);
+        glm::mat4 proj = glm::perspective(fovY, aspect, NEAR_PLANE, FAR_PLANE);
+        proj[2] = -proj[2];
+        return proj;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -988,12 +992,16 @@ namespace HonHengine
 
                     // Get the material color for this object
                     Color matColor = (obj->material) ? obj->material->color : Color(255, 255, 255, 255);
+                    bool hasCustomShader = (obj->material && obj->material->customShaderProgram != 0)
+                        || !obj->render.shaderName.empty();
+
                     bool hasVertexColor = false;
-                    // Check if any vertex has a non-default color
-                    for (const Vertice& v : obj->bVertices) {
-                        if (v.vColor.x != 0 || v.vColor.y != 0 || v.vColor.z != 0) {
-                            hasVertexColor = true;
-                            break;
+                    if (!hasCustomShader) {
+                        for (const Vertice& v : obj->bVertices) {
+                            if (v.vColor.x != 0 || v.vColor.y != 0 || v.vColor.z != 0) {
+                                hasVertexColor = true;
+                                break;
+                            }
                         }
                     }
 
@@ -1048,7 +1056,17 @@ namespace HonHengine
 
                     for (BaseObject* obj : group) {
                         const Material* mat = obj->material;
-                        GLuint desired = (mat && mat->customShaderProgram != 0) ? mat->customShaderProgram : defaultProgram;
+                        GLuint desired = defaultProgram;
+                        if (mat && mat->customShaderProgram != 0)
+                            desired = mat->customShaderProgram;
+                        else if (!obj->render.shaderName.empty())
+                        {
+                            GLuint named = shaderLib.GetShader(obj->render.shaderName);
+                            if (named) desired = named;
+                        }
+                        else {
+							desired = defaultProgram;
+                        }
 
                         if (desired != currentProgram || mat != lastMat) {
                             if (!batch.empty()) { drawPass(currentProgram, batch, depthWrite, blend); batch.clear(); }

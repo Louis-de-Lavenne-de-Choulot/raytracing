@@ -40,6 +40,8 @@ namespace HonHengine
         void RegisterShader(const std::string& name,
             const char* vertSrc,
             const char* fragSrc);
+        GLuint GetShader(const std::string& name) const;
+
 
         // ── Per-frame API (the only calls a scene loop needs) ─────────────────
         void Render(float dt = 0.0f, GLuint fbo = 0);  // clear + draw all scene objects; dt drives animators

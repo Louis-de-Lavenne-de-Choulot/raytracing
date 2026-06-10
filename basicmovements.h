@@ -319,8 +319,8 @@ namespace HonHengine {
                     if (sdlKeyState[sdlKeys.left])     pos = pos - rgt * step;
 
                     // Dedicated world-space up/down keys.
-                    if (sdlKeyState[godModeUpKey])   pos.y -= step;
-                    if (sdlKeyState[godModeDownKey]) pos.y += step;
+                    if (sdlKeyState[godModeUpKey])   pos.y += step;
+                    if (sdlKeyState[godModeDownKey]) pos.y -= step;
                     // (eyeHeight lock and terrain snap are intentionally skipped)
                 }
                 else
@@ -432,7 +432,7 @@ namespace HonHengine {
             float pr = _pitch * (3.14159265f / 180.f);
             float hy = yr * 0.5f, hp = pr * 0.5f;
             Quaternion qY(std::cos(hy), 0.f, std::sin(hy), 0.f);
-            Quaternion qP(std::cos(hp), std::sin(hp), 0.f, 0.f);
+            Quaternion qP(std::cos(hp), -std::sin(hp), 0.f, 0.f); // negate pitch axis
             _sm->currentCamera->transform.rotation = (qY * qP).Normalized();
         }
     };
